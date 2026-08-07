@@ -3,6 +3,7 @@ import { AiService } from "./services/ai-service";
 import { ChatNoteService } from "./services/chat-note-service";
 import { ClippingPipeline } from "./services/clipping-pipeline";
 import { MermaidService } from "./services/mermaid-service";
+import { NoteOperationCoordinator } from "./services/note-operation-coordinator";
 import { PathRouter } from "./services/path-router";
 import { PluginDataManager } from "./services/plugin-data-manager";
 import { QuizNoteService } from "./services/quiz-note-service";
@@ -22,6 +23,7 @@ export default class KnowFlowPlugin extends Plugin {
   pipeline: ClippingPipeline;
   quizNotes: QuizNoteService;
   summaryNotes: SummaryNoteService;
+  private noteOperations: NoteOperationCoordinator;
   private dataManager: PluginDataManager;
 
   async onload(): Promise<void> {
@@ -42,9 +44,10 @@ export default class KnowFlowPlugin extends Plugin {
     this.chatNotes = new ChatNoteService(this.app, this.settings.chatConversationFolder);
     this.mermaid = new MermaidService(this.app, this.ai);
     this.router = new PathRouter(this.app, this.settings);
-    this.pipeline = new ClippingPipeline(this.app, this.settings, this.store, this.ai);
+    this.noteOperations = new NoteOperationCoordinator();
+    this.pipeline = new ClippingPipeline(this.app, this.settings, this.store, this.ai, this.noteOperations);
     this.quizNotes = new QuizNoteService(this.app, this.settings);
-    this.summaryNotes = new SummaryNoteService(this.app);
+    this.summaryNotes = new SummaryNoteService(this.app, this.noteOperations);
 
     this.registerView(KNOWFLOW_VIEW_TYPE, (leaf) => new KnowFlowSidebarView(leaf, this));
 

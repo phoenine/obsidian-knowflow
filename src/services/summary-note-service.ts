@@ -1,6 +1,7 @@
 import { TFile } from "obsidian";
 import type { App } from "obsidian";
 import { applySummaryFrontmatter, type SummaryFrontmatterData } from "./frontmatter-rules";
+import { NoteOperationCoordinator } from "./note-operation-coordinator";
 import { parseSummaryCallout, upsertSummaryCallout, type SummaryText } from "./summary-notes";
 
 /**
@@ -11,7 +12,10 @@ import { parseSummaryCallout, upsertSummaryCallout, type SummaryText } from "./s
  * is the only thing to look up.
  */
 export class SummaryNoteService {
-  constructor(private app: App) {}
+  constructor(
+    private app: App,
+    private noteOperations: NoteOperationCoordinator
+  ) {}
 
   /**
    * `meta` is omitted only by the one-off legacy-text migration in
@@ -19,12 +23,14 @@ export class SummaryNoteService {
    * structured fields to backfill into frontmatter.
    */
   async applySummary(file: TFile, text: SummaryText, meta?: SummaryFrontmatterData): Promise<void> {
-    const content = await this.app.vault.read(file);
-    const withFrontmatter = meta ? applySummaryFrontmatter(content, meta) : content;
-    const next = upsertSummaryCallout(withFrontmatter, text);
-    if (next !== content) {
-      await this.app.vault.modify(file, next);
-    }
+    await this.noteOperations.runExclusive(file.path, async () => {
+      const content = await this.app.vault.read(file);
+      const withFrontmatter = meta ? applySummaryFrontmatter(content, meta) : content;
+      const next = upsertSummaryCallout(withFrontmatter, text);
+      if (next !== content) {
+        await this.app.vault.modify(file, next);
+      }
+    });
   }
 
   async loadSummaryText(file: TFile): Promise<SummaryText | null> {

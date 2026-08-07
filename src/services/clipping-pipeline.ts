@@ -14,6 +14,7 @@ import {
   trimCodeFenceBody
 } from "./formatting-candidates";
 import { applyArticleFrontmatter, updateFrontmatterCategory } from "./frontmatter-rules";
+import { NoteOperationCoordinator } from "./note-operation-coordinator";
 import { loadUserSkillFile, loadSkill } from "./repair-skill";
 import { validateMarkdownIntegrity } from "./repair-validator";
 import { KnowledgeStore } from "./store";
@@ -43,7 +44,8 @@ export class ClippingPipeline {
     private app: App,
     private settings: KnowFlowSettings,
     private store: KnowledgeStore,
-    private ai: AiService
+    private ai: AiService,
+    private noteOperations: NoteOperationCoordinator
   ) {}
 
   updateSettings(settings: KnowFlowSettings): void {
@@ -51,6 +53,13 @@ export class ClippingPipeline {
   }
 
   async process(
+    file: TFile,
+    onProgress?: (step: string, status: "active" | "completed" | "skipped", info?: string) => void
+  ): Promise<void> {
+    return this.noteOperations.runExclusive(file.path, () => this.processExclusive(file, onProgress));
+  }
+
+  private async processExclusive(
     file: TFile,
     onProgress?: (step: string, status: "active" | "completed" | "skipped", info?: string) => void
   ): Promise<void> {
