@@ -146,14 +146,15 @@ export class KnowFlowSidebarView extends ItemView {
       streamingText,
       streamingReasoning,
       analysisCost,
+      sourceLabel: "Clipping",
       pipelineState,
       persistedPipeline,
       selectedCategory,
       statusText: this.getPipelineStatusText(pipelineState, persistedPipeline.status),
       recommendedActionLabel: displaySummary ? this.recommendedActionLabel(displaySummary.recommendedAction) : "--",
       renderMarkdownSummary: (parent, markdown) => void this.renderMarkdownSummary(parent, markdown, file.path),
-      onRefreshSummary: () => this.ensureClippingSummary(file, true),
-      onGenerateSummary: () => this.ensureClippingSummary(file, true),
+      onRefreshSummary: () => this.ensureSummary(file, true),
+      onGenerateSummary: () => this.ensureSummary(file, true),
       onRunPipeline: async () => {
         await this.runPipeline(file);
       },
@@ -172,7 +173,7 @@ export class KnowFlowSidebarView extends ItemView {
     this.renderComposer(root, context, file.basename, file);
   }
 
-  private async ensureClippingSummary(file: TFile, force: boolean): Promise<void> {
+  private async ensureSummary(file: TFile, force: boolean): Promise<void> {
     if (this.pendingSummaries.has(file.path)) return;
     if (!force && await this.readSummaryText(file)) return;
     this.pendingSummaries.add(file.path);
@@ -267,6 +268,10 @@ export class KnowFlowSidebarView extends ItemView {
     if (!file) return this.renderEmpty(root);
 
     const summary = this.getSummaryViewModel(file);
+    const summaryPending = this.pendingSummaries.has(file.path);
+    const summaryError = this.summaryErrors.get(file.path);
+    const streamingText = this.streamingSummaryTexts.get(file.path);
+    const streamingReasoning = this.streamingSummaryReasonings.get(file.path);
     const quiz = this.getQuizStats(file.path);
     const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
     const readingValue = this.getFrontmatterReadingValue(frontmatter) ?? (summary && summary.readingValue > 0 ? `${summary.readingValue}/5` : "--");
@@ -276,14 +281,26 @@ export class KnowFlowSidebarView extends ItemView {
       title: file.basename,
       readingValue,
       learningStatus,
-      summary,
+      summary: summaryPending ? null : summary,
+      summaryPending,
+      summaryError,
+      streamingText,
+      streamingReasoning,
+      analysisCost: estimateClippingAnalysisTokens(file),
+      sourceLabel: "文章",
       quiz,
       renderMarkdownSummary: (parent, markdown) => void this.renderMarkdownSummary(parent, markdown, file.path),
+      onRefreshSummary: () => this.ensureSummary(file, true),
+      onGenerateSummary: () => this.ensureSummary(file, true),
       onGenerateKnowledgeMap: () => void this.generateKnowledgeMap(file),
       onShowKnowledgePoints: () => new Notice("Knowledge Points will be implemented in V0.2"),
       onGenerateQuiz: () => void this.generateQuiz(file),
       onStartQuiz: () => void this.startQuiz(file)
     });
+
+    this.streamingSummaryContentEl = root.querySelector(".kf-streaming-text");
+    this.streamingSummaryReasoningHistoryEl = root.querySelector(".kf-streaming-reasoning-history");
+    this.streamingSummaryReasoningLatestEl = root.querySelector(".kf-streaming-reasoning-latest");
 
     this.renderComposer(root, context, file.basename, file);
   }

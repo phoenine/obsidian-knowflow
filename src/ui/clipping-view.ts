@@ -14,22 +14,26 @@ const CLIPPING_PIPELINE_STEPS = [
   "补全 Frontmatter"
 ];
 
-interface ClippingViewProps {
-  title: string;
+export interface SummaryCardProps {
   summary: NoteSummary | null;
   summaryPending: boolean;
   summaryError: string | undefined;
   streamingText?: string;
   streamingReasoning?: string;
   analysisCost: number;
+  sourceLabel: string;
+  renderMarkdownSummary: (parent: HTMLElement, markdown: string) => void;
+  onRefreshSummary: () => Promise<void>;
+  onGenerateSummary: () => Promise<void>;
+}
+
+interface ClippingViewProps extends SummaryCardProps {
+  title: string;
   pipelineState: PipelineUiState | undefined;
   persistedPipeline: PipelineStatus;
   selectedCategory: string;
   statusText: string;
   recommendedActionLabel: string;
-  renderMarkdownSummary: (parent: HTMLElement, markdown: string) => void;
-  onRefreshSummary: () => Promise<void>;
-  onGenerateSummary: () => Promise<void>;
   onRunPipeline: () => Promise<void>;
   onSelectCategory: (category: string) => void;
   onMoveCategory: (category: string) => Promise<void>;
@@ -53,7 +57,7 @@ export function renderClippingView(root: HTMLElement, props: ClippingViewProps):
   renderMoveCard(content, props);
 }
 
-function renderSummaryCard(content: HTMLElement, props: ClippingViewProps): void {
+export function renderSummaryCard(content: HTMLElement, props: SummaryCardProps): void {
   const summary = section(content, "kf-summary");
   let refreshButton!: HTMLButtonElement;
   cardHeader(summary, "sparkles", "AI Summary", (header) => {
@@ -117,16 +121,16 @@ function renderSummaryCard(content: HTMLElement, props: ClippingViewProps): void
       borderTop: "1px solid var(--background-modifier-border)",
       margin: "8px 0"
     });
-    text(summary, "正在根据当前 Clipping 生成摘要、阅读价值和分类建议。", "kf-muted");
+    text(summary, `正在根据当前 ${props.sourceLabel} 生成摘要、阅读价值和分类建议。`, "kf-muted");
     text(summary, `预计消耗：约 ${props.analysisCost}k tokens`, "kf-token-estimate");
   } else {
     text(
       summary,
       props.summaryPending
-        ? "正在根据当前 Clipping 生成摘要、阅读价值和分类建议。"
+        ? `正在根据当前 ${props.sourceLabel} 生成摘要、阅读价值和分类建议。`
         : props.summaryError
           ? `生成失败：${props.summaryError}`
-          : "当前 Clipping 尚未分析。点击生成摘要后，会保存摘要、阅读价值、推荐动作和建议目录，不写入 Markdown 正文。",
+          : `当前 ${props.sourceLabel} 尚未分析。点击生成摘要后，会保存摘要、阅读价值、推荐动作和建议目录。`,
       "kf-muted"
     );
     text(summary, `预计消耗：约 ${props.analysisCost}k tokens`, "kf-token-estimate");

@@ -1,14 +1,13 @@
-import type { NoteSummary, QuizStats } from "../types";
+import type { QuizStats } from "../types";
+import { renderSummaryCard, type SummaryCardProps } from "./clipping-view";
 import { applyActionLayout, applyMetricsLayout, button, cardHeader, metric, row, section, text } from "./dom";
 import { renderBrandShell } from "./shell";
 
-interface ArticleDetailViewProps {
+interface ArticleDetailViewProps extends SummaryCardProps {
   title: string;
   readingValue: string;
   learningStatus: string;
-  summary: NoteSummary | null;
   quiz: QuizStats;
-  renderMarkdownSummary: (parent: HTMLElement, markdown: string) => void;
   onGenerateKnowledgeMap: () => void;
   onShowKnowledgePoints: () => void;
   onGenerateQuiz: () => void;
@@ -26,13 +25,7 @@ export function renderArticleDetailView(root: HTMLElement, props: ArticleDetailV
   metric(metrics, "状态", props.learningStatus);
   metric(metrics, "知识点", "V0.2");
 
-  const summary = section(content, "kf-summary");
-  cardHeader(summary, "sparkles", "AI Summary");
-  if (props.summary) {
-    props.renderMarkdownSummary(summary, props.summary.summary);
-  } else {
-    text(summary, "当前文章还没有摘要。可以通过 Clipping 页面生成分析后移动到 Articles。", "kf-muted");
-  }
+  renderSummaryCard(content, props);
 
   const mapCard = section(content, "kf-knowledge-map");
   cardHeader(mapCard, "git-fork", "Knowledge Map", (header) => {
