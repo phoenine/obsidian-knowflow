@@ -955,7 +955,7 @@ V0.2 起提供 `Knowledge Point Detail` 页面，但不作为独立顶层导航�
 
 #### UI
 
-Daily Learning 不作为独立页面存在。V0.1 中，`Articles Overview` 是除 Clipping 和 Article Detail 外的默认页面，并先提供 Daily Learning、学习进度、Clipping 统计和 Articles 分类统计。今日任务合并到 Daily Learning 卡片内部展示；V0.2 中接入真实 Daily Learning 调度，用于呈现今日学习概况和任务列表。
+Daily Learning 不作为独立页面存在。`Task Overview` 是除 Clipping 和 Article Detail 外的默认页面，并提供今日任务、学习进度、Clipping 统计和 Articles 分类统计。V0.2 先接入基于未学习文章的真实每日计划；复习任务与薄弱知识点在相应数据源完成后接入同一任务列表。
 
 用户可执行：
 
@@ -966,7 +966,7 @@ Daily Learning 不作为独立页面存在。V0.1 中，`Articles Overview` 是�
 
 #### 版本范围
 
-V0.2 开始实现完整任务生成。V0.1 只在 `Articles Overview` 中展示基础统计和任务占位，不生成持久化每日任务。
+V0.2 按日、按目录范围随机抽取 `dailyNewArticleLimit` 篇未学习文章作为 `new_note`，并从已学习且已生成 Quiz 的文章中随机抽取 `dailyReviewLimit` 篇作为 `review_note`。当天计划和任务状态持久化，支持打开、完成、跳过和重新生成。配置数量变化时当天计划自动调整；候选不足时使用实际可用数量。`weak_point` 不使用占位数据，待 Knowledge Point 数据源可用后生成。
 
 ### 5.10 Feature 10：AI 知识搜索
 
@@ -1409,7 +1409,7 @@ knowflow/
 │   ├── ui/
 │   │   ├── RightSidebarView.tsx
 │   │   ├── ClippingMode.tsx
-│   │   ├── ArticlesOverview.tsx
+│   │   ├── TaskOverview.tsx
 │   │   ├── ArticleDetail.tsx
 │   │   ├── QuizView.tsx
 │   │   ├── ReviewPanel.tsx
@@ -1502,7 +1502,7 @@ Header
   当前视图标题 / 当前笔记或范围 / 索引状态 / 帮助入口
 
 Content
-  根据当前上下文展示 Clipping Pipeline、Articles Overview 或 Article Detail
+  根据当前上下文展示 Clipping Pipeline、Task Overview 或 Article Detail
 
 Composer
   仅在需要大模型对话的页面显示 AI 输入框、上下文 chip、模型选择、发送按钮
@@ -1517,9 +1517,9 @@ KnowFlow 应根据当前打开文章的路径判断默认页面，而不是始�
 | 当前上下文 | 默认页面 | 页面目标 |
 | --- | --- | --- |
 | `Clippings/**` | `Clipping` | 整理剪藏文章，生成 Frontmatter、阅读价值、AI Summary 和分类移动 |
-| 选中 `Articles/` 或其子文件夹 | `Articles Overview` | 展示该范围内的 Daily Learning 总览、学习进度、待学文章和复习任务 |
+| 选中 `Articles/` 或其子文件夹 | `Task Overview` | 展示该范围内的 Daily Learning 总览、学习进度、待学文章和复习任务 |
 | 打开 `Articles/**/*.md` 具体文章 | `Article Detail` | 学习当前文章，展示阅读价值、AI Summary、Quiz、Review 状态和 Chat |
-| 其他 Markdown 文件或无匹配上下文 | `Articles Overview` | 默认展示全局学习总览，不显示 Chat |
+| 其他 Markdown 文件或无匹配上下文 | `Task Overview` | 默认展示全局学习总览，不显示 Chat |
 
 `Clipping` 页面内容：
 
@@ -1538,7 +1538,7 @@ KnowFlow 应根据当前打开文章的路径判断默认页面，而不是始�
 - Review Queue
 - Knowledge Graph
 
-`Articles Overview` 页面内容：
+`Task Overview` 页面内容：
 
 按以下顺序展示：
 
@@ -1547,7 +1547,7 @@ KnowFlow 应根据当前打开文章的路径判断默认页面，而不是始�
 3. Clipping 统计：当前 `Clippings/` 中待整理文章数、已摘要数、高价值数
 4. Articles 分类统计：当前 Article 分类文章总数、已学习数、待读数，以及各分类行
 
-当用户选中 `Articles/` 或其子文件夹时，Articles 分类统计以该范围为主；当用户点击 Obsidian 中除 `Clippings/` 与 `Articles/` 具体文章外的任何文件时，默认展示全局 `Articles Overview`。
+当用户选中 `Articles/` 或其子文件夹时，Articles 分类统计以该范围为主；当用户点击 Obsidian 中除 `Clippings/` 与 `Articles/` 具体文章外的任何文件时，默认展示全局 `Task Overview`。
 
 主页统计数据源：
 
@@ -1557,7 +1557,7 @@ KnowFlow 应根据当前打开文章的路径判断默认页面，而不是始�
 - `本周阅读` 优先读取 Frontmatter 中的 `学习日期`
 - `Daily Learning` 的新文章和复习数量受设置页 `dailyNewArticleLimit` 和 `dailyReviewLimit` 限制
 
-`Articles Overview` 页面不显示：
+`Task Overview` 页面不显示：
 
 - 单篇文章 AI Summary
 - 单篇文章 Quiz 卡片
@@ -1583,7 +1583,7 @@ Article Detail 指标读取规则：
 
 Article Detail 中 `AI Summary`、`Knowledge Map` 和 `Quiz` 卡片标题前都应显示 icon，保持和 Clipping 页面卡片抬头一致。
 
-AI Composer 仅在 `Clipping` 和 `Article Detail` 页面保留。`Articles Overview` 是文件夹级学习仪表盘，不提供 LLM Chat 输入框。
+AI Composer 仅在 `Clipping` 和 `Article Detail` 页面保留。`Task Overview` 是文件夹级学习仪表盘，不提供 LLM Chat 输入框。
 
 ### 8.4 Header
 
@@ -1602,12 +1602,12 @@ V0.1 中，索引功能未完成时，`Build Index` 入口可以存在但置灰�
 Content 区根据当前 Obsidian 上下文展示对应页面，不提供顶部 Tab 导航：
 
 - `Clipping`：当前文章、AI Summary、阅读价值、推荐动作、建议目录、Clipping Pipeline、分类移动
-- `Articles Overview`：Daily Learning 总览、学习进度、今日任务
+- `Task Overview`：Daily Learning 总览、学习进度、今日任务
 - `Article Detail`：当前文章阅读价值、AI Summary、Knowledge Map / Mermaid、Quiz 卡片、Review 状态
 - `Quiz View`：从 Article Detail 的 Quiz 卡片进入，显示题目、提交答案、结果反馈
-- `Review View`：V0.2 起可从 Articles Overview 的复习任务进入，显示今日复习和薄弱知识点
+- `Review View`：V0.2 起可从 Task Overview 的复习任务进入，显示今日复习和薄弱知识点
 
-V0.1 默认页面由当前 Obsidian 上下文决定：`Clippings/**` 打开 `Clipping`；选中 `Articles/` 或子文件夹打开 `Articles Overview`；打开 `Articles/**/*.md` 具体文章打开 `Article Detail`。当用户在 `Article Detail` 点击「生成试题」后生成数据库化 Quiz；点击「开始测试」后进入 `Quiz View`。
+V0.1 默认页面由当前 Obsidian 上下文决定：`Clippings/**` 打开 `Clipping`；选中 `Articles/` 或子文件夹打开 `Task Overview`；打开 `Articles/**/*.md` 具体文章打开 `Article Detail`。当用户在 `Article Detail` 点击「生成试题」后生成数据库化 Quiz；点击「开始测试」后进入 `Quiz View`。
 
 ### 8.6 Composer
 
@@ -1636,7 +1636,7 @@ V0.1 中，Composer 至少支持围绕当前 Note 提问和生成学习产物。
 - 当前上下文 chip 单行展示，长标题用省略号截断
 - 图片按钮和发送按钮之间留出明确间距
 - 发送按钮使用 icon + `chat` 文案，避免纯文字按钮显得突兀
-- `Articles Overview` 不显示 Composer
+- `Task Overview` 不显示 Composer
 
 ### 8.7 Chat Result View
 
@@ -1729,7 +1729,7 @@ KnowFlow 设置必须放在 Obsidian 原生 `设置 -> 第三方插件 -> KnowFl
 右侧边栏只承载当前工作流：
 
 - Clipping Mode
-- Articles Overview
+- Task Overview
 - Article Detail
 - Quiz Test
 - Chat Result
@@ -1856,7 +1856,7 @@ docs/design.pen
 | 原型页面 | 入口 | 说明 |
 | --- | --- | --- |
 | `KnowFlow Sidebar - Clipping Mode` | 打开 `Clippings/**/*.md` | 当前剪藏文章整理、AI Summary、Pipeline、分类移动和 Chat |
-| `KnowFlow Sidebar - Articles Overview` | 选中 `Articles/` 或其子文件夹 | 文件夹级学习总览、Daily Learning、进度和任务，不显示 Chat |
+| `KnowFlow Sidebar - Task Overview` | 选中 `Articles/` 或其子文件夹 | 文件夹级学习总览、Daily Learning、进度和任务，不显示 Chat |
 | `KnowFlow Sidebar - Article Detail Mode` | 打开 `Articles/**/*.md` | 当前文章 Summary、Knowledge Map / Mermaid、Quiz、Review 状态和 Chat |
 | `KnowFlow Sidebar - Chat Result View` | 在 Clipping 或 Article Detail 中发送 Chat | 独立展示问题、思考状态、回答和后续操作 |
 | `KnowFlow Sidebar - Quiz Test` | Article Detail -> Quiz -> 开始测试 | 数据库化 Quiz 的答题界面 |

@@ -1,5 +1,6 @@
 import { Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 import { AiService } from "./services/ai-service";
+import { ArticleLearningService } from "./services/article-learning-service";
 import { ChatNoteService } from "./services/chat-note-service";
 import { ClippingPipeline } from "./services/clipping-pipeline";
 import { MermaidService } from "./services/mermaid-service";
@@ -18,6 +19,7 @@ export default class KnowFlowPlugin extends Plugin {
   store: KnowledgeStore;
   router: PathRouter;
   ai: AiService;
+  learningNotes: ArticleLearningService;
   chatNotes: ChatNoteService;
   mermaid: MermaidService;
   pipeline: ClippingPipeline;
@@ -45,6 +47,7 @@ export default class KnowFlowPlugin extends Plugin {
     this.mermaid = new MermaidService(this.app, this.ai);
     this.router = new PathRouter(this.app, this.settings);
     this.noteOperations = new NoteOperationCoordinator();
+    this.learningNotes = new ArticleLearningService(this.app, this.noteOperations);
     this.pipeline = new ClippingPipeline(this.app, this.settings, this.store, this.ai, this.noteOperations);
     this.quizNotes = new QuizNoteService(this.app, this.settings);
     this.summaryNotes = new SummaryNoteService(this.app, this.noteOperations);
@@ -200,11 +203,13 @@ function normalizeSettings(savedSettings: unknown): KnowFlowSettings {
   const legacyRuntime = typeof saved.aiProvider === "string" ? saved.aiProvider : undefined;
   const legacyBaseUrl = typeof saved.apiBaseUrl === "string" ? saved.apiBaseUrl : undefined;
   const legacyApiKey = typeof saved.apiKey === "string" ? saved.apiKey : undefined;
+  const summaryModel = normalizeModelConfig(saved.summaryModel, DEFAULT_SETTINGS.summaryModel, legacyRuntime, legacyBaseUrl, legacyApiKey);
 
   return {
     ...DEFAULT_SETTINGS,
     ...saved,
-    summaryModel: normalizeModelConfig(saved.summaryModel, DEFAULT_SETTINGS.summaryModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
+    summaryModel,
+    knowledgeMapModel: normalizeModelConfig(saved.knowledgeMapModel, summaryModel),
     pipelineModel: normalizeModelConfig(saved.pipelineModel, DEFAULT_SETTINGS.pipelineModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
     chatModel: normalizeModelConfig(saved.chatModel, DEFAULT_SETTINGS.chatModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
     quizModel: normalizeModelConfig(saved.quizModel, DEFAULT_SETTINGS.quizModel, legacyRuntime, legacyBaseUrl, legacyApiKey)

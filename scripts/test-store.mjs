@@ -187,5 +187,39 @@ function createHost(initial) {
   assert.equal("chatThreads" in store.exportData(), false, "chat history belongs in markdown notes, not data.json");
 }
 
+// Daily task plans persist task state and keep path references valid when
+// article folders are renamed.
+{
+  const { host } = createHost();
+  const store = new KnowledgeStore(host);
+  await store.load();
+  await store.saveDailyTaskPlan({
+    generatorVersion: 2,
+    date: "2026-08-09",
+    scopePath: "Articles/AI",
+    generatedAt: "2026-08-09T08:00:00.000Z",
+    newArticleLimit: 1,
+    reviewLimit: 0,
+    tasks: [{
+      id: "new_note:Articles/AI/one.md",
+      type: "new_note",
+      title: "One",
+      targetPath: "Articles/AI/one.md",
+      status: "pending",
+      completedAt: null
+    }]
+  });
+
+  await store.updateDailyTaskStatus("2026-08-09", "Articles/AI", "new_note:Articles/AI/one.md", "completed", "2026-08-09T09:00:00.000Z");
+  assert.equal(store.getDailyTaskPlan("2026-08-09", "Articles/AI")?.tasks[0].status, "completed");
+  assert.deepEqual(store.getCompletedTaskPathsSince(new Date("2026-08-09T08:30:00.000Z")), ["Articles/AI/one.md"]);
+
+  await store.migrateFolder("Articles/AI", "Articles/人工智能");
+  assert.equal(store.getDailyTaskPlan("2026-08-09", "Articles/AI"), null);
+  const migrated = store.getDailyTaskPlan("2026-08-09", "Articles/人工智能");
+  assert.equal(migrated?.tasks[0].targetPath, "Articles/人工智能/one.md");
+  assert.equal(migrated?.tasks[0].id, "new_note:Articles/人工智能/one.md");
+}
+
 await rm(tempDir, { recursive: true, force: true });
 console.log("store tests passed");

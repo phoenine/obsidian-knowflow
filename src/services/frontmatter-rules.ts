@@ -91,6 +91,14 @@ export function updateFrontmatterCategory(content: string, category: string): st
   return `---\n${nextFrontmatter.trim()}\n---\n${parsed.body}`;
 }
 
+export function applyLearningCompletionFrontmatter(content: string, learningDate: string): string {
+  const parsed = splitFrontmatter(content);
+  let nextFrontmatter = parsed.frontmatter ?? "";
+  nextFrontmatter = upsertFrontmatterField(nextFrontmatter, "学习日期", learningDate, false);
+  nextFrontmatter = upsertFrontmatterField(nextFrontmatter, "学习状态", ["", "  - 已学习"], false);
+  return `---\n${nextFrontmatter.trim()}\n---\n${parsed.body}`;
+}
+
 export function splitFrontmatter(content: string): { frontmatter: string | null; body: string } {
   const normalized = content.replace(/\r\n/g, "\n");
   // The `\n?` before the closing fence (rather than a required `\n`) matters

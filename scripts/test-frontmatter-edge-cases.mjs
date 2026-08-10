@@ -21,11 +21,22 @@ await esbuild.build({
   outdir: tempDir,
   platform: "node"
 });
-const { applyArticleFrontmatter, applySummaryFrontmatter, updateFrontmatterCategory } = await import(
+const { applyArticleFrontmatter, applyLearningCompletionFrontmatter, applySummaryFrontmatter, updateFrontmatterCategory } = await import(
   pathToFileURL(join(tempDir, "frontmatter-rules.js")).href
 );
 
 const baseData = { title: "标题", today: "2026-08-04" };
+
+// Completing a Task Overview item must update both learning fields while
+// preserving unrelated frontmatter and body content.
+{
+  const original = "---\n分类: AI\n学习日期:\n学习状态:\n  - 未学习\n---\n正文";
+  const result = applyLearningCompletionFrontmatter(original, "2026-08-09");
+  assert.ok(result.includes("分类: AI"));
+  assert.ok(result.includes("学习日期: 2026-08-09"));
+  assert.ok(result.includes("学习状态:\n  - 已学习"));
+  assert.ok(result.endsWith("正文"));
+}
 
 // Genuinely empty frontmatter ("---\n---\n") must still be recognized as
 // frontmatter (not folded into the body) and get KnowFlow's fields filled in.

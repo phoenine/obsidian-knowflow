@@ -5,7 +5,7 @@ export const KNOWFLOW_VIEW_TYPE = "knowflow-sidebar";
 export type KnowFlowMode =
   | "empty"
   | "clipping"
-  | "articles-overview"
+  | "task-overview"
   | "article-detail"
   | "quiz-test"
   | "chat-result";
@@ -27,6 +27,7 @@ export interface KnowFlowSettings {
   chatConversationFolder: string;
   templatePath: string;
   summaryModel: AiModelConfig;
+  knowledgeMapModel: AiModelConfig;
   pipelineModel: AiModelConfig;
   chatModel: AiModelConfig;
   quizModel: AiModelConfig;
@@ -146,4 +147,26 @@ export interface ArticleStats {
   unread: number;
   reviewDue: number;
   weakPoints: number;
+}
+
+export type DailyTaskType = "new_note" | "review_note" | "weak_point";
+export type DailyTaskStatus = "pending" | "completed" | "skipped";
+
+export interface DailyTask {
+  id: string;
+  type: DailyTaskType;
+  title: string;
+  targetPath: string | null;
+  status: DailyTaskStatus;
+  completedAt: string | null;
+}
+
+export interface DailyTaskPlan {
+  generatorVersion: number;
+  date: string;
+  scopePath: string;
+  generatedAt: string;
+  newArticleLimit: number;
+  reviewLimit: number;
+  tasks: DailyTask[];
 }

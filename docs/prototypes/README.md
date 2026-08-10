@@ -7,7 +7,7 @@ Current prototype exports:
 | Screen | PNG |
 | --- | --- |
 | Clipping Mode | `k3jvw.png` |
-| Articles Overview | `F02vW.png` |
+| Task Overview | `F02vW.png` |
 | Article Detail Mode | `b8d8A.png` |
 | Chat Result View | `efApK.png` |
 | Quiz Test | `bQRpM.png` |

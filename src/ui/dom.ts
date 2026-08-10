@@ -33,7 +33,7 @@ export function iconSpan(parent: HTMLElement, icon: string): HTMLSpanElement {
 /**
  * The "icon + card title (+ optional trailing pill/button/status)" header
  * pattern repeated across every card in clipping-view.ts, article-detail-view.ts,
- * articles-overview-view.ts and sidebar-view.ts. Pass `trailing` to render a
+ * task-overview-view.ts and sidebar-view.ts. Pass `trailing` to render a
  * pill, button or status element on the right side of the header row.
  */
 export function cardHeader(

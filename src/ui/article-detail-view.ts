@@ -7,6 +7,7 @@ interface ArticleDetailViewProps extends SummaryCardProps {
   title: string;
   readingValue: string;
   learningStatus: string;
+  knowledgeMapPending: boolean;
   quiz: QuizStats;
   onGenerateKnowledgeMap: () => void;
   onShowKnowledgePoints: () => void;
@@ -34,7 +35,18 @@ export function renderArticleDetailView(root: HTMLElement, props: ArticleDetailV
   text(mapCard, "AI 根据文章结构选择辐射图、时间线或思维导图，并插入原文的 ## Knowledge Map 区块。", "kf-muted");
   const mapActions = row(mapCard, "kf-actions");
   applyActionLayout(mapActions);
-  button(mapActions, "生成 Mermaid", props.onGenerateKnowledgeMap, true);
+  const generateMapButton = button(
+    mapActions,
+    props.knowledgeMapPending ? "正在生成…" : "生成 Mermaid",
+    props.onGenerateKnowledgeMap,
+    true
+  );
+  generateMapButton.disabled = props.knowledgeMapPending;
+  generateMapButton.setAttribute("aria-busy", String(props.knowledgeMapPending));
+  if (props.knowledgeMapPending) {
+    generateMapButton.style.cursor = "default";
+    generateMapButton.style.opacity = "0.72";
+  }
   button(mapActions, "查看知识点", props.onShowKnowledgePoints);
 
   const quizCard = section(content, "kf-quiz");

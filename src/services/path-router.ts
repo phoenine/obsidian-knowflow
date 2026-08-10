@@ -27,7 +27,7 @@ export class PathRouter {
     const selectedItem = selectedPath ? this.app.vault.getAbstractFileByPath(selectedPath) : null;
 
     if (selectedPath && selectedItem instanceof TFolder && isUnder(selectedPath, this.settings.articlesFolder)) {
-      return { mode: "articles-overview", activeFile: null, selectedPath };
+      return { mode: "task-overview", activeFile: null, selectedPath };
     }
 
     if (activeFile) {
@@ -41,10 +41,10 @@ export class PathRouter {
     }
 
     if (selectedPath && isUnder(selectedPath, this.settings.articlesFolder)) {
-      return { mode: "articles-overview", activeFile: null, selectedPath };
+      return { mode: "task-overview", activeFile: null, selectedPath };
     }
 
-    return { mode: "articles-overview", activeFile: null, selectedPath: this.settings.articlesFolder };
+    return { mode: "task-overview", activeFile: null, selectedPath: this.settings.articlesFolder };
   }
 
   private getSelectedPath(): string | null {

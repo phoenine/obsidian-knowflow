@@ -65,6 +65,11 @@ export class QuizNoteService {
     return computeQuizStats(content);
   }
 
+  async hasQuiz(notePath: string): Promise<boolean> {
+    const quizPath = await this.resolveQuizPath(notePath);
+    return Boolean(quizPath && this.app.vault.getAbstractFileByPath(quizPath) instanceof TFile);
+  }
+
   async updateSourcePath(newPath: string): Promise<void> {
     const quizPath = await this.resolveQuizPath(newPath);
     if (!quizPath) return;

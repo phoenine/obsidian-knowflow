@@ -1,11 +1,12 @@
 import { ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import type KnowFlowPlugin from "../main";
 import { ARTICLE_CATEGORIES } from "../services/clipping-pipeline";
+import { createDailyTaskPlan } from "../services/daily-tasks";
 import { insertBelowCursor } from "../services/editor-bridge";
 import type { SummaryText } from "../services/summary-notes";
-import { KNOWFLOW_VIEW_TYPE, type ArticleStats, type ChatMessage, type ChatThread, type ChatUsage, type NoteSummary, type PipelineUiState, type QuizSession, type QuizStats, type ViewContext } from "../types";
+import { KNOWFLOW_VIEW_TYPE, type ArticleStats, type ChatMessage, type ChatThread, type ChatUsage, type DailyTask, type DailyTaskPlan, type NoteSummary, type PipelineUiState, type QuizSession, type QuizStats, type ViewContext } from "../types";
 import { renderArticleDetailView } from "./article-detail-view";
-import { renderArticlesOverviewView } from "./articles-overview-view";
+import { renderTaskOverviewView } from "./task-overview-view";
 import { renderChatComposer } from "./chat-composer";
 import { renderChatHistoryPopover } from "./chat-history-view";
 import { renderClippingView, updateStreamingReasoning } from "./clipping-view";
@@ -28,6 +29,7 @@ export class KnowFlowSidebarView extends ItemView {
   private quizSession: QuizSession | null = null;
   private pendingSummaries = new Set<string>();
   private summaryErrors = new Map<string, string>();
+  private pendingKnowledgeMaps = new Set<string>();
   private pipelineStates = new Map<string, PipelineUiState>();
   private selectedCategories = new Map<string, string>();
   private manuallySelectedCategories = new Set<string>();
@@ -41,6 +43,7 @@ export class KnowFlowSidebarView extends ItemView {
   private streamingSummaryTexts = new Map<string, string>();
   private streamingSummaryReasonings = new Map<string, string>();
   private clippingSummaryScanPending = false;
+  private dailyTaskPlanLoads = new Set<string>();
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -107,8 +110,8 @@ export class KnowFlowSidebarView extends ItemView {
       return;
     }
 
-    if (context.mode === "articles-overview") {
-      this.renderArticlesOverview(root, context);
+    if (context.mode === "task-overview") {
+      this.renderTaskOverview(root, context);
       this.restoreScroll(currentScroll, shouldRestoreScroll);
       return;
     }
@@ -240,27 +243,117 @@ export class KnowFlowSidebarView extends ItemView {
     this.streamingSummaryReasoningLatestEl = null;
   }
 
-  private renderArticlesOverview(root: HTMLElement, context: ViewContext): void {
+  private renderTaskOverview(root: HTMLElement, context: ViewContext): void {
     const selectedPath = context.selectedPath ?? this.plugin.settings.articlesFolder;
     const scope = selectedPath.startsWith(this.plugin.settings.articlesFolder) ? selectedPath : this.plugin.settings.articlesFolder;
     const stats = this.getArticleStats(scope);
     const clippingStats = this.getClippingStats();
-    const categoryStats = this.getArticleCategoryStats();
+    const categoryStats = this.getArticleCategoryStats(scope);
     const scopeLabel = scope.replace(`${this.plugin.settings.articlesFolder}/`, "") || "全部文章";
-    const dailyNew = Math.min(stats.unread, this.plugin.settings.dailyNewArticleLimit);
-    const dailyReview = Math.min(stats.reviewDue, this.plugin.settings.dailyReviewLimit);
     const weeklyLearned = this.getWeeklyLearnedCount(scope);
-    renderArticlesOverviewView(root, {
+    const plan = this.getCurrentDailyTaskPlan(scope);
+    if (!plan) void this.ensureDailyTaskPlan(scope, false);
+    const loading = this.dailyTaskPlanLoads.has(dailyTaskPlanKey(localDateKey(new Date()), scope));
+    renderTaskOverviewView(root, {
       scopeLabel,
       stats,
       clippingStats,
       categoryStats,
-      dailyNew,
-      dailyReview,
+      tasks: plan?.tasks ?? [],
+      loading,
       weeklyLearned,
-      firstUnreadTitle: this.findFirstUnreadArticle(scope)?.basename ?? "暂无待学习文章",
-      onStartDaily: () => new Notice("Daily Learning will be implemented in V0.2")
+      onStartDaily: () => plan ? this.openFirstPendingTask(plan) : undefined,
+      onRegenerate: () => {
+        void this.ensureDailyTaskPlan(scope, true);
+        this.render();
+      },
+      onOpenTask: (task) => this.openDailyTask(task),
+      onCompleteTask: (task) => {
+        if (plan) void this.updateDailyTask(plan, task, "completed");
+      },
+      onSkipTask: (task) => {
+        if (plan) void this.updateDailyTask(plan, task, "skipped");
+      }
     });
+  }
+
+  private getCurrentDailyTaskPlan(scopePath: string): DailyTaskPlan | null {
+    const date = localDateKey(new Date());
+    const existing = this.plugin.store.getDailyTaskPlan(date, scopePath);
+    if (
+      existing
+      && existing.generatorVersion === 2
+      && existing.newArticleLimit === this.plugin.settings.dailyNewArticleLimit
+      && existing.reviewLimit === this.plugin.settings.dailyReviewLimit
+    ) return existing;
+    return null;
+  }
+
+  private async ensureDailyTaskPlan(scopePath: string, force: boolean): Promise<void> {
+    const date = localDateKey(new Date());
+    const loadKey = dailyTaskPlanKey(date, scopePath);
+    if (this.dailyTaskPlanLoads.has(loadKey)) return;
+    if (!force && this.getCurrentDailyTaskPlan(scopePath)) return;
+    this.dailyTaskPlanLoads.add(loadKey);
+
+    try {
+      const existing = force ? null : this.plugin.store.getDailyTaskPlan(date, scopePath);
+      const candidates = await Promise.all(this.getArticleFiles(scopePath).map(async (file) => {
+        const learned = this.isArticleLearned(file);
+        return {
+          path: file.path,
+          title: file.basename,
+          learned,
+          reviewable: learned ? await this.plugin.quizNotes.hasQuiz(file.path) : false
+        };
+      }));
+
+      const plan = createDailyTaskPlan({
+        date,
+        scopePath,
+        generatedAt: new Date().toISOString(),
+        newArticleLimit: this.plugin.settings.dailyNewArticleLimit,
+        reviewLimit: this.plugin.settings.dailyReviewLimit,
+        candidates,
+        existingTasks: existing?.tasks
+      });
+      await this.plugin.store.saveDailyTaskPlan(plan);
+    } catch (error) {
+      new Notice(`KnowFlow: 生成今日任务失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.dailyTaskPlanLoads.delete(loadKey);
+      if (this.plugin.router.getContext().mode === "task-overview") this.render();
+    }
+  }
+
+  private openFirstPendingTask(plan: DailyTaskPlan): void {
+    const task = plan.tasks.find((candidate) => candidate.status === "pending");
+    if (!task) {
+      new Notice("今日任务已完成");
+      return;
+    }
+    this.openDailyTask(task);
+  }
+
+  private openDailyTask(task: DailyTask): void {
+    if (task.targetPath) void this.app.workspace.openLinkText(task.targetPath, "", false);
+  }
+
+  private async updateDailyTask(plan: DailyTaskPlan, task: DailyTask, status: "completed" | "skipped"): Promise<void> {
+    try {
+      const completedAt = status === "completed" ? new Date().toISOString() : null;
+      if (status === "completed" && task.type === "new_note" && task.targetPath) {
+        const file = this.app.vault.getAbstractFileByPath(task.targetPath);
+        if (file instanceof TFile) {
+          await this.plugin.learningNotes.markComplete(file, localDateKey(new Date()));
+        }
+        await this.plugin.store.markLearned(task.targetPath);
+      }
+      await this.plugin.store.updateDailyTaskStatus(plan.date, plan.scopePath, task.id, status, completedAt);
+      this.render();
+    } catch (error) {
+      new Notice(`KnowFlow: 更新任务失败：${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private renderArticleDetail(root: HTMLElement, context: ViewContext): void {
@@ -288,6 +381,7 @@ export class KnowFlowSidebarView extends ItemView {
       streamingReasoning,
       analysisCost: estimateClippingAnalysisTokens(file),
       sourceLabel: "文章",
+      knowledgeMapPending: this.pendingKnowledgeMaps.has(file.path),
       quiz,
       renderMarkdownSummary: (parent, markdown) => void this.renderMarkdownSummary(parent, markdown, file.path),
       onRefreshSummary: () => this.ensureSummary(file, true),
@@ -699,11 +793,20 @@ export class KnowFlowSidebarView extends ItemView {
   }
 
   private async generateKnowledgeMap(file: TFile): Promise<void> {
+    if (this.pendingKnowledgeMaps.has(file.path)) return;
+    this.pendingKnowledgeMaps.add(file.path);
+    if (this.plugin.router.getContext().activeFile?.path === file.path) {
+      this.render();
+    }
     try {
       await this.plugin.mermaid.generateForFile(file);
-      this.render();
     } catch (error) {
       new Notice(`KnowFlow Mermaid failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.pendingKnowledgeMaps.delete(file.path);
+      if (this.plugin.router.getContext().activeFile?.path === file.path) {
+        this.render();
+      }
     }
   }
 
@@ -833,15 +936,15 @@ export class KnowFlowSidebarView extends ItemView {
   }
 
   private getArticleStats(scopePath: string): ArticleStats {
-    const files = this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(scopePath));
+    const files = this.getArticleFiles(scopePath);
     const learned = files.filter((file) => this.isArticleLearned(file)).length;
     return {
       scopePath,
       total: files.length,
       learned,
       unread: Math.max(files.length - learned, 0),
-      reviewDue: Math.min(3, files.length),
-      weakPoints: files.length > 0 ? 2 : 0
+      reviewDue: 0,
+      weakPoints: 0
     };
   }
 
@@ -863,7 +966,7 @@ export class KnowFlowSidebarView extends ItemView {
     this.clippingSummaryScanPending = true;
     try {
       await Promise.all(files.map((file) => this.readSummaryText(file)));
-      if (this.plugin.router.getContext().mode === "articles-overview") {
+      if (this.plugin.router.getContext().mode === "task-overview") {
         this.render();
       }
     } finally {
@@ -871,10 +974,10 @@ export class KnowFlowSidebarView extends ItemView {
     }
   }
 
-  private getArticleCategoryStats(): Array<{ name: string; total: number; learned: number }> {
+  private getArticleCategoryStats(scopePath: string): Array<{ name: string; total: number; learned: number }> {
     return ARTICLE_CATEGORIES.map((category) => {
       const prefix = `${this.plugin.settings.articlesFolder}/${category}/`;
-      const files = this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(prefix));
+      const files = this.getArticleFiles(scopePath).filter((file) => file.path.startsWith(prefix));
       return {
         name: category,
         total: files.length,
@@ -883,22 +986,22 @@ export class KnowFlowSidebarView extends ItemView {
     }).filter((category) => category.total > 0);
   }
 
-  private findFirstUnreadArticle(scopePath: string): TFile | null {
-    return this.app.vault.getMarkdownFiles()
-      .filter((file) => file.path.startsWith(scopePath))
-      .sort((a, b) => this.getArticleReadingValue(b) - this.getArticleReadingValue(a))
-      .find((file) => !this.isArticleLearned(file)) ?? null;
-  }
-
   private getWeeklyLearnedCount(scopePath: string): number {
     const weekStart = startOfLocalWeek(new Date());
-    return this.app.vault.getMarkdownFiles()
-      .filter((file) => file.path.startsWith(scopePath))
+    const frontmatterPaths = this.getArticleFiles(scopePath)
       .filter((file) => {
         const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
         const date = this.getFrontmatterLearningDate(frontmatter);
         return date ? date >= weekStart : false;
-      }).length;
+      }).map((file) => file.path);
+    const completedTaskPaths = this.plugin.store.getCompletedTaskPathsSince(weekStart)
+      .filter((path) => path.startsWith(`${scopePath}/`));
+    return new Set([...frontmatterPaths, ...completedTaskPaths]).size;
+  }
+
+  private getArticleFiles(scopePath: string): TFile[] {
+    return this.app.vault.getMarkdownFiles()
+      .filter((file) => file.path.startsWith(`${scopePath}/`));
   }
 
   private isArticleLearned(file: TFile): boolean {
@@ -1127,4 +1230,15 @@ function startOfLocalWeek(date: Date): Date {
   start.setDate(start.getDate() - diff);
   start.setHours(0, 0, 0, 0);
   return start;
+}
+
+function localDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dailyTaskPlanKey(date: string, scopePath: string): string {
+  return `${date}:${scopePath}`;
 }

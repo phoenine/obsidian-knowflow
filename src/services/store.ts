@@ -1,14 +1,20 @@
-import type { PipelineStatus } from "../types";
+import type { DailyTaskPlan, DailyTaskStatus, PipelineStatus } from "../types";
 
 interface StoredData {
   pipelineStatuses: Record<string, PipelineStatus>;
   learnedPaths: string[];
+  dailyTaskPlans: Record<string, DailyTaskPlan>;
 }
 
 const EMPTY_DATA: StoredData = {
   pipelineStatuses: {},
-  learnedPaths: []
+  learnedPaths: [],
+  dailyTaskPlans: {}
 };
+
+function taskPlanKey(date: string, scopePath: string): string {
+  return `${date}:${scopePath}`;
+}
 
 export interface PluginDataHost {
   loadData(): Promise<unknown>;
@@ -74,14 +80,26 @@ export class KnowledgeStore {
 
     Object.keys(this.data.pipelineStatuses).forEach(collect);
     this.data.learnedPaths.forEach(collect);
+    Object.values(this.data.dailyTaskPlans).forEach((plan) => plan.tasks.forEach((task) => {
+      if (task.targetPath) collect(task.targetPath);
+    }));
 
     let changed = false;
+    for (const plan of Object.values(this.data.dailyTaskPlans)) {
+      if (plan.scopePath === oldFolder || plan.scopePath.startsWith(oldPrefix)) {
+        plan.scopePath = plan.scopePath === oldFolder
+          ? newFolder
+          : `${newFolder}/${plan.scopePath.slice(oldPrefix.length)}`;
+        changed = true;
+      }
+    }
     for (const oldPath of affectedPaths) {
       const newPath = `${newFolder}/${oldPath.slice(oldPrefix.length)}`;
       changed = this.migratePathInMemory(oldPath, newPath) || changed;
     }
 
     if (changed) {
+      this.reindexDailyTaskPlans();
       await this.save();
     }
   }
@@ -103,6 +121,22 @@ export class KnowledgeStore {
       this.data.learnedPaths = Array.from(new Set(this.data.learnedPaths));
       changed = true;
     }
+
+    for (const plan of Object.values(this.data.dailyTaskPlans)) {
+      if (plan.scopePath === oldPath) {
+        plan.scopePath = newPath;
+        changed = true;
+      }
+      for (const task of plan.tasks) {
+        if (task.targetPath === oldPath) {
+          task.targetPath = newPath;
+          task.id = `${task.type}:${newPath}`;
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) this.reindexDailyTaskPlans();
 
     return changed;
   }
@@ -132,8 +166,17 @@ export class KnowledgeStore {
 
     Object.keys(this.data.pipelineStatuses).forEach(collect);
     this.data.learnedPaths.forEach(collect);
+    Object.values(this.data.dailyTaskPlans).forEach((plan) => plan.tasks.forEach((task) => {
+      if (task.targetPath) collect(task.targetPath);
+    }));
 
     let changed = false;
+    for (const [key, plan] of Object.entries(this.data.dailyTaskPlans)) {
+      if (plan.scopePath === folderPath || plan.scopePath.startsWith(prefix)) {
+        delete this.data.dailyTaskPlans[key];
+        changed = true;
+      }
+    }
     for (const path of affectedPaths) {
       changed = this.forgetPathInMemory(path) || changed;
     }
@@ -153,6 +196,11 @@ export class KnowledgeStore {
     if (learnedIndex >= 0) {
       this.data.learnedPaths.splice(learnedIndex, 1);
       changed = true;
+    }
+    for (const plan of Object.values(this.data.dailyTaskPlans)) {
+      const previousLength = plan.tasks.length;
+      plan.tasks = plan.tasks.filter((task) => task.targetPath !== path);
+      changed = plan.tasks.length !== previousLength || changed;
     }
 
     return changed;
@@ -210,8 +258,41 @@ export class KnowledgeStore {
     }
   }
 
+  getDailyTaskPlan(date: string, scopePath: string): DailyTaskPlan | null {
+    const plan = this.data.dailyTaskPlans[taskPlanKey(date, scopePath)];
+    return plan ? structuredClone(plan) : null;
+  }
+
+  async saveDailyTaskPlan(plan: DailyTaskPlan): Promise<void> {
+    this.data.dailyTaskPlans[taskPlanKey(plan.date, plan.scopePath)] = structuredClone(plan);
+    await this.save();
+  }
+
+  async updateDailyTaskStatus(date: string, scopePath: string, taskId: string, status: DailyTaskStatus, completedAt: string | null): Promise<void> {
+    const plan = this.data.dailyTaskPlans[taskPlanKey(date, scopePath)];
+    const task = plan?.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) return;
+    task.status = status;
+    task.completedAt = completedAt;
+    await this.save();
+  }
+
+  getCompletedTaskPathsSince(since: Date): string[] {
+    const paths = Object.values(this.data.dailyTaskPlans)
+      .flatMap((plan) => plan.tasks)
+      .filter((task) => task.type === "new_note" && task.status === "completed" && task.targetPath && task.completedAt)
+      .filter((task) => new Date(task.completedAt as string) >= since)
+      .map((task) => task.targetPath as string);
+    return Array.from(new Set(paths));
+  }
+
+  private reindexDailyTaskPlans(): void {
+    this.data.dailyTaskPlans = Object.fromEntries(
+      Object.values(this.data.dailyTaskPlans).map((plan) => [taskPlanKey(plan.date, plan.scopePath), plan])
+    );
+  }
+
   exportData(): StoredData {
     return structuredClone(this.data);
   }
 }
-

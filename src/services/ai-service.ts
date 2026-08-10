@@ -180,7 +180,7 @@ export class AiService {
   }
 
   async generateKnowledgeMap(title: string, content: string): Promise<string> {
-    const payload = await this.requestJson<KnowledgeMapResponse>(this.settings.summaryModel, [
+    const payload = await this.requestJson<KnowledgeMapResponse>(this.settings.knowledgeMapModel, [
       {
         role: "system",
         content: [
