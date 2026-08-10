@@ -7,6 +7,7 @@ interface ArticleDetailViewProps extends SummaryCardProps {
   title: string;
   readingValue: string;
   learningStatus: string;
+  knowledgePointCount: number | null;
   knowledgeMapPending: boolean;
   quiz: QuizStats;
   onGenerateKnowledgeMap: () => void;
@@ -24,7 +25,7 @@ export function renderArticleDetailView(root: HTMLElement, props: ArticleDetailV
   applyMetricsLayout(metrics);
   metric(metrics, "阅读价值", props.readingValue);
   metric(metrics, "状态", props.learningStatus);
-  metric(metrics, "知识点", "V0.2");
+  metric(metrics, "知识点", props.knowledgePointCount === null ? "--" : String(props.knowledgePointCount));
 
   renderSummaryCard(content, props);
 

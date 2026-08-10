@@ -179,10 +179,10 @@ export class KnowFlowSettingTab extends PluginSettingTab {
     const ai = this.createGroup(containerEl, "AI 模型", this.aiSummary(), true);
 
     this.createModelEntry(ai, "Summary model", "AI Summary: generates article summary, reading value and classification.", "summaryModel");
-    this.createModelEntry(ai, "Knowledge Map model", "Generates the Mermaid knowledge map for an article.", "knowledgeMapModel");
+    this.createModelEntry(ai, "Knowledge Map model", "Generates Mermaid maps and structured knowledge points for an article.", "knowledgeMapModel");
     this.createModelEntry(ai, "Pipeline model", "Clipping Pipeline: heading detection, code block recognition and language classification.", "pipelineModel");
     this.createModelEntry(ai, "Chat model", "Used by the sidebar chat composer.", "chatModel");
-    this.createModelEntry(ai, "Quiz model", "Used for database-backed quiz generation.", "quizModel");
+    this.createModelEntry(ai, "Quiz model", "Generates Markdown quiz questions, including targeted knowledge-point questions.", "quizModel");
 
     const runtime = this.createGroup(containerEl, "Runtime support", "Cloud · Ollama · LM Studio");
     runtime.createEl("p", {

@@ -1,4 +1,4 @@
-import type { QuizOption, QuizQuestion, QuizStats } from "../types";
+import type { KnowledgePointStatus, QuizOption, QuizQuestion, QuizStats } from "../types";
 
 // Matches the vault's pre-existing "study-quiz" convention (see
 // .codex/skills/study-quiz/SKILL.md and the Archives/*.md files it
@@ -45,6 +45,30 @@ export function buildQuizNoteContent(meta: QuizNoteMeta, questions: QuizQuestion
   const blocks = questions.map((question, index) => renderQuestionBlock(question, index + 1)).join("\n\n");
   const body = [QUIZ_BLOCK_START, "", blocks, QUIZ_BLOCK_END].join("\n");
   return `---\n${frontmatter}\n---\n\n${body}\n`;
+}
+
+/** Replaces only the managed question bank, preserving knowledge points and other note content. */
+export function upsertQuizQuestions(content: string, questions: QuizQuestion[]): string {
+  const normalized = content.replace(/\r\n/g, "\n");
+  const blocks = questions.map((question, index) => renderQuestionBlock(question, index + 1)).join("\n\n");
+  const body = [QUIZ_BLOCK_START, "", blocks, QUIZ_BLOCK_END].join("\n");
+  const start = normalized.indexOf(QUIZ_BLOCK_START);
+  const markerEnd = normalized.indexOf(QUIZ_BLOCK_END);
+  if (start >= 0 && markerEnd > start) {
+    const end = markerEnd + QUIZ_BLOCK_END.length;
+    return `${normalized.slice(0, start).trimEnd()}\n\n${body}\n${normalized.slice(end).trimStart()}`.trimEnd() + "\n";
+  }
+  return `${normalized.trimEnd()}\n\n${body}\n`;
+}
+
+/** Adds one targeted question without rewriting existing answers or knowledge points. */
+export function appendQuizQuestion(content: string, question: QuizQuestion): string {
+  const normalized = content.replace(/\r\n/g, "\n");
+  const end = normalized.indexOf(QUIZ_BLOCK_END);
+  if (end < 0) return upsertQuizQuestions(normalized, [question]);
+  const displayIndex = splitQuestionBlocks(extractQuizBody(normalized) ?? "").length + 1;
+  const block = renderQuestionBlock(question, displayIndex);
+  return `${normalized.slice(0, end).trimEnd()}\n\n${block}\n${normalized.slice(end)}`;
 }
 
 /** Updates only the source-note wikilink in a generated quiz note. */
@@ -121,6 +145,25 @@ export function computeQuizStats(content: string): QuizStats {
   };
 }
 
+export function computeKnowledgePointStatuses(content: string): Record<string, KnowledgePointStatus> {
+  const body = extractQuizBody(content);
+  if (body === null) return {};
+  const states = new Map<string, QuizAnswerState[]>();
+  for (const block of splitQuestionBlocks(body)) {
+    const answerBlock = /```Answer[^\n]*\n([\s\S]*?)```/.exec(block)?.[1] ?? "";
+    const id = /^-\s*知识点[：:]\s*\[\[#\^([A-Za-z0-9-]+)\]\]/m.exec(answerBlock)?.[1];
+    if (!id) continue;
+    const values = states.get(id) ?? [];
+    values.push(readAnswerStateFromBlock(block));
+    states.set(id, values);
+  }
+  return Object.fromEntries(Array.from(states, ([id, values]) => {
+    const answered = values.filter((state) => state.selectedKey !== null);
+    if (answered.length === 0) return [id, "untested"];
+    return [id, answered.every((state) => state.correct) ? "mastered" : "review"];
+  }));
+}
+
 /**
  * Patches only the single question's option lines (uncheck all, check the
  * selected one, stamp it with ✅/❌ + date) and leaves every other line in
@@ -167,6 +210,7 @@ function renderQuestionBlock(question: QuizQuestion, displayIndex: number): stri
     "```Answer fold",
     `- 答案：${question.answerKey}`,
     `- 难度：${question.difficulty}/5`,
+    ...(question.knowledgePointId ? [`- 知识点：[[#^${question.knowledgePointId}]]`] : []),
     `- 解析：${explanation}`,
     "```"
   ].join("\n");
@@ -234,10 +278,12 @@ function parseQuestionBlock(block: string, index: number, notePath: string, crea
   const explanation = /^-\s*解析[：:]\s*(.+)$/m.exec(answerBlock)?.[1]?.trim() ?? "";
   const difficultyMatch = /^-\s*难度[：:]\s*(\d)/m.exec(answerBlock);
   const difficulty = difficultyMatch ? Number(difficultyMatch[1]) : 3;
+  const knowledgePointId = /^-\s*知识点[：:]\s*\[\[#\^([A-Za-z0-9-]+)\]\]/m.exec(answerBlock)?.[1];
 
   return {
     id: `q${index + 1}`,
     notePath,
+    ...(knowledgePointId ? { knowledgePointId } : {}),
     question: headingMatch[1].trim(),
     type: "single_choice",
     options,

@@ -13,7 +13,7 @@ await esbuild.build({
   outdir: tempDir,
   platform: "node"
 });
-const { buildQuizCallout, buildQuizNoteContent, parseQuizCallout, parseQuizNote, computeQuizStats, applyQuizAnswer, setExamPassed, sanitizeQuizFileName, updateQuizSourcePath, upsertQuizCallout } = await import(
+const { appendQuizQuestion, buildQuizCallout, buildQuizNoteContent, computeKnowledgePointStatuses, parseQuizCallout, parseQuizNote, computeQuizStats, applyQuizAnswer, setExamPassed, sanitizeQuizFileName, updateQuizSourcePath, upsertQuizCallout, upsertQuizQuestions } = await import(
   pathToFileURL(join(tempDir, "quiz-notes.js")).href
 );
 
@@ -109,6 +109,30 @@ assert.equal(parsed[0].difficulty, 4);
 assert.equal(parsed[1].answerKey, "B");
 assert.equal(parsed[1].explanation, "KV Cache 用显存换计算，本身会增加显存占用，不会降低。");
 assert.equal(parsed[0].createdAt, "2026-08-01");
+
+// Knowledge point links live with questions and can derive UI status without
+// duplicating any knowledge content or mastery state into data.json.
+{
+  const linked = upsertQuizQuestions(content, [{ ...questions[0], knowledgePointId: "kf-kp-scheduler" }]);
+  assert.ok(linked.includes("- 知识点：[[#^kf-kp-scheduler]]"));
+  assert.equal(parseQuizNote(linked, notePath)[0].knowledgePointId, "kf-kp-scheduler");
+  assert.deepEqual(computeKnowledgePointStatuses(linked), { "kf-kp-scheduler": "untested" });
+  const answered = applyQuizAnswer(linked, 1, "A", true, "2026-08-04");
+  assert.deepEqual(computeKnowledgePointStatuses(answered), { "kf-kp-scheduler": "mastered" });
+  const retried = applyQuizAnswer(answered, 1, "B", false, "2026-08-05");
+  assert.deepEqual(computeKnowledgePointStatuses(retried), { "kf-kp-scheduler": "review" });
+
+  const appended = appendQuizQuestion(retried, { ...questions[1], knowledgePointId: "kf-kp-cache" });
+  assert.equal(parseQuizNote(appended, notePath).length, 2);
+  assert.ok(appended.includes("- 知识点：[[#^kf-kp-cache]]"));
+
+  const withKnowledgeBlock = linked.replace(
+    "<!-- study-quiz:start -->",
+    "<!-- knowflow:knowledge-points:start -->\n## 知识点\n<!-- knowflow:knowledge-points:end -->\n\n<!-- study-quiz:start -->"
+  );
+  const regenerated = upsertQuizQuestions(withKnowledgeBlock, questions);
+  assert.ok(regenerated.includes("<!-- knowflow:knowledge-points:start -->"), "regenerating Quiz must preserve knowledge points");
+}
 
 // Before any answer, stats must report "not started" (accuracy null).
 let stats = computeQuizStats(content);

@@ -1,11 +1,12 @@
 import { requestUrl } from "obsidian";
-import type { AiModelConfig, ChatMessage as StoredChatMessage, ChatUsage, KnowFlowSettings, NoteSummary, QuizQuestion } from "../types";
+import type { AiModelConfig, ChatMessage as StoredChatMessage, ChatUsage, KnowledgePoint, KnowledgePointGroup, KnowFlowSettings, NoteSummary, QuizQuestion } from "../types";
 import { estimateChatUsage, parseChatStreamData } from "./chat-stream";
 import { ARTICLE_CATEGORIES } from "./clipping-pipeline";
 import { batchFormattingCandidates, preferTextLanguage } from "./formatting-candidates";
 import type { FormattingCandidate, FormattingDecision } from "./formatting-candidates";
 import { batchQuizSections, getQuizFocusTargets, getQuizQuestionLimit, prepareQuizSections } from "./quiz-generation";
 import type { QuizFocusType, QuizSourceSection } from "./quiz-generation";
+import { normalizeKnowledgePointGroups } from "./knowledge-points";
 import { batchTranslationCandidates } from "./translation-candidates";
 import type { TranslationCandidate, TranslationDecision } from "./translation-candidates";
 
@@ -26,6 +27,7 @@ interface QuizBatchResponse {
     questions: Array<{
       focusType: QuizFocusType;
       sourceQuote: string;
+      knowledgePointId?: string;
       question: string;
       options: Array<{ key: string; content: string }>;
       answerKey: string;
@@ -54,6 +56,20 @@ interface TranslationResponse {
 interface KnowledgeMapResponse {
   diagramType: "radar" | "timeline" | "mindmap";
   mermaid: string;
+}
+
+interface KnowledgePointsResponse {
+  groups: unknown[];
+}
+
+interface KnowledgePointQuizResponse {
+  question: {
+    question: string;
+    options: Array<{ key: string; content: string }>;
+    answerKey: string;
+    explanation: string;
+    difficulty: number;
+  };
 }
 
 const REQUEST_TIMEOUT_MS = 360000;
@@ -150,7 +166,13 @@ export class AiService {
     }
   }
 
-  async generateQuiz(filePath: string, title: string, content: string, readingValue: number): Promise<QuizQuestion[]> {
+  async generateQuiz(
+    filePath: string,
+    title: string,
+    content: string,
+    readingValue: number,
+    knowledgePointGroups: KnowledgePointGroup[] = []
+  ): Promise<QuizQuestion[]> {
     const sections = prepareQuizSections(content);
     if (sections.length === 0) return [];
     const batches = batchQuizSections(sections);
@@ -158,6 +180,8 @@ export class AiService {
     const focusTargets = getQuizFocusTargets(limit);
     const totalChars = sections.reduce((total, section) => total + section.content.length, 0) || 1;
     const rated: RatedQuizQuestion[] = [];
+    const knowledgePoints = knowledgePointGroups.flatMap((group) => group.points);
+    const knowledgePointIds = new Set(knowledgePoints.map((point) => point.id));
 
     for (let index = 0; index < batches.length; index += 1) {
       const batch = batches[index];
@@ -166,9 +190,9 @@ export class AiService {
       try {
         const payload = await this.requestJson<QuizBatchResponse>(
           this.settings.quizModel,
-          buildQuizBatchMessages(title, readingValue, batch, batchQuestionLimit, focusTargets)
+          buildQuizBatchMessages(title, readingValue, batch, batchQuestionLimit, focusTargets, knowledgePoints)
         );
-        rated.push(...normalizeQuizBatchResponse(payload, batch, filePath));
+        rated.push(...normalizeQuizBatchResponse(payload, batch, filePath, knowledgePointIds));
       } catch (error) {
         throw new Error(
           `Quiz 章节批次 ${index + 1}/${batches.length} 处理失败：${error instanceof Error ? error.message : String(error)}`
@@ -177,6 +201,97 @@ export class AiService {
     }
 
     return selectQuizQuestions(rated, limit, focusTargets);
+  }
+
+  async generateKnowledgePoints(title: string, content: string): Promise<KnowledgePointGroup[]> {
+    const payload = await this.requestJson<KnowledgePointsResponse>(this.settings.knowledgeMapModel, [
+      {
+        role: "system",
+        content: [
+          "你是 KnowFlow 的文章知识点提取器。只提取文章中可解释、可追溯、可检验的核心知识，不要把目录、背景信息或宽泛主题当作知识点。",
+          "每个 title 必须是一句完整、可判断真假的结论，不得只写名词或章节标题。",
+          "type 只能是：概念、机制、对比、流程、原则、实践。",
+          "explanation 用 1-2 段解释结论成立的原因和作用，不重复大段原文。",
+          "evidence.section 必须对应文章中的章节标题；evidence.excerpt 必须逐字引用文章中的关键依据，不得编造。",
+          "question 是一个开放式理解检验问题，不是选择题。",
+          "relations 只在关系明确时填写；dependsOn 和 extends 使用目标知识点的 slug。",
+          "将知识点组织为 2-5 个有意义的分组，每组标题采用『关注边界 · 主题』或同等清晰的结构。",
+          "每篇文章提取 4-12 个核心知识点。只输出严格 JSON，不要输出 Markdown。"
+        ].join("\n")
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          articleTitle: title,
+          article: stripKnowledgeMapSection(stripFrontmatter(content)),
+          requiredJsonShape: {
+            groups: [{
+              title: "分组标题",
+              points: [{
+                slug: "简短且稳定的英文 kebab-case 标识",
+                title: "完整知识结论",
+                type: "概念 | 机制 | 对比 | 流程 | 原则 | 实践",
+                explanation: "核心解释",
+                evidence: { section: "原文章节标题", excerpt: "原文逐字引用" },
+                question: "开放式检验问题",
+                relations: { dependsOn: ["其他知识点 slug"], extends: ["其他知识点 slug"] }
+              }]
+            }]
+          }
+        })
+      }
+    ]);
+    const article = stripKnowledgeMapSection(stripFrontmatter(content));
+    const groups = normalizeKnowledgePointGroups(payload)
+      .map((group) => ({
+        ...group,
+        points: group.points.filter((point) => sourceContainsQuote(article, point.evidence.excerpt))
+      }))
+      .filter((group) => group.points.length > 0);
+    const ids = new Set(groups.flatMap((group) => group.points).map((point) => point.id));
+    for (const point of groups.flatMap((group) => group.points)) {
+      point.relations.dependsOn = point.relations.dependsOn.filter((id) => id !== point.id && ids.has(id));
+      point.relations.extends = point.relations.extends.filter((id) => id !== point.id && ids.has(id));
+    }
+    if (groups.flatMap((group) => group.points).length === 0) {
+      throw new Error("AI did not return valid knowledge points.");
+    }
+    return groups;
+  }
+
+  async generateKnowledgePointQuiz(filePath: string, articleTitle: string, point: KnowledgePoint): Promise<QuizQuestion> {
+    const payload = await this.requestJson<KnowledgePointQuizResponse>(this.settings.quizModel, [
+      {
+        role: "system",
+        content: [
+          "你是 KnowFlow 的针对性出题器。只根据给定知识点及其原文依据生成一道中文单选题。",
+          "题目必须检验理解而不是字面记忆；提供 A/B/C/D 四个选项、唯一答案和解析。",
+          "不得引入原文依据之外的事实。只输出严格 JSON。"
+        ].join("\n")
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          articleTitle,
+          knowledgePoint: point,
+          requiredJsonShape: {
+            question: {
+              question: "题干",
+              options: [
+                { key: "A", content: "选项 A" },
+                { key: "B", content: "选项 B" },
+                { key: "C", content: "选项 C" },
+                { key: "D", content: "选项 D" }
+              ],
+              answerKey: "A | B | C | D",
+              explanation: "答案与错误选项解析",
+              difficulty: "1-5 integer"
+            }
+          }
+        })
+      }
+    ]);
+    return normalizeKnowledgePointQuiz(payload, filePath, point.id);
   }
 
   async generateKnowledgeMap(title: string, content: string): Promise<string> {
@@ -565,7 +680,8 @@ function buildQuizBatchMessages(
   readingValue: number,
   sections: QuizSourceSection[],
   batchQuestionLimit: number,
-  focusTargets: Record<QuizFocusType, number>
+  focusTargets: Record<QuizFocusType, number>,
+  knowledgePoints: KnowledgePoint[]
 ): ChatRequestMessage[] {
   return [
     {
@@ -589,6 +705,11 @@ function buildQuizBatchMessages(
         readingValue,
         batchQuestionLimit,
         articleFocusTargets: focusTargets,
+        knowledgePoints: knowledgePoints.map((point) => ({
+          id: point.id,
+          title: point.title,
+          sourceSection: point.evidence.section
+        })),
         markerPriority: {
           bold: "最高",
           highlight: "高",
@@ -610,6 +731,7 @@ function buildQuizBatchMessages(
                 {
                   focusType: "concept | principle | comparison | application | pitfall",
                   sourceQuote: "对应章节中的原文",
+                  knowledgePointId: "关联知识点 id；没有匹配项时留空",
                   question: "题干",
                   options: [
                     { key: "A", content: "选项 A" },
@@ -896,7 +1018,8 @@ function buildAnalysisExcerpt(content: string): string {
 function normalizeQuizBatchResponse(
   value: QuizBatchResponse,
   sourceSections: QuizSourceSection[],
-  filePath: string
+  filePath: string,
+  knowledgePointIds: Set<string>
 ): RatedQuizQuestion[] {
   const now = new Date().toISOString();
   const byId = new Map(sourceSections.map((section) => [section.id, section]));
@@ -936,6 +1059,7 @@ function normalizeQuizBatchResponse(
         question: {
           id: `${Date.now()}-${result.length}-${Math.random().toString(36).slice(2, 8)}`,
           notePath: filePath,
+          ...(knowledgePointIds.has(question.knowledgePointId ?? "") ? { knowledgePointId: question.knowledgePointId } : {}),
           question: question.question.trim(),
           type: "single_choice",
           options: options.map((option) => ({ key: option.key, content: option.content.trim() })),
@@ -948,6 +1072,38 @@ function normalizeQuizBatchResponse(
     }
   }
   return result;
+}
+
+function normalizeKnowledgePointQuiz(
+  value: KnowledgePointQuizResponse,
+  filePath: string,
+  knowledgePointId: string
+): QuizQuestion {
+  const question = value?.question;
+  const options = Array.isArray(question?.options)
+    ? question.options
+      .filter((option) => ["A", "B", "C", "D"].includes(option.key) && typeof option.content === "string" && option.content.trim())
+      .slice(0, 4)
+    : [];
+  const optionKeys = new Set(options.map((option) => option.key));
+  if (!question || typeof question.question !== "string" || !question.question.trim()) {
+    throw new Error("Quiz model did not return a valid question.");
+  }
+  if (options.length !== 4 || !optionKeys.has(question.answerKey)) {
+    throw new Error("Quiz model did not return four valid options and one answer.");
+  }
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    notePath: filePath,
+    knowledgePointId,
+    question: question.question.trim(),
+    type: "single_choice",
+    options: options.map((option) => ({ key: option.key, content: option.content.trim() })),
+    answerKey: question.answerKey,
+    explanation: typeof question.explanation === "string" ? question.explanation.trim() : "",
+    difficulty: Number.isInteger(question.difficulty) ? Math.min(5, Math.max(1, question.difficulty)) : 3,
+    createdAt: new Date().toISOString()
+  };
 }
 
 function selectQuizQuestions(

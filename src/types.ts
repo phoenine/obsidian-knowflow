@@ -68,6 +68,7 @@ export interface QuizOption {
 export interface QuizQuestion {
   id: string;
   notePath: string;
+  knowledgePointId?: string;
   question: string;
   type: "single_choice";
   options: QuizOption[];
@@ -76,6 +77,33 @@ export interface QuizQuestion {
   difficulty: number;
   createdAt: string;
 }
+
+export type KnowledgePointType = "概念" | "机制" | "对比" | "流程" | "原则" | "实践";
+
+export interface KnowledgePointRelations {
+  dependsOn: string[];
+  extends: string[];
+}
+
+export interface KnowledgePoint {
+  id: string;
+  title: string;
+  type: KnowledgePointType;
+  explanation: string;
+  evidence: {
+    section: string;
+    excerpt: string;
+  };
+  question: string;
+  relations: KnowledgePointRelations;
+}
+
+export interface KnowledgePointGroup {
+  title: string;
+  points: KnowledgePoint[];
+}
+
+export type KnowledgePointStatus = "untested" | "mastered" | "review";
 
 export interface QuizSession {
   filePath: string;

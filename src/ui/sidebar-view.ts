@@ -4,7 +4,7 @@ import { ARTICLE_CATEGORIES } from "../services/clipping-pipeline";
 import { createDailyTaskPlan, type DailyTaskCandidate } from "../services/daily-tasks";
 import { insertBelowCursor } from "../services/editor-bridge";
 import type { SummaryText } from "../services/summary-notes";
-import { KNOWFLOW_VIEW_TYPE, type ArticleStats, type ChatMessage, type ChatThread, type ChatUsage, type DailyTask, type DailyTaskPlan, type NoteSummary, type PipelineUiState, type QuizSession, type QuizStats, type ViewContext } from "../types";
+import { KNOWFLOW_VIEW_TYPE, type ArticleStats, type ChatMessage, type ChatThread, type ChatUsage, type DailyTask, type DailyTaskPlan, type KnowledgePoint, type KnowledgePointGroup, type KnowledgePointStatus, type NoteSummary, type PipelineUiState, type QuizSession, type QuizStats, type ViewContext } from "../types";
 import { renderArticleDetailView } from "./article-detail-view";
 import { renderTaskOverviewView } from "./task-overview-view";
 import { renderChatComposer } from "./chat-composer";
@@ -12,11 +12,22 @@ import { renderChatHistoryPopover } from "./chat-history-view";
 import { renderClippingView, updateStreamingReasoning } from "./clipping-view";
 import { applyActionLayout, button, formatDate, iconButton, row, section, setStyles, text } from "./dom";
 import { renderQuizTestView } from "./quiz-test-view";
+import { renderKnowledgePointsOverview } from "./knowledge-points-view";
 import { renderShell } from "./shell";
 
 interface CachedSummaryText {
   mtime: number;
   text: SummaryText | null;
+}
+
+interface KnowledgePointViewState {
+  filePath: string;
+  selectedPointId: string | null;
+}
+
+interface CachedKnowledgePoints {
+  groups: KnowledgePointGroup[];
+  statuses: Record<string, KnowledgePointStatus>;
 }
 
 export class KnowFlowSidebarView extends ItemView {
@@ -30,6 +41,10 @@ export class KnowFlowSidebarView extends ItemView {
   private pendingSummaries = new Set<string>();
   private summaryErrors = new Map<string, string>();
   private pendingKnowledgeMaps = new Set<string>();
+  private pendingKnowledgePoints = new Set<string>();
+  private pendingKnowledgePointQuizzes = new Set<string>();
+  private knowledgePointView: KnowledgePointViewState | null = null;
+  private knowledgePointCache = new Map<string, CachedKnowledgePoints>();
   private pipelineStates = new Map<string, PipelineUiState>();
   private selectedCategories = new Map<string, string>();
   private manuallySelectedCategories = new Set<string>();
@@ -97,6 +112,12 @@ export class KnowFlowSidebarView extends ItemView {
 
     if (this.quizSession) {
       this.renderQuizTest(root, this.quizSession);
+      this.restoreScroll(currentScroll, shouldRestoreScroll);
+      return;
+    }
+
+    if (this.knowledgePointView) {
+      this.renderKnowledgePoints(root, this.knowledgePointView);
       this.restoreScroll(currentScroll, shouldRestoreScroll);
       return;
     }
@@ -394,6 +415,7 @@ export class KnowFlowSidebarView extends ItemView {
     const streamingText = this.streamingSummaryTexts.get(file.path);
     const streamingReasoning = this.streamingSummaryReasonings.get(file.path);
     const quiz = this.getQuizStats(file.path);
+    const knowledgePoints = this.getKnowledgePointData(file.path);
     const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
     const readingValue = this.getFrontmatterReadingValue(frontmatter) ?? (summary && summary.readingValue > 0 ? `${summary.readingValue}/5` : "--");
     const learningStatus = this.getFrontmatterLearningStatus(frontmatter) ?? (this.plugin.store.isLearned(file.path) ? "已学习" : "未学习");
@@ -402,6 +424,7 @@ export class KnowFlowSidebarView extends ItemView {
       title: file.basename,
       readingValue,
       learningStatus,
+      knowledgePointCount: knowledgePoints?.groups.flatMap((group) => group.points).length ?? null,
       summary: summaryPending ? null : summary,
       summaryPending,
       summaryError,
@@ -415,7 +438,7 @@ export class KnowFlowSidebarView extends ItemView {
       onRefreshSummary: () => this.ensureSummary(file, true),
       onGenerateSummary: () => this.ensureSummary(file, true),
       onGenerateKnowledgeMap: () => void this.generateKnowledgeMap(file),
-      onShowKnowledgePoints: () => new Notice("Knowledge Points will be implemented in V0.2"),
+      onShowKnowledgePoints: () => this.openKnowledgePoints(file),
       onGenerateQuiz: () => void this.generateQuiz(file),
       onStartQuiz: () => void this.startQuiz(file)
     });
@@ -425,6 +448,139 @@ export class KnowFlowSidebarView extends ItemView {
     this.streamingSummaryReasoningLatestEl = root.querySelector(".kf-streaming-reasoning-latest");
 
     this.renderComposer(root, context, file.basename, file);
+  }
+
+  private renderKnowledgePoints(root: HTMLElement, state: KnowledgePointViewState): void {
+    const sourceFile = this.app.vault.getAbstractFileByPath(state.filePath);
+    if (!(sourceFile instanceof TFile)) {
+      this.knowledgePointView = null;
+      this.renderEmpty(root);
+      return;
+    }
+    const cached = this.getKnowledgePointData(sourceFile.path);
+    const groups = cached?.groups ?? [];
+    const statuses = cached?.statuses ?? {};
+    const loading = this.pendingKnowledgePoints.has(sourceFile.path);
+    const common = {
+      articleTitle: sourceFile.basename,
+      groups,
+      statuses,
+      selectedPointId: state.selectedPointId,
+      loading,
+      onRefresh: () => void this.generateKnowledgePoints(sourceFile),
+      onSelectPoint: (pointId: string) => {
+        this.knowledgePointView = { filePath: sourceFile.path, selectedPointId: pointId };
+      },
+      onOpenEvidence: (point: KnowledgePoint) => {
+        void this.openKnowledgePointEvidence(sourceFile, point);
+      },
+      onGenerateQuiz: (point: KnowledgePoint) => void this.generateKnowledgePointQuiz(sourceFile, point)
+    };
+
+    renderKnowledgePointsOverview(root, {
+      ...common,
+      onBack: () => {
+        this.knowledgePointView = null;
+        this.render();
+      }
+    });
+  }
+
+  private openKnowledgePoints(file: TFile): void {
+    this.knowledgePointView = { filePath: file.path, selectedPointId: null };
+    void this.refreshKnowledgePointData(file.path);
+    this.render();
+  }
+
+  private resolveEvidenceHeading(file: TFile, section: string): string {
+    const requested = normalizeHeading(section);
+    const headings = this.app.metadataCache.getFileCache(file)?.headings ?? [];
+    const exact = headings.find((heading) => normalizeHeading(heading.heading) === requested);
+    if (exact) return exact.heading;
+    const partial = headings.find((heading) => {
+      const candidate = normalizeHeading(heading.heading);
+      return candidate.includes(requested) || requested.includes(candidate);
+    });
+    return partial?.heading ?? section.replace(/^#+\s*/, "").trim();
+  }
+
+  private async openKnowledgePointEvidence(file: TFile, point: KnowledgePoint): Promise<void> {
+    this.knowledgePointView = { filePath: file.path, selectedPointId: point.id };
+    const heading = this.resolveEvidenceHeading(file, point.evidence.section);
+    const leaf = this.app.workspace.getMostRecentLeaf(this.app.workspace.rootSplit)
+      ?? this.app.workspace.getLeaf(false);
+    await leaf.openFile(file, {
+      active: true,
+      eState: { subpath: `#${heading}` }
+    });
+  }
+
+  private getKnowledgePointData(filePath: string): CachedKnowledgePoints | null {
+    const cached = this.knowledgePointCache.get(filePath);
+    if (cached) return cached;
+    void this.refreshKnowledgePointData(filePath);
+    return null;
+  }
+
+  private async refreshKnowledgePointData(filePath: string): Promise<void> {
+    if (this.pendingKnowledgePoints.has(filePath)) return;
+    this.pendingKnowledgePoints.add(filePath);
+    try {
+      const loaded = await this.plugin.quizNotes.loadKnowledgePoints(filePath);
+      this.knowledgePointCache.set(filePath, {
+        groups: loaded?.groups ?? [],
+        statuses: loaded?.statuses ?? {}
+      });
+    } catch (error) {
+      this.knowledgePointCache.set(filePath, { groups: [], statuses: {} });
+      new Notice(`KnowFlow: 读取知识点失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.pendingKnowledgePoints.delete(filePath);
+      const activePath = this.plugin.router.getContext().activeFile?.path;
+      if (activePath === filePath || this.knowledgePointView?.filePath === filePath) this.render();
+    }
+  }
+
+  private async generateKnowledgePoints(file: TFile): Promise<void> {
+    if (this.pendingKnowledgePoints.has(file.path)) return;
+    this.pendingKnowledgePoints.add(file.path);
+    this.render();
+    try {
+      const article = await this.app.vault.read(file);
+      const groups = await this.plugin.ai.generateKnowledgePoints(file.basename, article);
+      const category = this.getSummaryMeta(file)?.category ?? this.plugin.settings.defaultArticleCategory;
+      const saved = await this.plugin.quizNotes.saveKnowledgePoints(file, category, groups);
+      const loaded = await this.plugin.quizNotes.loadKnowledgePoints(file.path);
+      this.knowledgePointCache.set(file.path, {
+        groups: saved.groups,
+        statuses: loaded?.statuses ?? {}
+      });
+      new Notice(`KnowFlow: generated ${saved.groups.flatMap((group) => group.points).length} knowledge points`);
+    } catch (error) {
+      new Notice(`KnowFlow knowledge points failed: ${error instanceof Error ? error.message : String(error)}`, 8000);
+    } finally {
+      this.pendingKnowledgePoints.delete(file.path);
+      this.render();
+    }
+  }
+
+  private async generateKnowledgePointQuiz(file: TFile, point: KnowledgePoint): Promise<void> {
+    if (this.pendingKnowledgePointQuizzes.has(point.id)) return;
+    this.pendingKnowledgePointQuizzes.add(point.id);
+    try {
+      const question = await this.plugin.ai.generateKnowledgePointQuiz(file.path, file.basename, point);
+      const category = this.getSummaryMeta(file)?.category ?? this.plugin.settings.defaultArticleCategory;
+      await this.plugin.quizNotes.appendKnowledgePointQuiz(file, category, point, question);
+      this.quizStatsCache.delete(file.path);
+      this.knowledgePointCache.delete(file.path);
+      await this.refreshKnowledgePointData(file.path);
+      new Notice("KnowFlow: 已为该知识点生成 1 道试题");
+    } catch (error) {
+      new Notice(`KnowFlow quiz failed: ${error instanceof Error ? error.message : String(error)}`, 8000);
+    } finally {
+      this.pendingKnowledgePointQuizzes.delete(point.id);
+      this.render();
+    }
   }
 
   private renderQuizTest(root: HTMLElement, session: QuizSession): void {
@@ -842,13 +998,21 @@ export class KnowFlowSidebarView extends ItemView {
     try {
       const content = await this.app.vault.read(file);
       const readingValue = this.getArticleReadingValue(file) || 3;
-      const questions = await this.plugin.ai.generateQuiz(file.path, file.basename, content, readingValue);
+      const knowledgePoints = await this.plugin.quizNotes.loadKnowledgePoints(file.path);
+      const questions = await this.plugin.ai.generateQuiz(
+        file.path,
+        file.basename,
+        content,
+        readingValue,
+        knowledgePoints?.groups ?? []
+      );
       if (questions.length === 0) {
         throw new Error("Quiz model did not return valid questions.");
       }
       const category = this.getSummaryMeta(file)?.category ?? this.plugin.settings.defaultArticleCategory;
       await this.plugin.quizNotes.saveQuiz(file, category, questions);
       this.quizStatsCache.delete(file.path);
+      this.knowledgePointCache.delete(file.path);
       new Notice(`KnowFlow: generated ${questions.length} quiz questions`);
       this.render();
     } catch (error) {
@@ -885,6 +1049,7 @@ export class KnowFlowSidebarView extends ItemView {
     // since regenerating a quiz always rewrites the whole file anyway.
     await this.plugin.quizNotes.recordAnswer(session.quizPath, session.index + 1, session.selectedKey, question.answerKey);
     this.quizStatsCache.delete(session.filePath);
+    this.knowledgePointCache.delete(session.filePath);
     session.submitted = true;
     this.render();
   }
@@ -1137,6 +1302,9 @@ export class KnowFlowSidebarView extends ItemView {
   private getRenderContextKey(): string {
     if (this.activeChatThread) return `chat:${this.activeChatThread.id}`;
     if (this.quizSession) return `quiz:${this.quizSession.filePath}`;
+    if (this.knowledgePointView) {
+      return `knowledge:${this.knowledgePointView.filePath}`;
+    }
     const context = this.plugin.router.getContext();
     return `${context.mode}:${context.activeFile?.path ?? context.selectedPath ?? ""}`;
   }
@@ -1266,4 +1434,14 @@ function localDateKey(date: Date): string {
 
 function dailyTaskPlanKey(date: string, scopePath: string): string {
   return `${date}:${scopePath}`;
+}
+
+function normalizeHeading(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(/^#+\s*/, "")
+    .replace(/[–—]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase();
 }
