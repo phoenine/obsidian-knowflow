@@ -1,4 +1,4 @@
-import type { DailyTaskPlan, DailyTaskStatus, PipelineStatus } from "../types";
+import type { DailyTask, DailyTaskPlan, DailyTaskStatus, PipelineStatus } from "../types";
 
 interface StoredData {
   pipelineStatuses: Record<string, PipelineStatus>;
@@ -278,12 +278,18 @@ export class KnowledgeStore {
   }
 
   getCompletedTaskPathsSince(since: Date): string[] {
-    const paths = Object.values(this.data.dailyTaskPlans)
-      .flatMap((plan) => plan.tasks)
-      .filter((task) => task.type === "new_note" && task.status === "completed" && task.targetPath && task.completedAt)
-      .filter((task) => new Date(task.completedAt as string) >= since)
+    const paths = this.getCompletedTasksSince(since)
+      .filter((task) => task.type === "new_note" && task.targetPath)
       .map((task) => task.targetPath as string);
     return Array.from(new Set(paths));
+  }
+
+  getCompletedTasksSince(since: Date): DailyTask[] {
+    return Object.values(this.data.dailyTaskPlans)
+      .flatMap((plan) => plan.tasks)
+      .filter((task) => task.status === "completed" && task.completedAt)
+      .filter((task) => new Date(task.completedAt as string) >= since)
+      .map((task) => structuredClone(task));
   }
 
   private reindexDailyTaskPlans(): void {

@@ -199,7 +199,7 @@ function createHost(initial) {
     scopePath: "Articles/AI",
     generatedAt: "2026-08-09T08:00:00.000Z",
     newArticleLimit: 1,
-    reviewLimit: 0,
+    reviewLimit: 1,
     tasks: [{
       id: "new_note:Articles/AI/one.md",
       type: "new_note",
@@ -207,12 +207,27 @@ function createHost(initial) {
       targetPath: "Articles/AI/one.md",
       status: "pending",
       completedAt: null
+    }, {
+      id: "review_note:Articles/AI/review.md",
+      type: "review_note",
+      title: "Review",
+      targetPath: "Articles/AI/review.md",
+      status: "pending",
+      completedAt: null
     }]
   });
 
   await store.updateDailyTaskStatus("2026-08-09", "Articles/AI", "new_note:Articles/AI/one.md", "completed", "2026-08-09T09:00:00.000Z");
+  await store.updateDailyTaskStatus("2026-08-09", "Articles/AI", "review_note:Articles/AI/review.md", "completed", "2026-08-09T10:00:00.000Z");
   assert.equal(store.getDailyTaskPlan("2026-08-09", "Articles/AI")?.tasks[0].status, "completed");
   assert.deepEqual(store.getCompletedTaskPathsSince(new Date("2026-08-09T08:30:00.000Z")), ["Articles/AI/one.md"]);
+  assert.deepEqual(
+    store.getCompletedTasksSince(new Date("2026-08-09T08:30:00.000Z")).map((task) => ({ path: task.targetPath, completedAt: task.completedAt })),
+    [
+      { path: "Articles/AI/one.md", completedAt: "2026-08-09T09:00:00.000Z" },
+      { path: "Articles/AI/review.md", completedAt: "2026-08-09T10:00:00.000Z" }
+    ]
+  );
 
   await store.migrateFolder("Articles/AI", "Articles/人工智能");
   assert.equal(store.getDailyTaskPlan("2026-08-09", "Articles/AI"), null);

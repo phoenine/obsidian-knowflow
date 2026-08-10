@@ -1,7 +1,7 @@
 import { ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import type KnowFlowPlugin from "../main";
 import { ARTICLE_CATEGORIES } from "../services/clipping-pipeline";
-import { createDailyTaskPlan } from "../services/daily-tasks";
+import { createDailyTaskPlan, type DailyTaskCandidate } from "../services/daily-tasks";
 import { insertBelowCursor } from "../services/editor-bridge";
 import type { SummaryText } from "../services/summary-notes";
 import { KNOWFLOW_VIEW_TYPE, type ArticleStats, type ChatMessage, type ChatThread, type ChatUsage, type DailyTask, type DailyTaskPlan, type NoteSummary, type PipelineUiState, type QuizSession, type QuizStats, type ViewContext } from "../types";
@@ -42,7 +42,6 @@ export class KnowFlowSidebarView extends ItemView {
   private summaryTextLoads = new WeakMap<TFile, Promise<SummaryText | null>>();
   private streamingSummaryTexts = new Map<string, string>();
   private streamingSummaryReasonings = new Map<string, string>();
-  private clippingSummaryScanPending = false;
   private dailyTaskPlanLoads = new Set<string>();
 
   constructor(
@@ -247,29 +246,29 @@ export class KnowFlowSidebarView extends ItemView {
     const selectedPath = context.selectedPath ?? this.plugin.settings.articlesFolder;
     const scope = selectedPath.startsWith(this.plugin.settings.articlesFolder) ? selectedPath : this.plugin.settings.articlesFolder;
     const stats = this.getArticleStats(scope);
-    const clippingStats = this.getClippingStats();
     const categoryStats = this.getArticleCategoryStats(scope);
     const scopeLabel = scope.replace(`${this.plugin.settings.articlesFolder}/`, "") || "全部文章";
-    const weeklyLearned = this.getWeeklyLearnedCount(scope);
+    const weeklyActivity = this.getWeeklyLearningActivity(scope);
+    const weeklyLearned = weeklyActivity.dailyLearned.reduce((sum, count) => sum + count, 0);
     const plan = this.getCurrentDailyTaskPlan(scope);
     if (!plan) void this.ensureDailyTaskPlan(scope, false);
     const loading = this.dailyTaskPlanLoads.has(dailyTaskPlanKey(localDateKey(new Date()), scope));
     renderTaskOverviewView(root, {
       scopeLabel,
       stats,
-      clippingStats,
       categoryStats,
       tasks: plan?.tasks ?? [],
       loading,
       weeklyLearned,
-      onStartDaily: () => plan ? this.openFirstPendingTask(plan) : undefined,
-      onRegenerate: () => {
-        void this.ensureDailyTaskPlan(scope, true);
-        this.render();
-      },
+      weeklyReviewCount: weeklyActivity.reviewCount,
+      weeklyReadTrend: weeklyActivity.dailyLearned,
+      weeklyReviewTrend: weeklyActivity.dailyReview,
       onOpenTask: (task) => this.openDailyTask(task),
       onCompleteTask: (task) => {
         if (plan) void this.updateDailyTask(plan, task, "completed");
+      },
+      onRefreshTask: (task) => {
+        if (plan) void this.refreshDailyTask(plan, task);
       },
       onSkipTask: (task) => {
         if (plan) void this.updateDailyTask(plan, task, "skipped");
@@ -298,15 +297,7 @@ export class KnowFlowSidebarView extends ItemView {
 
     try {
       const existing = force ? null : this.plugin.store.getDailyTaskPlan(date, scopePath);
-      const candidates = await Promise.all(this.getArticleFiles(scopePath).map(async (file) => {
-        const learned = this.isArticleLearned(file);
-        return {
-          path: file.path,
-          title: file.basename,
-          learned,
-          reviewable: learned ? await this.plugin.quizNotes.hasQuiz(file.path) : false
-        };
-      }));
+      const candidates = await this.getDailyTaskCandidates(scopePath);
 
       const plan = createDailyTaskPlan({
         date,
@@ -326,13 +317,50 @@ export class KnowFlowSidebarView extends ItemView {
     }
   }
 
-  private openFirstPendingTask(plan: DailyTaskPlan): void {
-    const task = plan.tasks.find((candidate) => candidate.status === "pending");
-    if (!task) {
-      new Notice("今日任务已完成");
-      return;
+  private async getDailyTaskCandidates(scopePath: string): Promise<DailyTaskCandidate[]> {
+    return Promise.all(this.getArticleFiles(scopePath).map(async (file) => {
+      const learned = this.isArticleLearned(file);
+      return {
+        path: file.path,
+        title: file.basename,
+        learned,
+        reviewable: learned ? await this.plugin.quizNotes.hasQuiz(file.path) : false
+      };
+    }));
+  }
+
+  private async refreshDailyTask(plan: DailyTaskPlan, task: DailyTask): Promise<void> {
+    if (task.status !== "pending" || !task.targetPath) return;
+    const loadKey = dailyTaskPlanKey(plan.date, plan.scopePath);
+    if (this.dailyTaskPlanLoads.has(loadKey)) return;
+    this.dailyTaskPlanLoads.add(loadKey);
+
+    try {
+      const candidates = (await this.getDailyTaskCandidates(plan.scopePath))
+        .filter((candidate) => candidate.path !== task.targetPath);
+      const existingTasks = plan.tasks.filter((existingTask) => existingTask.id !== task.id);
+      const refreshed = createDailyTaskPlan({
+        date: plan.date,
+        scopePath: plan.scopePath,
+        generatedAt: new Date().toISOString(),
+        newArticleLimit: plan.newArticleLimit,
+        reviewLimit: plan.reviewLimit,
+        candidates,
+        existingTasks
+      });
+      const currentTypeCount = plan.tasks.filter((existingTask) => existingTask.type === task.type).length;
+      const refreshedTypeCount = refreshed.tasks.filter((existingTask) => existingTask.type === task.type).length;
+      if (refreshedTypeCount < currentTypeCount) {
+        new Notice("KnowFlow: 暂无可替换的任务");
+        return;
+      }
+      await this.plugin.store.saveDailyTaskPlan(refreshed);
+    } catch (error) {
+      new Notice(`KnowFlow: 更换任务失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.dailyTaskPlanLoads.delete(loadKey);
+      if (this.plugin.router.getContext().mode === "task-overview") this.render();
     }
-    this.openDailyTask(task);
   }
 
   private openDailyTask(task: DailyTask): void {
@@ -948,32 +976,6 @@ export class KnowFlowSidebarView extends ItemView {
     };
   }
 
-  private getClippingStats(): { total: number; summarized: number; highValue: number } {
-    const files = this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(`${this.plugin.settings.clippingFolder}/`));
-    const uncached = files.some((file) => this.getCachedSummaryText(file) === undefined);
-    if (uncached && !this.clippingSummaryScanPending) {
-      void this.refreshClippingSummaryStats(files);
-    }
-    const summarized = files.filter((file) => this.getCachedSummaryText(file) !== null && this.getCachedSummaryText(file) !== undefined);
-    return {
-      total: files.length,
-      summarized: summarized.length,
-      highValue: summarized.filter((file) => this.getArticleReadingValue(file) >= 4).length
-    };
-  }
-
-  private async refreshClippingSummaryStats(files: TFile[]): Promise<void> {
-    this.clippingSummaryScanPending = true;
-    try {
-      await Promise.all(files.map((file) => this.readSummaryText(file)));
-      if (this.plugin.router.getContext().mode === "task-overview") {
-        this.render();
-      }
-    } finally {
-      this.clippingSummaryScanPending = false;
-    }
-  }
-
   private getArticleCategoryStats(scopePath: string): Array<{ name: string; total: number; learned: number }> {
     return ARTICLE_CATEGORIES.map((category) => {
       const prefix = `${this.plugin.settings.articlesFolder}/${category}/`;
@@ -986,17 +988,40 @@ export class KnowFlowSidebarView extends ItemView {
     }).filter((category) => category.total > 0);
   }
 
-  private getWeeklyLearnedCount(scopePath: string): number {
+  private getWeeklyLearningActivity(scopePath: string): { dailyLearned: number[]; dailyReview: number[]; reviewCount: number } {
     const weekStart = startOfLocalWeek(new Date());
-    const frontmatterPaths = this.getArticleFiles(scopePath)
-      .filter((file) => {
-        const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-        const date = this.getFrontmatterLearningDate(frontmatter);
-        return date ? date >= weekStart : false;
-      }).map((file) => file.path);
-    const completedTaskPaths = this.plugin.store.getCompletedTaskPathsSince(weekStart)
-      .filter((path) => path.startsWith(`${scopePath}/`));
-    return new Set([...frontmatterPaths, ...completedTaskPaths]).size;
+    const learnedPathsByDay = Array.from({ length: 7 }, () => new Set<string>());
+    const dailyReview = Array.from({ length: 7 }, () => 0);
+    const addLearnedPath = (path: string, date: Date): void => {
+      const localDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+      const index = Math.round((localDay.getTime() - weekStart.getTime()) / 86_400_000);
+      if (index >= 0 && index < learnedPathsByDay.length) learnedPathsByDay[index].add(path);
+    };
+
+    for (const file of this.getArticleFiles(scopePath)) {
+      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+      const date = this.getFrontmatterLearningDate(frontmatter);
+      if (date) addLearnedPath(file.path, date);
+    }
+
+    let reviewCount = 0;
+    for (const task of this.plugin.store.getCompletedTasksSince(weekStart)) {
+      if (!task.targetPath?.startsWith(`${scopePath}/`) || !task.completedAt) continue;
+      if (task.type === "new_note") addLearnedPath(task.targetPath, new Date(task.completedAt));
+      if (task.type === "review_note") {
+        reviewCount += 1;
+        const completedAt = new Date(task.completedAt);
+        const localDay = new Date(completedAt.getFullYear(), completedAt.getMonth(), completedAt.getDate());
+        const index = Math.round((localDay.getTime() - weekStart.getTime()) / 86_400_000);
+        if (index >= 0 && index < dailyReview.length) dailyReview[index] += 1;
+      }
+    }
+
+    return {
+      dailyLearned: learnedPathsByDay.map((paths) => paths.size),
+      dailyReview,
+      reviewCount
+    };
   }
 
   private getArticleFiles(scopePath: string): TFile[] {

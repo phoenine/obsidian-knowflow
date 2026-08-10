@@ -77,6 +77,30 @@ assert.equal(preserved.tasks[0].status, "completed", "eligible tasks must keep t
 assert.equal(preserved.tasks[1].status, "completed", "eligible review tasks must keep their same-day status");
 assert.equal(preserved.tasks[2].status, "pending");
 
+const refreshed = createDailyTaskPlan({
+  date: "2026-08-09",
+  scopePath: "Articles/AI",
+  generatedAt: "2026-08-09T10:00:00.000Z",
+  newArticleLimit: 2,
+  reviewLimit: 1,
+  candidates: [
+    { path: "Articles/AI/new-1.md", title: "New 1", learned: false, reviewable: false },
+    { path: "Articles/AI/new-3.md", title: "New 3", learned: false, reviewable: false },
+    { path: "Articles/AI/review-1.md", title: "Review 1", learned: true, reviewable: true }
+  ],
+  existingTasks: [
+    { id: "new_note:Articles/AI/new-1.md", type: "new_note", title: "New 1", targetPath: "Articles/AI/new-1.md", status: "pending", completedAt: null },
+    { id: "review_note:Articles/AI/review-1.md", type: "review_note", title: "Review 1", targetPath: "Articles/AI/review-1.md", status: "completed", completedAt: "2026-08-09T08:30:00.000Z" }
+  ],
+  random: () => 0
+});
+assert.deepEqual(refreshed.tasks.map((task) => task.targetPath), [
+  "Articles/AI/new-1.md",
+  "Articles/AI/new-3.md",
+  "Articles/AI/review-1.md"
+]);
+assert.equal(refreshed.tasks[2].status, "completed", "refreshing one task must preserve the other task states");
+
 const empty = createDailyTaskPlan({
   date: "2026-08-09",
   scopePath: "Articles",
