@@ -16,10 +16,23 @@ export function renderQuizTestView(root: HTMLElement, props: QuizTestViewProps):
   const content = renderShell(root, "Quiz", `${session.index + 1}/${session.questions.length}`, props.onBack);
   const question = session.questions[session.index];
   const card = section(content, "kf-quiz-test");
-  const head = row(card);
-  setStyles(head, { justifyContent: "space-between" });
-  text(head, question.question, "kf-card-title");
-  text(head, `难度 ${question.difficulty}/5`, "kf-pill");
+  const difficulty = row(card);
+  setStyles(difficulty, { justifyContent: "flex-end" });
+  text(difficulty, `难度 ${question.difficulty}/5`, "kf-pill");
+  const questionRow = row(card);
+  setStyles(questionRow, { alignItems: "flex-start", gap: "6px" });
+  setStyles(questionRow.createSpan({ text: `${session.index + 1}.` }), {
+    flex: "0 0 auto",
+    fontSize: "15px",
+    fontWeight: "650",
+    lineHeight: "1.35"
+  });
+  setStyles(text(questionRow, question.question, "kf-card-title"), {
+    minWidth: "0",
+    overflowWrap: "anywhere",
+    textAlign: "left",
+    whiteSpace: "normal"
+  });
 
   const options = card.createDiv({ cls: "kf-quiz-options" });
   setStyles(options, {
@@ -31,7 +44,7 @@ export function renderQuizTestView(root: HTMLElement, props: QuizTestViewProps):
     const selected = session.selectedKey === option.key;
     const isCorrect = session.submitted && option.key === question.answerKey;
     const isWrong = session.submitted && selected && option.key !== question.answerKey;
-    const optionButton = options.createEl("button", { text: `${option.key}. ${option.content}` });
+    const optionButton = options.createEl("button");
     setStyles(optionButton, {
       alignItems: "flex-start",
       backgroundColor: isCorrect
@@ -55,6 +68,16 @@ export function renderQuizTestView(root: HTMLElement, props: QuizTestViewProps):
       whiteSpace: "normal",
       width: "100%",
       wordBreak: "break-word"
+    });
+    setStyles(optionButton.createSpan({ text: `${option.key}.` }), {
+      flex: "0 0 auto",
+      lineHeight: "1.45"
+    });
+    setStyles(optionButton.createSpan({ text: option.content }), {
+      minWidth: "0",
+      overflowWrap: "anywhere",
+      textAlign: "left",
+      whiteSpace: "normal"
     });
     optionButton.disabled = session.submitted;
     optionButton.addEventListener("click", () => props.onSelect(option.key));

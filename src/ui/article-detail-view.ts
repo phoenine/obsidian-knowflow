@@ -9,6 +9,7 @@ interface ArticleDetailViewProps extends SummaryCardProps {
   learningStatus: string;
   knowledgePointCount: number | null;
   knowledgeMapPending: boolean;
+  quizPending: boolean;
   quiz: QuizStats;
   onGenerateKnowledgeMap: () => void;
   onShowKnowledgePoints: () => void;
@@ -59,6 +60,17 @@ export function renderArticleDetailView(root: HTMLElement, props: ArticleDetailV
   metric(quizMetrics, "错题", String(props.quiz.wrong));
   const actions = row(quizCard, "kf-actions");
   applyActionLayout(actions);
-  button(actions, "生成试题", props.onGenerateQuiz, true);
+  const generateQuizButton = button(
+    actions,
+    props.quizPending ? "生成中…" : props.quiz.total > 0 ? "重新生成" : "生成试题",
+    props.onGenerateQuiz,
+    true
+  );
+  generateQuizButton.disabled = props.quizPending;
+  generateQuizButton.setAttribute("aria-busy", String(props.quizPending));
+  if (props.quizPending) {
+    generateQuizButton.style.cursor = "default";
+    generateQuizButton.style.opacity = "0.72";
+  }
   button(actions, "开始测试", props.onStartQuiz);
 }

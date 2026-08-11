@@ -43,6 +43,7 @@ export class KnowFlowSidebarView extends ItemView {
   private pendingKnowledgeMaps = new Set<string>();
   private pendingKnowledgePoints = new Set<string>();
   private pendingKnowledgePointQuizzes = new Set<string>();
+  private pendingQuizzes = new Set<string>();
   private knowledgePointView: KnowledgePointViewState | null = null;
   private knowledgePointCache = new Map<string, CachedKnowledgePoints>();
   private pipelineStates = new Map<string, PipelineUiState>();
@@ -433,6 +434,7 @@ export class KnowFlowSidebarView extends ItemView {
       analysisCost: estimateClippingAnalysisTokens(file),
       sourceLabel: "文章",
       knowledgeMapPending: this.pendingKnowledgeMaps.has(file.path),
+      quizPending: this.pendingQuizzes.has(file.path),
       quiz,
       renderMarkdownSummary: (parent, markdown) => void this.renderMarkdownSummary(parent, markdown, file.path),
       onRefreshSummary: () => this.ensureSummary(file, true),
@@ -995,6 +997,11 @@ export class KnowFlowSidebarView extends ItemView {
   }
 
   private async generateQuiz(file: TFile): Promise<void> {
+    if (this.pendingQuizzes.has(file.path)) return;
+    this.pendingQuizzes.add(file.path);
+    if (this.plugin.router.getContext().activeFile?.path === file.path) {
+      this.render();
+    }
     try {
       const content = await this.app.vault.read(file);
       const readingValue = this.getArticleReadingValue(file) || 3;
@@ -1014,9 +1021,13 @@ export class KnowFlowSidebarView extends ItemView {
       this.quizStatsCache.delete(file.path);
       this.knowledgePointCache.delete(file.path);
       new Notice(`KnowFlow: generated ${questions.length} quiz questions`);
-      this.render();
     } catch (error) {
       new Notice(`KnowFlow quiz failed: ${error instanceof Error ? error.message : String(error)}`, 8000);
+    } finally {
+      this.pendingQuizzes.delete(file.path);
+      if (this.plugin.router.getContext().activeFile?.path === file.path) {
+        this.render();
+      }
     }
   }
 
