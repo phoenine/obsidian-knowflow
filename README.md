@@ -199,7 +199,7 @@ npm test           # 完整回归测试
 GitHub Actions 包含两条发布相关工作流：
 
 - `CI`：在 main 和 Pull Request 上执行版本校验、完整测试和生产构建，并上传 `knowflow-ci.zip`。
-- `Release`：在推送语义版本 tag 后重新验证和构建，创建 GitHub Release，并上传可安装 ZIP 及 Obsidian 标准插件文件。
+- `Release`：在推送语义版本 tag 后重新验证和构建，创建或更新 GitHub Release，并上传可安装 ZIP 及 Obsidian 标准插件文件。也可以手动运行该工作流，为已存在的 Release 补传产物。
 
 发布前应确保 `package.json`、`package-lock.json`、`manifest.json` 和 `versions.json` 使用同一版本。可以在本地运行：
 

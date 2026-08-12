@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing semantic version tag to build and publish
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -11,9 +17,13 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -25,22 +35,31 @@ jobs:
         run: npm ci
 
       - name: Validate tag and release metadata
-        run: npm run release:check -- "$GITHUB_REF_NAME"
+        run: npm run release:check -- "$RELEASE_TAG"
 
       - name: Run tests and production build
         run: npm test
 
       - name: Package release
-        run: zip "knowflow-${GITHUB_REF_NAME}.zip" main.js manifest.json styles.css
+        run: zip "knowflow-${RELEASE_TAG}.zip" main.js manifest.json styles.css
 
-      - name: Create GitHub Release
+      - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "$GITHUB_REF_NAME"
-          "knowflow-${GITHUB_REF_NAME}.zip"
-          main.js
-          manifest.json
-          styles.css
-          --generate-notes
-          --title "KnowFlow ${GITHUB_REF_NAME}"
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
+              "knowflow-${RELEASE_TAG}.zip" \
+              main.js \
+              manifest.json \
+              styles.css \
+              --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              "knowflow-${RELEASE_TAG}.zip" \
+              main.js \
+              manifest.json \
+              styles.css \
+              --generate-notes \
+              --title "KnowFlow ${RELEASE_TAG}"
+          fi
