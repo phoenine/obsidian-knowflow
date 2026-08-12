@@ -221,7 +221,8 @@ function reviewTaskRow(parent: HTMLElement, review: DailyReviewSession, props: T
     color: PALETTE.review,
     fontSize: "13px",
     fontWeight: "400",
-    lineHeight: "17px"
+    lineHeight: "17px",
+    textDecoration: review.completedAt ? "line-through" : "none"
   });
 
   taskAction(item, "刷新题目", "refresh-cw", answered === 0, props.onRefreshReview);

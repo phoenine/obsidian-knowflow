@@ -639,9 +639,12 @@ export class KnowFlowSidebarView extends ItemView {
       const answer = assistant.createDiv({ cls: "kf-answer" });
       setStyles(answer, {
         color: "var(--text-normal)",
+        cursor: "text",
         fontSize: "13px",
         lineHeight: "1.5",
         minHeight: message.status === "pending" ? "24px" : "0",
+        userSelect: "text",
+        webkitUserSelect: "text",
         whiteSpace: message.status === "done" ? "normal" : "pre-wrap"
       });
       if (message.status === "done") {
