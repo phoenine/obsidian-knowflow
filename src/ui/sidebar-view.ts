@@ -2,6 +2,7 @@ import { ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf } from "obsidi
 import type KnowFlowPlugin from "../main";
 import { ARTICLE_CATEGORIES } from "../services/clipping/clipping-pipeline";
 import { createDailyTaskPlan, type DailyTaskCandidate } from "../services/learning/daily-tasks";
+import { summarizeWeeklyReviewActivity } from "../services/learning/review-activity";
 import { insertBelowCursor } from "../services/chat/editor-bridge";
 import { KNOWFLOW_VIEW_TYPE, type ArticleStats, type ChatMessage, type ChatThread, type DailyReviewSession, type DailyTask, type DailyTaskPlan, type KnowledgePoint, type NoteSummary, type PipelineUiState, type QuizSession, type ViewContext } from "../types";
 import { renderArticleDetailView } from "./article-detail-view";
@@ -247,6 +248,7 @@ export class KnowFlowSidebarView extends ItemView {
       loading,
       weeklyLearned,
       weeklyReviewCount: weeklyActivity.reviewCount,
+      weeklyReviewAccuracy: weeklyActivity.reviewAccuracy,
       weeklyReadTrend: weeklyActivity.dailyLearned,
       weeklyReviewTrend: weeklyActivity.dailyReview,
       onOpenTask: (task) => this.openDailyTask(task),
@@ -939,10 +941,9 @@ export class KnowFlowSidebarView extends ItemView {
     }).filter((category) => category.total > 0);
   }
 
-  private getWeeklyLearningActivity(scopePath: string): { dailyLearned: number[]; dailyReview: number[]; reviewCount: number } {
+  private getWeeklyLearningActivity(scopePath: string): { dailyLearned: number[]; dailyReview: number[]; reviewCount: number; reviewAccuracy: number | null } {
     const weekStart = startOfLocalWeek(new Date());
     const learnedPathsByDay = Array.from({ length: 7 }, () => new Set<string>());
-    const dailyReview = Array.from({ length: 7 }, () => 0);
     const addLearnedPath = (path: string, date: Date): void => {
       const localDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
       const index = Math.round((localDay.getTime() - weekStart.getTime()) / 86_400_000);
@@ -955,29 +956,22 @@ export class KnowFlowSidebarView extends ItemView {
       if (date) addLearnedPath(file.path, date);
     }
 
-    let reviewCount = 0;
     for (const task of this.plugin.store.getCompletedTasksSince(weekStart)) {
       if (!task.targetPath?.startsWith(`${scopePath}/`) || !task.completedAt) continue;
       if (task.type === "new_note") addLearnedPath(task.targetPath, new Date(task.completedAt));
     }
-    const articleRootScope = scopePath === this.plugin.settings.articlesFolder;
-    for (const session of this.plugin.store.getCompletedReviewSessionsSince(weekStart)) {
-      if (!session.completedAt) continue;
-      const questionCount = articleRootScope
-        ? session.questions.length
-        : session.questions.filter((question) => question.articlePath.startsWith(`${scopePath}/`)).length;
-      if (questionCount === 0) continue;
-      reviewCount += questionCount;
-      const completedAt = new Date(session.completedAt);
-      const localDay = new Date(completedAt.getFullYear(), completedAt.getMonth(), completedAt.getDate());
-      const index = Math.round((localDay.getTime() - weekStart.getTime()) / 86_400_000);
-      if (index >= 0 && index < dailyReview.length) dailyReview[index] += questionCount;
-    }
+    const reviewActivity = summarizeWeeklyReviewActivity(
+      this.plugin.store.getCompletedReviewSessionsSince(weekStart),
+      weekStart,
+      scopePath,
+      this.plugin.settings.articlesFolder
+    );
 
     return {
       dailyLearned: learnedPathsByDay.map((paths) => paths.size),
-      dailyReview,
-      reviewCount
+      dailyReview: reviewActivity.dailyQuestions,
+      reviewCount: reviewActivity.sessionCount,
+      reviewAccuracy: reviewActivity.averageAccuracy
     };
   }
 

@@ -12,6 +12,7 @@ interface TaskOverviewViewProps {
   loading: boolean;
   weeklyLearned: number;
   weeklyReviewCount: number;
+  weeklyReviewAccuracy: number | null;
   weeklyReadTrend: number[];
   weeklyReviewTrend: number[];
   onOpenTask: (task: DailyTask) => void;
@@ -84,7 +85,8 @@ export function renderTaskOverviewView(root: HTMLElement, props: TaskOverviewVie
     props.weeklyReadTrend,
     props.weeklyReviewTrend,
     props.weeklyLearned,
-    props.weeklyReviewCount
+    props.weeklyReviewCount,
+    props.weeklyReviewAccuracy
   );
   renderArticleStats(page, props.scopeLabel, props.stats, props.categoryStats);
 }
@@ -388,7 +390,8 @@ function renderLearningTrend(
   weeklyReadTrend: number[],
   weeklyReviewTrend: number[],
   weeklyLearned: number,
-  weeklyReviewCount: number
+  weeklyReviewCount: number,
+  weeklyReviewAccuracy: number | null
 ): void {
   const section = parent.createDiv({ cls: "kf-learning-trend" });
   setStyles(section, { padding: "14px 4px 0" });
@@ -412,7 +415,7 @@ function renderLearningTrend(
   const today = (new Date().getDay() + 6) % 7;
   for (let index = 0; index < days.length; index += 1) {
     const column = chart.createDiv();
-    const tooltip = `阅读：${readValues[index]} 篇\n复习：${reviewValues[index]} 次`;
+    const tooltip = `阅读：${readValues[index]} 篇\n复习：${reviewValues[index]} 题`;
     column.setAttribute("aria-label", tooltip);
     column.setAttribute("title", tooltip);
     setStyles(column, {
@@ -463,7 +466,7 @@ function renderLearningTrend(
   trendMetric(stats, "连续学习", `${currentWeekStreak(readValues, today)} 天`);
   trendMetric(stats, "本周阅读", `${weeklyLearned} 篇`, true);
   trendMetric(stats, "本周复习", `${weeklyReviewCount} 次`, true);
-  trendMetric(stats, "平均正确率", "--", true);
+  trendMetric(stats, "平均正确率", weeklyReviewAccuracy === null ? "--" : `${weeklyReviewAccuracy}%`, true);
 }
 
 function trendSegmentHeight(value: number, maxValue: number): number {
