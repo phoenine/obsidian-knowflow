@@ -12,7 +12,7 @@ Clipping → 整理 → 总结 → 知识点 → Quiz → 学习状态 → 每�
 
 ## 当前状态
 
-项目处于活跃开发阶段。当前插件清单版本为 `0.1.0`，核心 v2 学习流程已经可以使用，但尚未发布到 Obsidian Community Plugins。
+项目处于活跃开发阶段。当前插件清单版本为 `1.0.0`，核心学习流程已经可以使用，但尚未发布到 Obsidian Community Plugins。
 
 已实现：
 
@@ -193,6 +193,39 @@ npm run typecheck  # TypeScript 类型检查
 npm run build      # 生产构建
 npm test           # 完整回归测试
 ```
+
+## 发布
+
+GitHub Actions 包含两条发布相关工作流：
+
+- `CI`：在 main 和 Pull Request 上执行版本校验、完整测试和生产构建，并上传 `knowflow-ci.zip`。
+- `Release`：在推送语义版本 tag 后重新验证和构建，创建 GitHub Release，并上传可安装 ZIP 及 Obsidian 标准插件文件。
+
+发布前应确保 `package.json`、`package-lock.json`、`manifest.json` 和 `versions.json` 使用同一版本。可以在本地运行：
+
+```bash
+npm run release:check
+npm test
+```
+
+发布 `1.0.0`：
+
+```bash
+git tag 1.0.0
+git push origin main
+git push origin 1.0.0
+```
+
+Release 将包含：
+
+```text
+knowflow-1.0.0.zip
+main.js
+manifest.json
+styles.css
+```
+
+Tag 必须与 `manifest.json` 的版本完全一致，使用 `1.0.0`，不要添加 `v` 前缀。
 
 ## 源码结构
 

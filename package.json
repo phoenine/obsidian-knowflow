@@ -1,12 +1,13 @@
 {
   "name": "knowflow",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "AI-driven Obsidian learning assistant for clipping cleanup and article study.",
   "main": "main.js",
   "scripts": {
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs",
     "install:dev": "npm run build && node scripts/install-dev.mjs",
+    "release:check": "node scripts/validate-release.mjs",
     "test": "npm run build && node scripts/test-cleanup.mjs && node scripts/test-formatting-candidates.mjs && node scripts/test-translation-candidates.mjs && node scripts/test-store.mjs && node scripts/test-daily-tasks.mjs && node scripts/test-daily-review.mjs && node scripts/test-daily-review-service.mjs && node scripts/test-frontmatter-edge-cases.mjs && node scripts/test-note-operation-coordinator.mjs && node scripts/test-coordinated-services.mjs && node scripts/test-ui-controllers.mjs && node scripts/test-quiz-generation.mjs && node scripts/test-quiz-notes.mjs && node scripts/test-knowledge-points.mjs && node scripts/test-summary-notes.mjs && node scripts/test-mermaid-service.mjs && node scripts/test-chat.mjs",
     "typecheck": "tsc -noEmit -skipLibCheck"
   },
