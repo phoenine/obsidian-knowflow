@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 const packageJson = JSON.parse(await readFile("package.json", "utf8"));
 const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
 const versions = JSON.parse(await readFile("versions.json", "utf8"));
-const releaseTag = process.argv[2] ?? process.env.GITHUB_REF_NAME;
+const releaseTag = process.argv[2];
 const version = manifest.version;
 
 assert(/^\d+\.\d+\.\d+$/.test(version), `manifest version must be semantic (x.y.z), received: ${version}`);
