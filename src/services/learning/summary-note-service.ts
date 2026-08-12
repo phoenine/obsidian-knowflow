@@ -1,7 +1,7 @@
 import { TFile } from "obsidian";
 import type { App } from "obsidian";
-import { applySummaryFrontmatter, type SummaryFrontmatterData } from "./frontmatter-rules";
-import { NoteOperationCoordinator } from "./note-operation-coordinator";
+import { applySummaryFrontmatter, type SummaryFrontmatterData } from "../clipping/frontmatter-rules";
+import { NoteOperationCoordinator } from "../core/note-operation-coordinator";
 import { parseSummaryCallout, upsertSummaryCallout, type SummaryText } from "./summary-notes";
 
 /**

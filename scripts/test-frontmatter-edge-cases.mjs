@@ -16,7 +16,7 @@ import * as esbuild from "esbuild";
 const tempDir = await mkdtemp(join(tmpdir(), "knowflow-frontmatter-"));
 await esbuild.build({
   bundle: true,
-  entryPoints: ["src/services/frontmatter-rules.ts"],
+  entryPoints: ["src/services/clipping/frontmatter-rules.ts"],
   format: "esm",
   outdir: tempDir,
   platform: "node"
@@ -76,15 +76,24 @@ const baseData = { title: "标题", today: "2026-08-04" };
     "正文"
   ].join("\n");
   const result = applyArticleFrontmatter("正文", original, "", baseData);
-  assert.ok(result.includes("文章作者: Mars任鑫"));
+  assert.ok(result.includes('文章作者: "Mars任鑫"'));
   assert.ok(!result.includes("[[Mars任鑫]]"));
 }
 
-// Ordinary author values are outside this normalization and must round-trip.
+// Ordinary author values keep their content and are serialized safely.
 {
   const original = "---\n文章作者: Mars任鑫\n---\n正文";
   const result = applyArticleFrontmatter("正文", original, "", baseData);
-  assert.ok(result.includes("文章作者: Mars任鑫"));
+  assert.ok(result.includes('文章作者: "Mars任鑫"'));
+}
+
+// YAML reserves @ at the start of a plain scalar. Author handles must remain
+// intact but be quoted so Obsidian can parse and render the whole frontmatter.
+{
+  const original = "---\n文章作者: @undefinedKi\n---\n正文";
+  const result = applyArticleFrontmatter("正文", original, "", baseData);
+  assert.ok(result.includes('文章作者: "@undefinedKi"'));
+  assert.ok(!result.includes("文章作者: @undefinedKi"));
 }
 
 // Tab-indented continuation lines under a block field must still be treated

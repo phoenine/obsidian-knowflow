@@ -1,4 +1,4 @@
-import { splitFrontmatter } from "./frontmatter-rules";
+import { splitFrontmatter } from "../clipping/frontmatter-rules";
 
 // A managed AI summary is identified by its summary type and exact
 // "AI 摘要" title, regardless of where it appears in the article.

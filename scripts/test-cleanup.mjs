@@ -8,7 +8,7 @@ import * as esbuild from "esbuild";
 const tempDir = await mkdtemp(join(tmpdir(), "knowflow-cleanup-"));
 await esbuild.build({
   bundle: true,
-  entryPoints: ["src/services/cleanup-rules.ts", "src/services/frontmatter-rules.ts"],
+  entryPoints: ["src/services/clipping/cleanup-rules.ts", "src/services/clipping/frontmatter-rules.ts"],
   format: "esm",
   outdir: tempDir,
   platform: "node"

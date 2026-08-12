@@ -8,12 +8,12 @@ import * as esbuild from "esbuild";
 const tempDir = await mkdtemp(join(tmpdir(), "knowflow-quiz-notes-"));
 await esbuild.build({
   bundle: true,
-  entryPoints: ["src/services/quiz-notes.ts"],
+  entryPoints: ["src/services/learning/quiz-notes.ts"],
   format: "esm",
   outdir: tempDir,
   platform: "node"
 });
-const { appendQuizQuestion, buildQuizCallout, buildQuizNoteContent, computeKnowledgePointStatuses, parseQuizCallout, parseQuizNote, computeQuizStats, applyQuizAnswer, setExamPassed, sanitizeQuizFileName, updateQuizSourcePath, upsertQuizCallout, upsertQuizQuestions } = await import(
+const { appendQuizQuestion, buildQuizCallout, buildQuizNoteContent, computeKnowledgePointStatuses, parseQuizCallout, parseQuizEntries, parseQuizNote, computeQuizStats, applyQuizAnswer, setExamPassed, sanitizeQuizFileName, updateQuizSourcePath, upsertQuizCallout, upsertQuizQuestions } = await import(
   pathToFileURL(join(tempDir, "quiz-notes.js")).href
 );
 
@@ -32,6 +32,7 @@ const questions = [
     ],
     answerKey: "A",
     explanation: "文章第二段说明 Scheduler 用生产者-消费者模式。\n第二行解析，测试多行折叠为单行。",
+    sourceSection: "Scheduler 工作流程",
     difficulty: 4,
     createdAt: "2026-08-01T00:00:00.000Z"
   },
@@ -70,6 +71,7 @@ assert.ok(content.includes("<!-- study-quiz:end -->"));
 assert.ok(content.includes("```Answer fold"));
 assert.ok(content.includes("- 答案：A"));
 assert.ok(content.includes("- 难度：4/5"));
+assert.ok(content.includes("- 来源章节：Scheduler 工作流程"));
 // Multi-line explanations must collapse to a single line, matching the
 // "- 解析：..." single-line convention the Templater script parses.
 assert.ok(content.includes("- 解析：文章第二段说明 Scheduler 用生产者-消费者模式。 第二行解析，测试多行折叠为单行。"));
@@ -106,9 +108,50 @@ assert.equal(parsed[0].question, "第一题：Nano-vLLM 的 Scheduler 采用什�
 assert.deepEqual(parsed[0].options.map((o) => o.key), ["A", "B", "C", "D"]);
 assert.equal(parsed[0].answerKey, "A");
 assert.equal(parsed[0].difficulty, 4);
+assert.equal(parsed[0].sourceSection, "Scheduler 工作流程");
 assert.equal(parsed[1].answerKey, "B");
 assert.equal(parsed[1].explanation, "KV Cache 用显存换计算，本身会增加显存占用，不会降低。");
 assert.equal(parsed[0].createdAt, "2026-08-01");
+
+// Legacy study-quiz notes group questions under a ## heading and number the
+// actual questions as ### 1.1, ### 1.2. They remain part of the review bank
+// and must still support answer write-back by parsed display index.
+{
+  const legacy = [
+    "---",
+    "考试日期: 2026-06-02",
+    "---",
+    "",
+    "<!-- study-quiz:start -->",
+    "",
+    "## 1. 选择题",
+    "",
+    "### 1.1. First legacy question?",
+    "- [ ] A. First",
+    "- [ ] B. Second",
+    "```Answer fold",
+    "- 答案：B",
+    "- 解析：Legacy explanation.",
+    "```",
+    "",
+    "### 1.2. Second legacy question?",
+    "- [ ] A. First",
+    "- [ ] B. Second",
+    "```Answer fold",
+    "- 答案：A",
+    "- 解析：Second explanation.",
+    "```",
+    "",
+    "<!-- study-quiz:end -->"
+  ].join("\n");
+  const entries = parseQuizEntries(legacy, notePath);
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].question.question, "First legacy question?");
+  assert.equal(entries[1].question.answerKey, "A");
+  const answeredLegacy = applyQuizAnswer(legacy, 2, "B", false, "2026-08-12");
+  assert.ok(answeredLegacy.includes("- [x] B. Second ❌ 2026-08-12"));
+  assert.equal(parseQuizEntries(answeredLegacy, notePath)[1].answerState.correct, false);
+}
 
 // Knowledge point links live with questions and can derive UI status without
 // duplicating any knowledge content or mastery state into data.json.
@@ -145,6 +188,11 @@ assert.equal(stats.wrong, 0);
 content = applyQuizAnswer(content, 1, "A", true, "2026-08-04");
 assert.ok(content.includes("- [x] A. 生产者-消费者 ✅ 2026-08-04"));
 assert.ok(content.includes("- [ ] B. 发布-订阅"));
+assert.deepEqual(parseQuizEntries(content, notePath)[0].answerState, {
+  selectedKey: "A",
+  correct: true,
+  answeredAt: "2026-08-04"
+});
 // Question 2 must be untouched.
 assert.ok(content.includes("- [ ] A. 加速推理"));
 assert.ok(content.includes("- [ ] B. 降低显存占用"));

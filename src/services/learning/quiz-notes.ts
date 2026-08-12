@@ -1,4 +1,4 @@
-import type { KnowledgePointStatus, QuizOption, QuizQuestion, QuizStats } from "../types";
+import type { KnowledgePointStatus, QuizAnswerState, QuizOption, QuizQuestion, QuizStats } from "../../types";
 
 // Matches the vault's pre-existing "study-quiz" convention (see
 // .codex/skills/study-quiz/SKILL.md and the Archives/*.md files it
@@ -16,10 +16,10 @@ export interface QuizNoteMeta {
   createdAt: string;
 }
 
-export interface QuizAnswerState {
-  selectedKey: string | null;
-  correct: boolean | null;
-  answeredAt: string | null;
+export interface ParsedQuizQuestion {
+  displayIndex: number;
+  question: QuizQuestion;
+  answerState: QuizAnswerState;
 }
 
 /**
@@ -118,12 +118,26 @@ export function upsertQuizCallout(content: string, quizPath: string): string {
 
 /** Reconstructs the structured question bank from a quiz note's markdown. */
 export function parseQuizNote(content: string, notePath: string): QuizQuestion[] {
+  return parseQuizEntries(content, notePath).map((entry) => entry.question);
+}
+
+export function parseQuizEntries(content: string, notePath: string): ParsedQuizQuestion[] {
   const body = extractQuizBody(content);
   if (body === null) return [];
   const createdAt = extractFrontmatterField(content, "考试日期") ?? "";
   return splitQuestionBlocks(body)
-    .map((block, index) => parseQuestionBlock(block, index, notePath, createdAt))
-    .filter((question): question is QuizQuestion => question !== null);
+    .flatMap((block, index) => {
+      const question = parseQuestionBlock(block, index, notePath, createdAt);
+      if (!question) return [];
+      const state = readAnswerStateFromBlock(block);
+      return [{
+        displayIndex: index + 1,
+        question,
+        answerState: state.selectedKey && state.correct === null
+          ? { ...state, correct: state.selectedKey === question.answerKey }
+          : state
+      }];
+    });
 }
 
 /** Aggregates accuracy/wrong counts straight from checkbox state in the note. */
@@ -211,6 +225,7 @@ function renderQuestionBlock(question: QuizQuestion, displayIndex: number): stri
     `- 答案：${question.answerKey}`,
     `- 难度：${question.difficulty}/5`,
     ...(question.knowledgePointId ? [`- 知识点：[[#^${question.knowledgePointId}]]`] : []),
+    ...(question.sourceSection ? [`- 来源章节：${question.sourceSection.replace(/\s+/g, " ").trim()}`] : []),
     `- 解析：${explanation}`,
     "```"
   ].join("\n");
@@ -237,31 +252,21 @@ function extractFrontmatterField(content: string, key: string): string | null {
 }
 
 function splitQuestionBlocks(body: string): string[] {
-  return body
-    .split(/\n(?=## \d+\.\s)/)
-    .map((block) => block.trim())
-    .filter((block) => /^## \d+\.\s/.test(block));
+  return findQuestionBlocks(body).map((range) => body.slice(range.start, range.end).trim());
 }
 
 function findQuestionBlockRange(content: string, displayIndex: number): { start: number; end: number } | null {
-  const startRegex = new RegExp(`^## ${displayIndex}\\.\\s`, "m");
-  const startMatch = startRegex.exec(content);
-  if (!startMatch) return null;
-  const start = startMatch.index;
-
-  const afterStart = content.slice(start + startMatch[0].length);
-  const nextMatch = new RegExp(`^## ${displayIndex + 1}\\.\\s`, "m").exec(afterStart);
-  const endMarkerIndex = afterStart.indexOf(QUIZ_BLOCK_END);
-
-  let relativeEnd = afterStart.length;
-  if (nextMatch) relativeEnd = Math.min(relativeEnd, nextMatch.index);
-  if (endMarkerIndex !== -1) relativeEnd = Math.min(relativeEnd, endMarkerIndex);
-
-  return { start, end: start + startMatch[0].length + relativeEnd };
+  const bodyStart = content.indexOf(QUIZ_BLOCK_START);
+  const bodyEnd = content.indexOf(QUIZ_BLOCK_END);
+  if (bodyStart < 0 || bodyEnd <= bodyStart) return null;
+  const offset = bodyStart + QUIZ_BLOCK_START.length;
+  const body = content.slice(offset, bodyEnd);
+  const range = findQuestionBlocks(body)[displayIndex - 1];
+  return range ? { start: offset + range.start, end: offset + range.end } : null;
 }
 
 function parseQuestionBlock(block: string, index: number, notePath: string, createdAt: string): QuizQuestion | null {
-  const headingMatch = /^## \d+\.\s+(.+)$/m.exec(block);
+  const headingMatch = /^#{2,6}\s+(?:\d+(?:\.\d+)*\.\s+)?(.+)$/m.exec(block);
   if (!headingMatch) return null;
 
   const options: QuizOption[] = [];
@@ -279,11 +284,13 @@ function parseQuestionBlock(block: string, index: number, notePath: string, crea
   const difficultyMatch = /^-\s*难度[：:]\s*(\d)/m.exec(answerBlock);
   const difficulty = difficultyMatch ? Number(difficultyMatch[1]) : 3;
   const knowledgePointId = /^-\s*知识点[：:]\s*\[\[#\^([A-Za-z0-9-]+)\]\]/m.exec(answerBlock)?.[1];
+  const sourceSection = /^-\s*来源章节[：:]\s*(.+)$/m.exec(answerBlock)?.[1]?.trim();
 
   return {
     id: `q${index + 1}`,
     notePath,
     ...(knowledgePointId ? { knowledgePointId } : {}),
+    ...(sourceSection ? { sourceSection } : {}),
     question: headingMatch[1].trim(),
     type: "single_choice",
     options,
@@ -292,6 +299,18 @@ function parseQuestionBlock(block: string, index: number, notePath: string, crea
     difficulty,
     createdAt
   };
+}
+
+function findQuestionBlocks(body: string): Array<{ start: number; end: number }> {
+  const headings = Array.from(body.matchAll(/^#{2,6}\s+.+$/gm));
+  return headings.flatMap((heading, index) => {
+    const start = heading.index ?? 0;
+    const end = headings[index + 1]?.index ?? body.length;
+    const block = body.slice(start, end);
+    return /^- \[[ x]\] [A-Z]\.\s+/m.test(block) && /```Answer[^\n]*\n[\s\S]*?```/.test(block)
+      ? [{ start, end }]
+      : [];
+  });
 }
 
 function readAnswerStateFromBlock(block: string): QuizAnswerState {

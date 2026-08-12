@@ -651,14 +651,14 @@ Phase 5: 写回 (vault.modify)
 
 | 文件 | 内容 |
 |------|------|
-| `src/services/block-parser.ts` | `parseBlocks(content: string): MarkdownBlock[]` |
-| `src/services/code-confidence.ts` | `assessUnfencedCode(lines: string[], previousLine: string): UnfencedCodeAssessment` |
-| `src/services/repair-skill.ts` | `SkillLoader` + 内置默认 skill 回退 |
-| `src/services/repair-validator.ts` | `guardedModify` + `validateEdits` + `validateMarkdownIntegrity` |
+| `src/services/clipping/block-parser.ts` | `parseBlocks(content: string): MarkdownBlock[]` |
+| `src/services/clipping/code-confidence.ts` | `assessUnfencedCode(lines: string[], previousLine: string): UnfencedCodeAssessment` |
+| `src/services/clipping/repair-skill.ts` | `SkillLoader` + 内置默认 skill 回退 |
+| `src/services/clipping/repair-validator.ts` | `guardedModify` + `validateEdits` + `validateMarkdownIntegrity` |
 | `skills/clipping-repair.md` | 外置 skill 文件（用户 vault 内可编辑） |
-| `src/services/clipping-pipeline.ts` | 接入 Block Parser + 置信度 + Skill + 验证层 |
-| `src/services/formatting-candidates.ts` | 候选收集改为基于 Block Parser 输出 |
-| `src/services/ai-service.ts` | system prompt 改为拼接 Skill 内容 |
+| `src/services/clipping/clipping-pipeline.ts` | 接入 Block Parser + 置信度 + Skill + 验证层 |
+| `src/services/clipping/formatting-candidates.ts` | 候选收集改为基于 Block Parser 输出 |
+| `src/services/ai/ai-service.ts` | system prompt 改为拼接 Skill 内容 |
 
 ---
 

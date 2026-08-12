@@ -1,10 +1,9 @@
 import { ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import type KnowFlowPlugin from "../main";
-import { ARTICLE_CATEGORIES } from "../services/clipping-pipeline";
-import { createDailyTaskPlan, type DailyTaskCandidate } from "../services/daily-tasks";
-import { insertBelowCursor } from "../services/editor-bridge";
-import type { SummaryText } from "../services/summary-notes";
-import { KNOWFLOW_VIEW_TYPE, type ArticleStats, type ChatMessage, type ChatThread, type ChatUsage, type DailyTask, type DailyTaskPlan, type KnowledgePoint, type KnowledgePointGroup, type KnowledgePointStatus, type NoteSummary, type PipelineUiState, type QuizSession, type QuizStats, type ViewContext } from "../types";
+import { ARTICLE_CATEGORIES } from "../services/clipping/clipping-pipeline";
+import { createDailyTaskPlan, type DailyTaskCandidate } from "../services/learning/daily-tasks";
+import { insertBelowCursor } from "../services/chat/editor-bridge";
+import { KNOWFLOW_VIEW_TYPE, type ArticleStats, type ChatMessage, type ChatThread, type DailyReviewSession, type DailyTask, type DailyTaskPlan, type KnowledgePoint, type NoteSummary, type PipelineUiState, type QuizSession, type ViewContext } from "../types";
 import { renderArticleDetailView } from "./article-detail-view";
 import { renderTaskOverviewView } from "./task-overview-view";
 import { renderChatComposer } from "./chat-composer";
@@ -14,57 +13,55 @@ import { applyActionLayout, button, formatDate, iconButton, row, section, setSty
 import { renderQuizTestView } from "./quiz-test-view";
 import { renderKnowledgePointsOverview } from "./knowledge-points-view";
 import { renderShell } from "./shell";
-
-interface CachedSummaryText {
-  mtime: number;
-  text: SummaryText | null;
-}
+import { SummaryController } from "./controllers/summary-controller";
+import { QuizController } from "./controllers/quiz-controller";
+import { ChatController } from "./controllers/chat-controller";
 
 interface KnowledgePointViewState {
   filePath: string;
   selectedPointId: string | null;
 }
 
-interface CachedKnowledgePoints {
-  groups: KnowledgePointGroup[];
-  statuses: Record<string, KnowledgePointStatus>;
-}
-
 export class KnowFlowSidebarView extends ItemView {
-  private activeChatThread: ChatThread | null = null;
+  private chatController: ChatController;
   private streamingAnswerEl: HTMLElement | null = null;
   private streamingReasoningEl: HTMLElement | null = null;
   private streamingSummaryContentEl: HTMLElement | null = null;
   private streamingSummaryReasoningHistoryEl: HTMLElement | null = null;
   private streamingSummaryReasoningLatestEl: HTMLElement | null = null;
+  private summaryController: SummaryController;
+  private quizController: QuizController;
   private quizSession: QuizSession | null = null;
-  private pendingSummaries = new Set<string>();
-  private summaryErrors = new Map<string, string>();
-  private pendingKnowledgeMaps = new Set<string>();
-  private pendingKnowledgePoints = new Set<string>();
-  private pendingKnowledgePointQuizzes = new Set<string>();
-  private pendingQuizzes = new Set<string>();
   private knowledgePointView: KnowledgePointViewState | null = null;
-  private knowledgePointCache = new Map<string, CachedKnowledgePoints>();
   private pipelineStates = new Map<string, PipelineUiState>();
   private selectedCategories = new Map<string, string>();
   private manuallySelectedCategories = new Set<string>();
   private renderedContextKey: string | null = null;
   private composerDraft = "";
   private pendingComposerFocus = false;
-  private quizStatsCache = new Map<string, QuizStats>();
-  private quizStatsPending = new Set<string>();
-  private summaryTextCache = new WeakMap<TFile, CachedSummaryText>();
-  private summaryTextLoads = new WeakMap<TFile, Promise<SummaryText | null>>();
-  private streamingSummaryTexts = new Map<string, string>();
-  private streamingSummaryReasonings = new Map<string, string>();
   private dailyTaskPlanLoads = new Set<string>();
+  private dailyReviewLoads = new Set<string>();
 
   constructor(
     leaf: WorkspaceLeaf,
     private plugin: KnowFlowPlugin
   ) {
     super(leaf);
+    this.summaryController = new SummaryController(this.app, plugin, (filePath) => {
+      if (this.plugin.router.getContext().activeFile?.path === filePath) this.render();
+    });
+    this.chatController = new ChatController(this.app, plugin, () => this.render());
+    this.quizController = new QuizController(
+      this.app,
+      plugin,
+      (file) => this.getSummaryMeta(file).category ?? this.plugin.settings.defaultArticleCategory,
+      (filePath) => {
+        if (
+          this.plugin.router.getContext().activeFile?.path === filePath
+          || this.knowledgePointView?.filePath === filePath
+        ) this.render();
+      }
+    );
   }
 
   getViewType(): string {
@@ -105,8 +102,8 @@ export class KnowFlowSidebarView extends ItemView {
     });
     this.renderedContextKey = nextContextKey;
 
-    if (this.activeChatThread) {
-      this.renderChatThread(root, this.activeChatThread);
+    if (this.chatController.activeThread) {
+      this.renderChatThread(root, this.chatController.activeThread);
       this.restoreScroll(currentScroll, shouldRestoreScroll);
       return;
     }
@@ -151,10 +148,10 @@ export class KnowFlowSidebarView extends ItemView {
     const file = context.activeFile;
     if (!file) return this.renderEmpty(root);
     const summary = this.getSummaryViewModel(file);
-    const summaryPending = this.pendingSummaries.has(file.path);
-    const summaryError = this.summaryErrors.get(file.path);
-    const streamingText = this.streamingSummaryTexts.get(file.path);
-    const streamingReasoning = this.streamingSummaryReasonings.get(file.path);
+    const summaryPending = this.summaryController.isPending(file.path);
+    const summaryError = this.summaryController.getError(file.path);
+    const streamingText = this.summaryController.getStreamingText(file.path);
+    const streamingReasoning = this.summaryController.getStreamingReasoning(file.path);
     const analysisCost = estimateClippingAnalysisTokens(file);
     const pipelineState = this.pipelineStates.get(file.path);
     const persistedPipeline = this.plugin.store.getPipelineStatus(file.path);
@@ -198,67 +195,30 @@ export class KnowFlowSidebarView extends ItemView {
   }
 
   private async ensureSummary(file: TFile, force: boolean): Promise<void> {
-    if (this.pendingSummaries.has(file.path)) return;
-    if (!force && await this.readSummaryText(file)) return;
-    this.pendingSummaries.add(file.path);
-    this.summaryErrors.delete(file.path);
-    this.clearStreamingSummary(file.path);
-    if (this.plugin.router.getContext().activeFile?.path === file.path) {
-      this.render();
-    }
-    try {
-      const content = await this.app.vault.read(file);
-      const summary = await this.plugin.ai.summarizeStream(
-        file.path,
-        file.basename,
-        content,
-        this.plugin.settings.defaultArticleCategory,
-        ({ content: fullText, reasoning }) => {
-          const visible = extractVisibleText(fullText);
-          this.streamingSummaryTexts.set(file.path, visible);
-          this.streamingSummaryReasonings.set(file.path, reasoning);
-          if (this.plugin.router.getContext().activeFile?.path !== file.path) return;
-          const needsContentEl = Boolean(visible) && !this.streamingSummaryContentEl;
-          const needsReasoningEl = !visible && Boolean(reasoning) && !this.streamingSummaryReasoningLatestEl;
-          if (needsContentEl || needsReasoningEl) {
-            this.render();
-            return;
-          }
-          if (this.streamingSummaryReasoningHistoryEl && this.streamingSummaryReasoningLatestEl) {
-            updateStreamingReasoning(
-              this.streamingSummaryReasoningHistoryEl,
-              this.streamingSummaryReasoningLatestEl,
-              reasoning
-            );
-          }
-          if (this.streamingSummaryContentEl) this.streamingSummaryContentEl.textContent = visible;
+    await this.summaryController.ensureSummary(file, force, {
+      onDelta: (visible, reasoning) => {
+        if (this.plugin.router.getContext().activeFile?.path !== file.path) return;
+        const needsContentEl = Boolean(visible) && !this.streamingSummaryContentEl;
+        const needsReasoningEl = !visible && Boolean(reasoning) && !this.streamingSummaryReasoningLatestEl;
+        if (needsContentEl || needsReasoningEl) {
+          this.render();
+          return;
         }
-      );
-      await this.plugin.summaryNotes.applySummary(
-        file,
-        { summary: summary.summary, reason: summary.reason },
-        { description: summary.briefDescription, readingValue: summary.readingValue, category: summary.category, tags: summary.tags }
-      );
-      this.cacheSummaryText(file, { summary: summary.summary, reason: summary.reason });
-      if (!this.manuallySelectedCategories.has(file.path)) {
-        this.selectedCategories.set(file.path, summary.category);
+        if (this.streamingSummaryReasoningHistoryEl && this.streamingSummaryReasoningLatestEl) {
+          updateStreamingReasoning(
+            this.streamingSummaryReasoningHistoryEl,
+            this.streamingSummaryReasoningLatestEl,
+            reasoning
+          );
+        }
+        if (this.streamingSummaryContentEl) this.streamingSummaryContentEl.textContent = visible;
+      },
+      onSuccess: (summary) => {
+        if (!this.manuallySelectedCategories.has(file.path)) {
+          this.selectedCategories.set(file.path, summary.category);
+        }
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.summaryErrors.set(file.path, message);
-      new Notice(`KnowFlow summary failed: ${message}`, 8000);
-    } finally {
-      this.clearStreamingSummary(file.path);
-      this.pendingSummaries.delete(file.path);
-      if (this.plugin.router.getContext().activeFile?.path === file.path) {
-        this.render();
-      }
-    }
-  }
-
-  private clearStreamingSummary(filePath: string): void {
-    this.streamingSummaryTexts.delete(filePath);
-    this.streamingSummaryReasonings.delete(filePath);
+    });
     this.streamingSummaryContentEl = null;
     this.streamingSummaryReasoningHistoryEl = null;
     this.streamingSummaryReasoningLatestEl = null;
@@ -274,12 +234,16 @@ export class KnowFlowSidebarView extends ItemView {
     const weeklyLearned = weeklyActivity.dailyLearned.reduce((sum, count) => sum + count, 0);
     const plan = this.getCurrentDailyTaskPlan(scope);
     if (!plan) void this.ensureDailyTaskPlan(scope, false);
-    const loading = this.dailyTaskPlanLoads.has(dailyTaskPlanKey(localDateKey(new Date()), scope));
+    const reviewDate = localDateKey(new Date());
+    const review = this.getCurrentDailyReview(reviewDate);
+    if (!review) void this.ensureDailyReview(false);
+    const loading = this.dailyTaskPlanLoads.has(dailyTaskPlanKey(reviewDate, scope)) || this.dailyReviewLoads.has(reviewDate);
     renderTaskOverviewView(root, {
       scopeLabel,
       stats,
       categoryStats,
       tasks: plan?.tasks ?? [],
+      review,
       loading,
       weeklyLearned,
       weeklyReviewCount: weeklyActivity.reviewCount,
@@ -294,6 +258,10 @@ export class KnowFlowSidebarView extends ItemView {
       },
       onSkipTask: (task) => {
         if (plan) void this.updateDailyTask(plan, task, "skipped");
+      },
+      onRefreshReview: () => void this.ensureDailyReview(true),
+      onStartReview: () => {
+        if (review) this.startDailyReview(review);
       }
     });
   }
@@ -303,11 +271,17 @@ export class KnowFlowSidebarView extends ItemView {
     const existing = this.plugin.store.getDailyTaskPlan(date, scopePath);
     if (
       existing
-      && existing.generatorVersion === 2
+      && existing.generatorVersion === 3
       && existing.newArticleLimit === this.plugin.settings.dailyNewArticleLimit
-      && existing.reviewLimit === this.plugin.settings.dailyReviewLimit
     ) return existing;
     return null;
+  }
+
+  private getCurrentDailyReview(date: string): DailyReviewSession | null {
+    const current = this.plugin.dailyReview.getSession(date, this.plugin.settings.dailyReviewQuestionCap);
+    if (current) return current;
+    const existing = this.plugin.store.getDailyReviewSession(date);
+    return existing && Object.keys(existing.answers).length > 0 ? existing : null;
   }
 
   private async ensureDailyTaskPlan(scopePath: string, force: boolean): Promise<void> {
@@ -326,7 +300,6 @@ export class KnowFlowSidebarView extends ItemView {
         scopePath,
         generatedAt: new Date().toISOString(),
         newArticleLimit: this.plugin.settings.dailyNewArticleLimit,
-        reviewLimit: this.plugin.settings.dailyReviewLimit,
         candidates,
         existingTasks: existing?.tasks
       });
@@ -339,6 +312,20 @@ export class KnowFlowSidebarView extends ItemView {
     }
   }
 
+  private async ensureDailyReview(force: boolean): Promise<void> {
+    const date = localDateKey(new Date());
+    if (this.dailyReviewLoads.has(date)) return;
+    this.dailyReviewLoads.add(date);
+    try {
+      await this.plugin.dailyReview.ensureSession(date, this.plugin.settings.dailyReviewQuestionCap, force);
+    } catch (error) {
+      new Notice(`KnowFlow: 生成今日复习失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.dailyReviewLoads.delete(date);
+      if (this.plugin.router.getContext().mode === "task-overview") this.render();
+    }
+  }
+
   private async getDailyTaskCandidates(scopePath: string): Promise<DailyTaskCandidate[]> {
     return Promise.all(this.getArticleFiles(scopePath).map(async (file) => {
       const learned = this.isArticleLearned(file);
@@ -346,7 +333,6 @@ export class KnowFlowSidebarView extends ItemView {
         path: file.path,
         title: file.basename,
         learned,
-        reviewable: learned ? await this.plugin.quizNotes.hasQuiz(file.path) : false
       };
     }));
   }
@@ -366,7 +352,6 @@ export class KnowFlowSidebarView extends ItemView {
         scopePath: plan.scopePath,
         generatedAt: new Date().toISOString(),
         newArticleLimit: plan.newArticleLimit,
-        reviewLimit: plan.reviewLimit,
         candidates,
         existingTasks
       });
@@ -411,12 +396,12 @@ export class KnowFlowSidebarView extends ItemView {
     if (!file) return this.renderEmpty(root);
 
     const summary = this.getSummaryViewModel(file);
-    const summaryPending = this.pendingSummaries.has(file.path);
-    const summaryError = this.summaryErrors.get(file.path);
-    const streamingText = this.streamingSummaryTexts.get(file.path);
-    const streamingReasoning = this.streamingSummaryReasonings.get(file.path);
-    const quiz = this.getQuizStats(file.path);
-    const knowledgePoints = this.getKnowledgePointData(file.path);
+    const summaryPending = this.summaryController.isPending(file.path);
+    const summaryError = this.summaryController.getError(file.path);
+    const streamingText = this.summaryController.getStreamingText(file.path);
+    const streamingReasoning = this.summaryController.getStreamingReasoning(file.path);
+    const quiz = this.quizController.getQuizStats(file.path);
+    const knowledgePoints = this.quizController.getKnowledgePointData(file.path);
     const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
     const readingValue = this.getFrontmatterReadingValue(frontmatter) ?? (summary && summary.readingValue > 0 ? `${summary.readingValue}/5` : "--");
     const learningStatus = this.getFrontmatterLearningStatus(frontmatter) ?? (this.plugin.store.isLearned(file.path) ? "已学习" : "未学习");
@@ -433,15 +418,15 @@ export class KnowFlowSidebarView extends ItemView {
       streamingReasoning,
       analysisCost: estimateClippingAnalysisTokens(file),
       sourceLabel: "文章",
-      knowledgeMapPending: this.pendingKnowledgeMaps.has(file.path),
-      quizPending: this.pendingQuizzes.has(file.path),
+      knowledgeMapPending: this.quizController.isKnowledgeMapPending(file.path),
+      quizPending: this.quizController.isQuizPending(file.path),
       quiz,
       renderMarkdownSummary: (parent, markdown) => void this.renderMarkdownSummary(parent, markdown, file.path),
       onRefreshSummary: () => this.ensureSummary(file, true),
       onGenerateSummary: () => this.ensureSummary(file, true),
-      onGenerateKnowledgeMap: () => void this.generateKnowledgeMap(file),
+      onGenerateKnowledgeMap: () => void this.quizController.generateKnowledgeMap(file),
       onShowKnowledgePoints: () => this.openKnowledgePoints(file),
-      onGenerateQuiz: () => void this.generateQuiz(file),
+      onGenerateQuiz: () => void this.quizController.generateQuiz(file),
       onStartQuiz: () => void this.startQuiz(file)
     });
 
@@ -459,24 +444,24 @@ export class KnowFlowSidebarView extends ItemView {
       this.renderEmpty(root);
       return;
     }
-    const cached = this.getKnowledgePointData(sourceFile.path);
+    const cached = this.quizController.getKnowledgePointData(sourceFile.path);
     const groups = cached?.groups ?? [];
     const statuses = cached?.statuses ?? {};
-    const loading = this.pendingKnowledgePoints.has(sourceFile.path);
+    const loading = this.quizController.isKnowledgePointsPending(sourceFile.path);
     const common = {
       articleTitle: sourceFile.basename,
       groups,
       statuses,
       selectedPointId: state.selectedPointId,
       loading,
-      onRefresh: () => void this.generateKnowledgePoints(sourceFile),
+      onRefresh: () => void this.quizController.generateKnowledgePoints(sourceFile),
       onSelectPoint: (pointId: string) => {
         this.knowledgePointView = { filePath: sourceFile.path, selectedPointId: pointId };
       },
       onOpenEvidence: (point: KnowledgePoint) => {
         void this.openKnowledgePointEvidence(sourceFile, point);
       },
-      onGenerateQuiz: (point: KnowledgePoint) => void this.generateKnowledgePointQuiz(sourceFile, point)
+      onGenerateQuiz: (point: KnowledgePoint) => void this.quizController.generateKnowledgePointQuiz(sourceFile, point)
     };
 
     renderKnowledgePointsOverview(root, {
@@ -490,7 +475,7 @@ export class KnowFlowSidebarView extends ItemView {
 
   private openKnowledgePoints(file: TFile): void {
     this.knowledgePointView = { filePath: file.path, selectedPointId: null };
-    void this.refreshKnowledgePointData(file.path);
+    void this.quizController.refreshKnowledgePointData(file.path);
     this.render();
   }
 
@@ -517,77 +502,15 @@ export class KnowFlowSidebarView extends ItemView {
     });
   }
 
-  private getKnowledgePointData(filePath: string): CachedKnowledgePoints | null {
-    const cached = this.knowledgePointCache.get(filePath);
-    if (cached) return cached;
-    void this.refreshKnowledgePointData(filePath);
-    return null;
-  }
-
-  private async refreshKnowledgePointData(filePath: string): Promise<void> {
-    if (this.pendingKnowledgePoints.has(filePath)) return;
-    this.pendingKnowledgePoints.add(filePath);
-    try {
-      const loaded = await this.plugin.quizNotes.loadKnowledgePoints(filePath);
-      this.knowledgePointCache.set(filePath, {
-        groups: loaded?.groups ?? [],
-        statuses: loaded?.statuses ?? {}
-      });
-    } catch (error) {
-      this.knowledgePointCache.set(filePath, { groups: [], statuses: {} });
-      new Notice(`KnowFlow: 读取知识点失败：${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      this.pendingKnowledgePoints.delete(filePath);
-      const activePath = this.plugin.router.getContext().activeFile?.path;
-      if (activePath === filePath || this.knowledgePointView?.filePath === filePath) this.render();
-    }
-  }
-
-  private async generateKnowledgePoints(file: TFile): Promise<void> {
-    if (this.pendingKnowledgePoints.has(file.path)) return;
-    this.pendingKnowledgePoints.add(file.path);
-    this.render();
-    try {
-      const article = await this.app.vault.read(file);
-      const groups = await this.plugin.ai.generateKnowledgePoints(file.basename, article);
-      const category = this.getSummaryMeta(file)?.category ?? this.plugin.settings.defaultArticleCategory;
-      const saved = await this.plugin.quizNotes.saveKnowledgePoints(file, category, groups);
-      const loaded = await this.plugin.quizNotes.loadKnowledgePoints(file.path);
-      this.knowledgePointCache.set(file.path, {
-        groups: saved.groups,
-        statuses: loaded?.statuses ?? {}
-      });
-      new Notice(`KnowFlow: generated ${saved.groups.flatMap((group) => group.points).length} knowledge points`);
-    } catch (error) {
-      new Notice(`KnowFlow knowledge points failed: ${error instanceof Error ? error.message : String(error)}`, 8000);
-    } finally {
-      this.pendingKnowledgePoints.delete(file.path);
-      this.render();
-    }
-  }
-
-  private async generateKnowledgePointQuiz(file: TFile, point: KnowledgePoint): Promise<void> {
-    if (this.pendingKnowledgePointQuizzes.has(point.id)) return;
-    this.pendingKnowledgePointQuizzes.add(point.id);
-    try {
-      const question = await this.plugin.ai.generateKnowledgePointQuiz(file.path, file.basename, point);
-      const category = this.getSummaryMeta(file)?.category ?? this.plugin.settings.defaultArticleCategory;
-      await this.plugin.quizNotes.appendKnowledgePointQuiz(file, category, point, question);
-      this.quizStatsCache.delete(file.path);
-      this.knowledgePointCache.delete(file.path);
-      await this.refreshKnowledgePointData(file.path);
-      new Notice("KnowFlow: 已为该知识点生成 1 道试题");
-    } catch (error) {
-      new Notice(`KnowFlow quiz failed: ${error instanceof Error ? error.message : String(error)}`, 8000);
-    } finally {
-      this.pendingKnowledgePointQuizzes.delete(point.id);
-      this.render();
-    }
-  }
 
   private renderQuizTest(root: HTMLElement, session: QuizSession): void {
+    const reviewQuestion = session.reviewDate
+      ? this.plugin.store.getDailyReviewSession(session.reviewDate)?.questions[session.index]
+      : null;
     renderQuizTestView(root, {
       session,
+      sourceLabel: reviewQuestion?.articleTitle,
+      onOpenSource: reviewQuestion ? () => void this.openReviewSource(reviewQuestion.articlePath, reviewQuestion.question.sourceSection) : undefined,
       onBack: () => {
         this.quizSession = null;
         this.render();
@@ -601,8 +524,10 @@ export class KnowFlowSidebarView extends ItemView {
       },
       onNext: () => {
         session.index += 1;
-        session.selectedKey = null;
-        session.submitted = false;
+        const review = session.reviewDate ? this.plugin.store.getDailyReviewSession(session.reviewDate) : null;
+        const nextKey = session.reviewQuestionKeys?.[session.index];
+        session.selectedKey = nextKey ? review?.answers[nextKey]?.selectedKey ?? null : null;
+        session.submitted = nextKey ? Boolean(review?.answers[nextKey]) : false;
         this.render();
       },
       onFinish: () => {
@@ -610,6 +535,19 @@ export class KnowFlowSidebarView extends ItemView {
         this.render();
       }
     });
+  }
+
+  private async openReviewSource(articlePath: string, sourceSection?: string): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(articlePath);
+    if (!(file instanceof TFile)) {
+      new Notice("来源文章不存在。");
+      return;
+    }
+    const leaf = this.app.workspace.getMostRecentLeaf(this.app.workspace.rootSplit)
+      ?? this.app.workspace.getLeaf(false);
+    await leaf.openFile(file, sourceSection
+      ? { active: true, eState: { subpath: `#${this.resolveEvidenceHeading(file, sourceSection)}` } }
+      : { active: true });
   }
 
   private renderEmpty(root: HTMLElement): void {
@@ -624,7 +562,7 @@ export class KnowFlowSidebarView extends ItemView {
 
   private renderChatThread(root: HTMLElement, thread: ChatThread): void {
     const content = renderShell(root, "", "Ready", () => {
-      this.activeChatThread = null;
+      this.chatController.activeThread = null;
       this.render();
     });
     this.streamingAnswerEl = null;
@@ -671,7 +609,7 @@ export class KnowFlowSidebarView extends ItemView {
           });
         });
         userAction("删除本轮对话", "trash-2", () => {
-          this.deleteChatTurn(thread, message.id);
+          this.chatController.deleteTurn(thread, message.id);
         });
         continue;
       }
@@ -740,7 +678,7 @@ export class KnowFlowSidebarView extends ItemView {
         });
         chatAction("复制回答", "copy", () => navigator.clipboard.writeText(message.content));
         chatAction("重新生成", "refresh-cw", () => {
-          const previous = this.findPreviousUserMessage(thread, message.id);
+          const previous = this.chatController.findPreviousUserMessage(thread, message.id);
           if (previous) void this.submitChat(previous.content);
         });
         chatAction("存为摘要", "save", () => void this.saveAssistantAsSummary(thread, message));
@@ -753,10 +691,8 @@ export class KnowFlowSidebarView extends ItemView {
   }
 
   private renderComposer(root: HTMLElement, context: ViewContext, label: string, file: TFile | null): void {
-    const usage = this.activeChatThread?.usage ?? emptyChatUsage();
-    const sending = this.activeChatThread?.messages.some((message) =>
-      message.role === "assistant" && (message.status === "pending" || message.status === "streaming")
-    ) ?? false;
+    const usage = this.chatController.getUsage();
+    const sending = this.chatController.isSending();
     renderChatComposer(root, {
       contextLabel: label,
       modelName: this.plugin.settings.chatModel.model,
@@ -769,86 +705,30 @@ export class KnowFlowSidebarView extends ItemView {
         this.composerDraft = value;
       },
       onSubmit: (question) => void this.submitChat(question, context, file),
-      onSaveNote: () => void this.saveActiveChatToNote(),
+      onSaveNote: () => void this.chatController.saveActiveThread(),
       onOpenHistory: () => void this.openChatHistory()
     });
   }
 
-  private async submitChat(question: string, context = this.plugin.router.getContext(), file: TFile | null = context.activeFile): Promise<void> {
-    if (!question) {
-      new Notice("Enter a question first");
-      return;
-    }
-    const now = new Date().toISOString();
-    const thread = this.activeChatThread ?? createChatThread(context, file, now);
-    const userMessage = createChatMessage("user", question, now, "done");
-    const assistantMessage = createChatMessage("assistant", "", now, "pending");
-    thread.messages.push(userMessage, assistantMessage);
-    thread.updatedAt = now;
-    this.activeChatThread = thread;
-    this.composerDraft = "";
-    this.render();
-
-    const content = file ? await this.app.vault.read(file) : "";
-    let requestUsage = emptyChatUsage();
-    try {
-      assistantMessage.status = "streaming";
-      requestUsage = await this.plugin.ai.answerStream(
-        thread.contextLabel,
-        content,
-        thread.messages.filter((message) => message.id !== assistantMessage.id),
-        {
-          onContent: (delta) => {
-            assistantMessage.content += delta;
-            assistantMessage.status = "streaming";
-            if (this.streamingAnswerEl) this.streamingAnswerEl.textContent = assistantMessage.content;
-          },
-          onReasoning: (delta) => {
-            assistantMessage.reasoning += delta;
-            if (this.streamingReasoningEl) {
-              const details = this.streamingReasoningEl.closest("details") as HTMLElement | null;
-              if (details) details.style.display = "block";
-              this.streamingReasoningEl.textContent = assistantMessage.reasoning;
-            }
-          },
-          onUsage: (usage) => {
-            requestUsage = usage;
-          }
-        }
-      );
-      assistantMessage.status = "done";
-      assistantMessage.completedAt = new Date().toISOString();
-      thread.usage = addChatUsage(thread.usage, requestUsage);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      assistantMessage.status = "error";
-      assistantMessage.error = message;
-      assistantMessage.completedAt = new Date().toISOString();
-      new Notice(`KnowFlow chat failed: ${message}`, 8000);
-    }
-    if (file) {
-      thread.filePath = file.path;
-      thread.contextLabel = file.basename;
-    }
-    thread.updatedAt = assistantMessage.completedAt ?? new Date().toISOString();
-    this.render();
-  }
-
-  private findPreviousUserMessage(thread: ChatThread, assistantId: string): ChatMessage | null {
-    const index = thread.messages.findIndex((message) => message.id === assistantId);
-    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-      if (thread.messages[cursor].role === "user") return thread.messages[cursor];
-    }
-    return null;
-  }
-
-  private deleteChatTurn(thread: ChatThread, userMessageId: string): void {
-    const index = thread.messages.findIndex((message) => message.id === userMessageId);
-    if (index < 0) return;
-    const count = thread.messages[index + 1]?.role === "assistant" ? 2 : 1;
-    thread.messages.splice(index, count);
-    thread.updatedAt = new Date().toISOString();
-    this.render();
+  private async submitChat(
+    question: string,
+    context = this.plugin.router.getContext(),
+    file: TFile | null = context.activeFile
+  ): Promise<void> {
+    await this.chatController.submit(question, context, file, {
+      onStart: () => {
+        this.composerDraft = "";
+      },
+      onContent: (message) => {
+        if (this.streamingAnswerEl) this.streamingAnswerEl.textContent = message.content;
+      },
+      onReasoning: (message) => {
+        if (!this.streamingReasoningEl) return;
+        const details = this.streamingReasoningEl.closest("details") as HTMLElement | null;
+        if (details) details.style.display = "block";
+        this.streamingReasoningEl.textContent = message.reasoning;
+      }
+    });
   }
 
   private async saveAssistantAsSummary(thread: ChatThread, message: ChatMessage): Promise<void> {
@@ -874,18 +754,10 @@ export class KnowFlowSidebarView extends ItemView {
       { summary: summary.summary, reason: summary.reason },
       { description: summary.briefDescription, readingValue: summary.readingValue, category: summary.category, tags: summary.tags }
     );
-    this.cacheSummaryText(target, { summary: summary.summary, reason: summary.reason });
+    this.summaryController.cacheText(target, { summary: summary.summary, reason: summary.reason });
     new Notice("Saved as AI Summary");
   }
 
-  private async saveActiveChatToNote(): Promise<void> {
-    if (!this.activeChatThread || this.activeChatThread.messages.length === 0) {
-      new Notice("当前没有可保存的对话。");
-      return;
-    }
-    const path = await this.plugin.chatNotes.saveThread(this.activeChatThread);
-    new Notice(`Chat 已保存到 ${path}`);
-  }
 
   private async openChatHistory(): Promise<void> {
     const root = this.containerEl.children[1] as HTMLElement;
@@ -899,7 +771,7 @@ export class KnowFlowSidebarView extends ItemView {
       threads,
       onClose: () => root.querySelector(".kf-chat-history-layer")?.remove(),
       onOpen: (thread) => {
-        this.activeChatThread = thread;
+        this.chatController.activeThread = thread;
         this.render();
       }
     });
@@ -978,59 +850,6 @@ export class KnowFlowSidebarView extends ItemView {
     }
   }
 
-  private async generateKnowledgeMap(file: TFile): Promise<void> {
-    if (this.pendingKnowledgeMaps.has(file.path)) return;
-    this.pendingKnowledgeMaps.add(file.path);
-    if (this.plugin.router.getContext().activeFile?.path === file.path) {
-      this.render();
-    }
-    try {
-      await this.plugin.mermaid.generateForFile(file);
-    } catch (error) {
-      new Notice(`KnowFlow Mermaid failed: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      this.pendingKnowledgeMaps.delete(file.path);
-      if (this.plugin.router.getContext().activeFile?.path === file.path) {
-        this.render();
-      }
-    }
-  }
-
-  private async generateQuiz(file: TFile): Promise<void> {
-    if (this.pendingQuizzes.has(file.path)) return;
-    this.pendingQuizzes.add(file.path);
-    if (this.plugin.router.getContext().activeFile?.path === file.path) {
-      this.render();
-    }
-    try {
-      const content = await this.app.vault.read(file);
-      const readingValue = this.getArticleReadingValue(file) || 3;
-      const knowledgePoints = await this.plugin.quizNotes.loadKnowledgePoints(file.path);
-      const questions = await this.plugin.ai.generateQuiz(
-        file.path,
-        file.basename,
-        content,
-        readingValue,
-        knowledgePoints?.groups ?? []
-      );
-      if (questions.length === 0) {
-        throw new Error("Quiz model did not return valid questions.");
-      }
-      const category = this.getSummaryMeta(file)?.category ?? this.plugin.settings.defaultArticleCategory;
-      await this.plugin.quizNotes.saveQuiz(file, category, questions);
-      this.quizStatsCache.delete(file.path);
-      this.knowledgePointCache.delete(file.path);
-      new Notice(`KnowFlow: generated ${questions.length} quiz questions`);
-    } catch (error) {
-      new Notice(`KnowFlow quiz failed: ${error instanceof Error ? error.message : String(error)}`, 8000);
-    } finally {
-      this.pendingQuizzes.delete(file.path);
-      if (this.plugin.router.getContext().activeFile?.path === file.path) {
-        this.render();
-      }
-    }
-  }
-
   private async startQuiz(file: TFile): Promise<void> {
     const loaded = await this.plugin.quizNotes.loadQuestions(file.path);
     if (!loaded || loaded.questions.length === 0) {
@@ -1049,45 +868,41 @@ export class KnowFlowSidebarView extends ItemView {
     this.render();
   }
 
+  private startDailyReview(review: DailyReviewSession): void {
+    if (review.questions.length === 0) return;
+    const firstUnanswered = review.questions.findIndex((question) => !review.answers[question.key]);
+    const index = firstUnanswered >= 0 ? firstUnanswered : 0;
+    this.quizSession = {
+      filePath: review.questions[index].articlePath,
+      quizPath: review.questions[index].quizPath,
+      title: "今日复习",
+      questions: review.questions.map((question) => question.question),
+      index,
+      selectedKey: review.answers[review.questions[index].key]?.selectedKey ?? null,
+      submitted: Boolean(review.answers[review.questions[index].key]),
+      reviewDate: review.date,
+      reviewQuestionKeys: review.questions.map((question) => question.key)
+    };
+    this.render();
+  }
+
   private async submitQuizAnswer(session: QuizSession): Promise<void> {
-    const question = session.questions[session.index];
     if (!session.selectedKey) {
       new Notice("请选择一个答案。");
       return;
     }
-    // The question's position within the note (1-based) doubles as its
-    // identity for patching — quiz notes don't need separate stable IDs
-    // since regenerating a quiz always rewrites the whole file anyway.
-    await this.plugin.quizNotes.recordAnswer(session.quizPath, session.index + 1, session.selectedKey, question.answerKey);
-    this.quizStatsCache.delete(session.filePath);
-    this.knowledgePointCache.delete(session.filePath);
+    if (session.reviewDate && session.reviewQuestionKeys) {
+      const questionKey = session.reviewQuestionKeys[session.index];
+      await this.plugin.dailyReview.recordAnswer(session.reviewDate, questionKey, session.selectedKey);
+    } else {
+      await this.quizController.recordAnswer(session);
+    }
     session.submitted = true;
     this.render();
   }
 
-  private getQuizStats(path: string): QuizStats {
-    const cached = this.quizStatsCache.get(path);
-    if (cached) return cached;
-    void this.refreshQuizStats(path);
-    return { total: 0, answered: 0, accuracy: null, wrong: 0 };
-  }
-
-  private async refreshQuizStats(path: string): Promise<void> {
-    if (this.quizStatsPending.has(path)) return;
-    this.quizStatsPending.add(path);
-    try {
-      const stats = await this.plugin.quizNotes.getStats(path);
-      this.quizStatsCache.set(path, stats);
-      if (this.plugin.router.getContext().activeFile?.path === path) {
-        this.render();
-      }
-    } finally {
-      this.quizStatsPending.delete(path);
-    }
-  }
-
   private getSummaryViewModel(file: TFile): NoteSummary | null {
-    const text = this.loadSummaryText(file);
+    const text = this.summaryController.getSummaryText(file);
     if (text === null) return null;
     return {
       ...this.getSummaryMeta(file),
@@ -1098,46 +913,6 @@ export class KnowFlowSidebarView extends ItemView {
     };
   }
 
-  private loadSummaryText(file: TFile): SummaryText | null | undefined {
-    const cached = this.getCachedSummaryText(file);
-    if (cached !== undefined) return cached;
-    void this.refreshSummaryText(file);
-    return undefined;
-  }
-
-  private async refreshSummaryText(file: TFile): Promise<void> {
-    await this.readSummaryText(file);
-    if (this.plugin.router.getContext().activeFile === file) {
-      this.render();
-    }
-  }
-
-  private getCachedSummaryText(file: TFile): SummaryText | null | undefined {
-    const cached = this.summaryTextCache.get(file);
-    return cached?.mtime === file.stat.mtime ? cached.text : undefined;
-  }
-
-  private cacheSummaryText(file: TFile, text: SummaryText | null): void {
-    this.summaryTextCache.set(file, { mtime: file.stat.mtime, text });
-  }
-
-  private readSummaryText(file: TFile): Promise<SummaryText | null> {
-    const cached = this.getCachedSummaryText(file);
-    if (cached !== undefined) return Promise.resolve(cached);
-
-    const pending = this.summaryTextLoads.get(file);
-    if (pending) return pending;
-
-    const mtime = file.stat.mtime;
-    const load = this.plugin.summaryNotes.loadSummaryText(file)
-      .then((text) => {
-        this.summaryTextCache.set(file, { mtime, text });
-        return text;
-      })
-      .finally(() => this.summaryTextLoads.delete(file));
-    this.summaryTextLoads.set(file, load);
-    return load;
-  }
 
   private getArticleStats(scopePath: string): ArticleStats {
     const files = this.getArticleFiles(scopePath);
@@ -1184,13 +959,19 @@ export class KnowFlowSidebarView extends ItemView {
     for (const task of this.plugin.store.getCompletedTasksSince(weekStart)) {
       if (!task.targetPath?.startsWith(`${scopePath}/`) || !task.completedAt) continue;
       if (task.type === "new_note") addLearnedPath(task.targetPath, new Date(task.completedAt));
-      if (task.type === "review_note") {
-        reviewCount += 1;
-        const completedAt = new Date(task.completedAt);
-        const localDay = new Date(completedAt.getFullYear(), completedAt.getMonth(), completedAt.getDate());
-        const index = Math.round((localDay.getTime() - weekStart.getTime()) / 86_400_000);
-        if (index >= 0 && index < dailyReview.length) dailyReview[index] += 1;
-      }
+    }
+    const articleRootScope = scopePath === this.plugin.settings.articlesFolder;
+    for (const session of this.plugin.store.getCompletedReviewSessionsSince(weekStart)) {
+      if (!session.completedAt) continue;
+      const questionCount = articleRootScope
+        ? session.questions.length
+        : session.questions.filter((question) => question.articlePath.startsWith(`${scopePath}/`)).length;
+      if (questionCount === 0) continue;
+      reviewCount += questionCount;
+      const completedAt = new Date(session.completedAt);
+      const localDay = new Date(completedAt.getFullYear(), completedAt.getMonth(), completedAt.getDate());
+      const index = Math.round((localDay.getTime() - weekStart.getTime()) / 86_400_000);
+      if (index >= 0 && index < dailyReview.length) dailyReview[index] += questionCount;
     }
 
     return {
@@ -1311,7 +1092,8 @@ export class KnowFlowSidebarView extends ItemView {
   }
 
   private getRenderContextKey(): string {
-    if (this.activeChatThread) return `chat:${this.activeChatThread.id}`;
+    if (this.chatController.activeThread) return `chat:${this.chatController.activeThread.id}`;
+    if (this.quizSession?.reviewDate) return `review:${this.quizSession.reviewDate}`;
     if (this.quizSession) return `quiz:${this.quizSession.filePath}`;
     if (this.knowledgePointView) {
       return `knowledge:${this.knowledgePointView.filePath}`;
@@ -1358,66 +1140,6 @@ export class KnowFlowSidebarView extends ItemView {
     });
   }
 
-}
-
-function createChatThread(context: ViewContext, file: TFile | null, now: string): ChatThread {
-  return {
-    id: `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    sourceMode: context.mode,
-    filePath: file?.path ?? null,
-    contextLabel: file?.basename ?? "Current",
-    messages: [],
-    createdAt: now,
-    updatedAt: now,
-    usage: emptyChatUsage()
-  };
-}
-
-function createChatMessage(
-  role: ChatMessage["role"],
-  content: string,
-  createdAt: string,
-  status: ChatMessage["status"]
-): ChatMessage {
-  return {
-    id: `message-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    role,
-    content,
-    reasoning: "",
-    createdAt,
-    status
-  };
-}
-
-function emptyChatUsage(): ChatUsage {
-  return { promptTokens: 0, completionTokens: 0, totalTokens: 0, estimated: false };
-}
-
-function addChatUsage(current: ChatUsage, next: ChatUsage): ChatUsage {
-  return {
-    promptTokens: current.promptTokens + next.promptTokens,
-    completionTokens: current.completionTokens + next.completionTokens,
-    totalTokens: current.totalTokens + next.totalTokens,
-    estimated: current.estimated || next.estimated
-  };
-}
-
-/**
- * During streaming, just strip JSON structural noise so the user sees
- * text appearing progressively. Don't try to extract specific fields
- * until the full JSON is complete.
- */
-function extractVisibleText(raw: string): string {
-  if (!raw) return "";
-  return raw
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/[{}\[\]]/g, "\n")
-    .replace(/"\w+":\s*"/g, "")
-    .replace(/",?\s*$/gm, "")
-    .replace(/\\n/g, "\n")
-    .replace(/\\"/g, "\"")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
 }
 
 function estimateClippingAnalysisTokens(file: TFile): number {

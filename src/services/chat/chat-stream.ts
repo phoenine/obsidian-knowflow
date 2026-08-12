@@ -1,4 +1,4 @@
-import type { ChatUsage } from "../types";
+import type { ChatUsage } from "../../types";
 
 export interface ChatStreamDelta {
   content: string;

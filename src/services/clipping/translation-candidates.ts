@@ -2,6 +2,7 @@ export interface TranslationCandidate {
   id: string;
   startLine: number;
   endLine: number;
+  source: string;
   content: string;
 }
 
@@ -11,17 +12,7 @@ export interface TranslationDecision {
 }
 
 const TRANSLATION_BATCH_CHARS = 12000;
-
-export function isPredominantlyEnglishArticle(content: string): boolean {
-  const prose = linesOutsideFences(content)
-    .filter((line) => !/^\s*(?:>|```|~~~|\|)/.test(line))
-    .join("\n")
-    .replace(/https?:\/\/\S+/g, "")
-    .replace(/`[^`]*`/g, "");
-  const latin = prose.match(/[A-Za-z]/g)?.length ?? 0;
-  const cjk = prose.match(/[\u3400-\u9fff]/g)?.length ?? 0;
-  return latin >= 80 && cjk / Math.max(1, latin + cjk) <= 0.02;
-}
+const TRANSLATION_MARKER = "<!-- knowflow-translation -->";
 
 export function collectTranslationCandidates(content: string): TranslationCandidate[] {
   const lines = content.split("\n");
@@ -42,6 +33,16 @@ export function collectTranslationCandidates(content: string): TranslationCandid
       continue;
     }
     if (inFence || inMath || !isPlainParagraphLine(lines[index])) {
+      const listItem = inFence || inMath ? null : getListItemContent(lines[index]);
+      if (listItem && isTranslatableEnglish(listItem) && !lines[index].includes(TRANSLATION_MARKER)) {
+        candidates.push({
+          id: `translation-${candidates.length + 1}`,
+          startLine: index,
+          endLine: index,
+          source: lines[index],
+          content: listItem
+        });
+      }
       index += 1;
       continue;
     }
@@ -53,14 +54,14 @@ export function collectTranslationCandidates(content: string): TranslationCandid
     const startLine = index;
     while (index + 1 < lines.length && isPlainParagraphLine(lines[index + 1])) index += 1;
     const endLine = index;
-    const paragraph = lines.slice(startLine, endLine + 1).join("\n").trim();
-    const latin = paragraph.match(/[A-Za-z]/g)?.length ?? 0;
-    const cjk = paragraph.match(/[\u3400-\u9fff]/g)?.length ?? 0;
-    if (latin >= 20 && cjk === 0 && !isMostlyUrl(paragraph)) {
+    const source = lines.slice(startLine, endLine + 1).join("\n");
+    const paragraph = source.trim();
+    if (isTranslatableEnglish(paragraph) && !source.includes(TRANSLATION_MARKER) && !hasManagedTranslationAfter(lines, endLine)) {
       candidates.push({
         id: `translation-${candidates.length + 1}`,
         startLine,
         endLine,
+        source,
         content: paragraph
       });
     }
@@ -104,22 +105,11 @@ export function applyTranslationDecisions(
   for (const { decision, candidate } of accepted) {
     if (used.has(candidate.id)) continue;
     used.add(candidate.id);
-    const current = lines.slice(candidate.startLine, candidate.endLine + 1).join("\n").trim();
-    if (current !== candidate.content) continue;
-    lines.splice(candidate.endLine + 1, 0, "", decision.translation.trim());
+    const current = lines.slice(candidate.startLine, candidate.endLine + 1).join("\n");
+    if (current !== candidate.source) continue;
+    lines[candidate.endLine] = appendInlineTranslation(lines[candidate.endLine], decision.translation.trim());
   }
   return lines.join("\n");
-}
-
-function linesOutsideFences(content: string): string[] {
-  let inFence = false;
-  return content.split("\n").map((line) => {
-    if (/^\s*(?:```|~~~)/.test(line)) {
-      inFence = !inFence;
-      return "";
-    }
-    return inFence ? "" : line;
-  });
 }
 
 function isPlainParagraphLine(line: string): boolean {
@@ -128,9 +118,33 @@ function isPlainParagraphLine(line: string): boolean {
   return !/^(?:#{1,6}\s|>|[-*+]\s|\d+[.)]\s|\||!\[|\[\[|<|---+$|\$\$)/.test(trimmed);
 }
 
+function getListItemContent(line: string): string | null {
+  const match = line.match(/^\s*(?:[-+*]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.+?)\s*$/);
+  return match?.[1]?.trim() || null;
+}
+
+function isTranslatableEnglish(value: string): boolean {
+  const latin = value.match(/[A-Za-z]/g)?.length ?? 0;
+  const cjk = value.match(/[\u3400-\u9fff]/g)?.length ?? 0;
+  return latin >= 20 && cjk === 0 && !isMostlyUrl(value);
+}
+
 function isMostlyUrl(value: string): boolean {
   const withoutUrls = value.replace(/https?:\/\/\S+/g, "").replace(/\s+/g, "");
   return withoutUrls.length < 20;
+}
+
+function hasManagedTranslationAfter(lines: string[], endLine: number): boolean {
+  let index = endLine + 1;
+  while (index < lines.length && !lines[index].trim()) index += 1;
+  while (index < lines.length && isPlainParagraphLine(lines[index])) index += 1;
+  return lines[index]?.trim() === TRANSLATION_MARKER;
+}
+
+function appendInlineTranslation(line: string, translation: string): string {
+  const trailingWhitespace = line.match(/\s*$/)?.[0] ?? "";
+  const body = trailingWhitespace ? line.slice(0, -trailingWhitespace.length) : line;
+  return `${body}（${translation}） ${TRANSLATION_MARKER}${trailingWhitespace}`;
 }
 
 function isValidTranslation(value: string): boolean {
@@ -139,5 +153,7 @@ function isValidTranslation(value: string): boolean {
   return translation.length > 0
     && translation.length <= 12000
     && /[\u3400-\u9fff]/.test(translation)
+    && !/[\r\n]/.test(translation)
+    && !translation.includes(TRANSLATION_MARKER)
     && !/```|~~~/.test(translation);
 }

@@ -1,15 +1,17 @@
-import type { DailyTask, DailyTaskPlan, DailyTaskStatus, PipelineStatus } from "../types";
+import type { DailyReviewAnswer, DailyReviewSession, DailyTask, DailyTaskPlan, DailyTaskStatus, PipelineStatus } from "../../types";
 
 interface StoredData {
   pipelineStatuses: Record<string, PipelineStatus>;
   learnedPaths: string[];
   dailyTaskPlans: Record<string, DailyTaskPlan>;
+  dailyReviewSessions: Record<string, DailyReviewSession>;
 }
 
 const EMPTY_DATA: StoredData = {
   pipelineStatuses: {},
   learnedPaths: [],
-  dailyTaskPlans: {}
+  dailyTaskPlans: {},
+  dailyReviewSessions: {}
 };
 
 function taskPlanKey(date: string, scopePath: string): string {
@@ -35,7 +37,16 @@ export class KnowledgeStore {
       ...persisted
     } as StoredData;
 
-    const hadChatThreads = "chatThreads" in persisted;
+    const legacyKeys = [
+      "summaries",
+      "quizNotePaths",
+      "chatThreads",
+      "quizStats",
+      "quizzes",
+      "quizAttempts",
+      "pipelineResults"
+    ];
+    const hadLegacyFields = legacyKeys.some((key) => key in persisted);
     delete (this.data as StoredData & { summaries?: unknown }).summaries;
     delete (this.data as StoredData & { quizNotePaths?: unknown }).quizNotePaths;
     delete (this.data as StoredData & { chatThreads?: unknown }).chatThreads;
@@ -51,7 +62,7 @@ export class KnowledgeStore {
     delete legacy.quizzes;
     delete legacy.quizAttempts;
     delete legacy.pipelineResults;
-    if (hadChatThreads) await this.save();
+    if (hadLegacyFields) await this.save();
   }
 
   async save(): Promise<void> {
@@ -83,6 +94,12 @@ export class KnowledgeStore {
     Object.values(this.data.dailyTaskPlans).forEach((plan) => plan.tasks.forEach((task) => {
       if (task.targetPath) collect(task.targetPath);
     }));
+    Object.values(this.data.dailyReviewSessions).forEach((session) => {
+      session.questions.forEach((question) => {
+        collect(question.articlePath);
+        collect(question.quizPath);
+      });
+    });
 
     let changed = false;
     for (const plan of Object.values(this.data.dailyTaskPlans)) {
@@ -135,6 +152,19 @@ export class KnowledgeStore {
         }
       }
     }
+    for (const session of Object.values(this.data.dailyReviewSessions)) {
+      for (const question of session.questions) {
+        if (question.articlePath === oldPath) {
+          question.articlePath = newPath;
+          question.question.notePath = newPath;
+          changed = true;
+        }
+        if (question.quizPath === oldPath) {
+          question.quizPath = newPath;
+          changed = true;
+        }
+      }
+    }
 
     if (changed) this.reindexDailyTaskPlans();
 
@@ -169,6 +199,12 @@ export class KnowledgeStore {
     Object.values(this.data.dailyTaskPlans).forEach((plan) => plan.tasks.forEach((task) => {
       if (task.targetPath) collect(task.targetPath);
     }));
+    Object.values(this.data.dailyReviewSessions).forEach((session) => {
+      session.questions.forEach((question) => {
+        collect(question.articlePath);
+        collect(question.quizPath);
+      });
+    });
 
     let changed = false;
     for (const [key, plan] of Object.entries(this.data.dailyTaskPlans)) {
@@ -201,6 +237,19 @@ export class KnowledgeStore {
       const previousLength = plan.tasks.length;
       plan.tasks = plan.tasks.filter((task) => task.targetPath !== path);
       changed = plan.tasks.length !== previousLength || changed;
+    }
+    for (const session of Object.values(this.data.dailyReviewSessions)) {
+      const removedKeys = session.questions
+        .filter((question) => question.articlePath === path || question.quizPath === path)
+        .map((question) => question.key);
+      if (removedKeys.length === 0) continue;
+      const removed = new Set(removedKeys);
+      session.questions = session.questions.filter((question) => !removed.has(question.key));
+      for (const key of removed) delete session.answers[key];
+      if (session.questions.length === 0 || Object.keys(session.answers).length < session.questions.length) {
+        session.completedAt = null;
+      }
+      changed = true;
     }
 
     return changed;
@@ -275,6 +324,33 @@ export class KnowledgeStore {
     task.status = status;
     task.completedAt = completedAt;
     await this.save();
+  }
+
+  getDailyReviewSession(date: string): DailyReviewSession | null {
+    const session = this.data.dailyReviewSessions[date];
+    return session ? structuredClone(session) : null;
+  }
+
+  async saveDailyReviewSession(session: DailyReviewSession): Promise<void> {
+    this.data.dailyReviewSessions[session.date] = structuredClone(session);
+    await this.save();
+  }
+
+  async recordDailyReviewAnswer(date: string, answer: DailyReviewAnswer): Promise<DailyReviewSession | null> {
+    const session = this.data.dailyReviewSessions[date];
+    if (!session || !session.questions.some((question) => question.key === answer.questionKey)) return null;
+    session.answers[answer.questionKey] = structuredClone(answer);
+    if (Object.keys(session.answers).length === session.questions.length) {
+      session.completedAt = answer.answeredAt;
+    }
+    await this.save();
+    return structuredClone(session);
+  }
+
+  getCompletedReviewSessionsSince(since: Date): DailyReviewSession[] {
+    return Object.values(this.data.dailyReviewSessions)
+      .filter((session) => session.completedAt && new Date(session.completedAt) >= since)
+      .map((session) => structuredClone(session));
   }
 
   getCompletedTaskPathsSince(since: Date): string[] {

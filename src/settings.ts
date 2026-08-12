@@ -1,6 +1,6 @@
 import { App, Modal, Notice, PluginSettingTab, Setting, TextComponent, normalizePath, requestUrl } from "obsidian";
 import type KnowFlowPlugin from "./main";
-import { withTimeout } from "./services/ai-service";
+import { withTimeout } from "./services/ai/ai-transport";
 import type { AiModelConfig, AiRuntime, KnowFlowSettings } from "./types";
 
 type ModelConfigKey = "summaryModel" | "knowledgeMapModel" | "pipelineModel" | "chatModel" | "quizModel";
@@ -38,7 +38,7 @@ export const DEFAULT_SETTINGS: KnowFlowSettings = {
   autoGenerateSummary: false,
   autoGenerateQuiz: false,
   dailyNewArticleLimit: 1,
-  dailyReviewLimit: 3,
+  dailyReviewQuestionCap: 10,
   autoCreateCategoryFolders: false
 };
 
@@ -192,7 +192,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
   }
 
   private displayPipeline(containerEl: HTMLElement): void {
-    const pipeline = this.createGroup(containerEl, "Pipeline", this.plugin.settings.confirmBeforeWrite ? "confirm before write" : "direct apply");
+    const pipeline = this.createGroup(containerEl, "Pipeline", this.plugin.settings.confirmBeforeWrite ? "confirm before write" : "direct apply", true);
 
     new Setting(pipeline)
       .setName("Confirm before write")
@@ -220,43 +220,34 @@ export class KnowFlowSettingTab extends PluginSettingTab {
 
     new Setting(pipeline)
       .setName("Auto organize")
-      .setDesc("V0.2. Automatically process new clippings.")
+      .setDesc("Available in 2.0. Automatically process new clippings.")
       .addToggle((toggle) =>
         toggle
-          .setValue(this.plugin.settings.autoOrganize)
-          .onChange(async (value) => {
-            this.plugin.settings.autoOrganize = value;
-            await this.plugin.saveSettings();
-          })
+          .setValue(false)
+          .setDisabled(true)
       );
 
     new Setting(pipeline)
       .setName("Auto generate summary")
-      .setDesc("V0.2. Generate summaries after pipeline processing.")
+      .setDesc("Available in 2.0. Generate summaries after pipeline processing.")
       .addToggle((toggle) =>
         toggle
-          .setValue(this.plugin.settings.autoGenerateSummary)
-          .onChange(async (value) => {
-            this.plugin.settings.autoGenerateSummary = value;
-            await this.plugin.saveSettings();
-          })
+          .setValue(false)
+          .setDisabled(true)
       );
 
     new Setting(pipeline)
       .setName("Auto generate quiz")
-      .setDesc("V0.2. Generate database-backed quiz after article processing.")
+      .setDesc("Available in 2.0. Generate database-backed quiz after article processing.")
       .addToggle((toggle) =>
         toggle
-          .setValue(this.plugin.settings.autoGenerateQuiz)
-          .onChange(async (value) => {
-            this.plugin.settings.autoGenerateQuiz = value;
-            await this.plugin.saveSettings();
-          })
+          .setValue(false)
+          .setDisabled(true)
       );
   }
 
   private displayLearning(containerEl: HTMLElement): void {
-    const learning = this.createGroup(containerEl, "Learning", `${this.plugin.settings.dailyNewArticleLimit} new · ${this.plugin.settings.dailyReviewLimit} review`);
+    const learning = this.createGroup(containerEl, "Learning", `${this.plugin.settings.dailyNewArticleLimit} new · up to ${this.plugin.settings.dailyReviewQuestionCap} review questions`, true);
 
     new Setting(learning)
       .setName("Daily new article limit")
@@ -272,21 +263,21 @@ export class KnowFlowSettingTab extends PluginSettingTab {
       );
 
     new Setting(learning)
-      .setName("Daily review limit")
-      .setDesc("Maximum review tasks in Daily Learning.")
+      .setName("Daily review question cap")
+      .setDesc("Maximum questions in the global daily review.")
       .addText((text) =>
         text
-          .setPlaceholder("3")
-          .setValue(String(this.plugin.settings.dailyReviewLimit))
+          .setPlaceholder("10")
+          .setValue(String(this.plugin.settings.dailyReviewQuestionCap))
           .onChange(async (value) => {
-            this.plugin.settings.dailyReviewLimit = toPositiveInt(value, DEFAULT_SETTINGS.dailyReviewLimit);
+            this.plugin.settings.dailyReviewQuestionCap = toPositiveInt(value, DEFAULT_SETTINGS.dailyReviewQuestionCap);
             await this.plugin.saveSettings();
           })
       );
   }
 
   private displayData(containerEl: HTMLElement): void {
-    const privacy = this.createGroup(containerEl, "Data & Privacy", "local settings");
+    const privacy = this.createGroup(containerEl, "Data & Privacy", "local settings", true);
     privacy.createEl("p", {
       text: "KnowFlow stores settings and learning state in local Obsidian plugin data. API requests should only send the current note or selected context.",
       cls: "setting-item-description"

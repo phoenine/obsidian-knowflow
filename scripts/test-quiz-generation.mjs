@@ -8,7 +8,7 @@ import * as esbuild from "esbuild";
 const tempDir = await mkdtemp(join(tmpdir(), "knowflow-quiz-generation-"));
 await esbuild.build({
   bundle: true,
-  entryPoints: ["src/services/quiz-generation.ts"],
+  entryPoints: ["src/services/learning/quiz-generation.ts"],
   format: "esm",
   outdir: tempDir,
   platform: "node"

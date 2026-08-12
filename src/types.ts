@@ -38,7 +38,7 @@ export interface KnowFlowSettings {
   autoGenerateSummary: boolean;
   autoGenerateQuiz: boolean;
   dailyNewArticleLimit: number;
-  dailyReviewLimit: number;
+  dailyReviewQuestionCap: number;
 }
 
 export interface NoteSummary {
@@ -65,10 +65,17 @@ export interface QuizOption {
   content: string;
 }
 
+export interface QuizAnswerState {
+  selectedKey: string | null;
+  correct: boolean | null;
+  answeredAt: string | null;
+}
+
 export interface QuizQuestion {
   id: string;
   notePath: string;
   knowledgePointId?: string;
+  sourceSection?: string;
   question: string;
   type: "single_choice";
   options: QuizOption[];
@@ -113,6 +120,38 @@ export interface QuizSession {
   index: number;
   selectedKey: string | null;
   submitted: boolean;
+  reviewDate?: string;
+  reviewQuestionKeys?: string[];
+}
+
+export type ReviewQuestionPriority = "wrong" | "unseen" | "due";
+
+export interface DailyReviewQuestion {
+  key: string;
+  articlePath: string;
+  articleTitle: string;
+  quizPath: string;
+  displayIndex: number;
+  priority: ReviewQuestionPriority;
+  question: QuizQuestion;
+}
+
+export interface DailyReviewAnswer {
+  questionKey: string;
+  selectedKey: string;
+  correct: boolean;
+  answeredAt: string;
+}
+
+export interface DailyReviewSession {
+  generatorVersion: number;
+  date: string;
+  generatedAt: string;
+  questionCap: number;
+  bankSize: number;
+  questions: DailyReviewQuestion[];
+  answers: Record<string, DailyReviewAnswer>;
+  completedAt: string | null;
 }
 
 export interface PipelineStatus {
@@ -177,7 +216,7 @@ export interface ArticleStats {
   weakPoints: number;
 }
 
-export type DailyTaskType = "new_note" | "review_note" | "weak_point";
+export type DailyTaskType = "new_note";
 export type DailyTaskStatus = "pending" | "completed" | "skipped";
 
 export interface DailyTask {
@@ -195,6 +234,5 @@ export interface DailyTaskPlan {
   scopePath: string;
   generatedAt: string;
   newArticleLimit: number;
-  reviewLimit: number;
   tasks: DailyTask[];
 }

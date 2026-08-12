@@ -4,6 +4,8 @@ import type { QuizSession } from "../types";
 
 interface QuizTestViewProps {
   session: QuizSession;
+  sourceLabel?: string;
+  onOpenSource?: () => void;
   onBack: () => void;
   onSelect: (key: string) => void;
   onSubmit: () => Promise<void>;
@@ -106,6 +108,22 @@ export function renderQuizTestView(root: HTMLElement, props: QuizTestViewProps):
     });
     if (question.explanation) {
       text(explanation, question.explanation, "kf-muted");
+    }
+    if (props.sourceLabel && props.onOpenSource) {
+      const source = explanation.createEl("button", {
+        text: `查看原文 · ${props.sourceLabel}`
+      });
+      setStyles(source, {
+        alignSelf: "flex-start",
+        backgroundColor: "transparent",
+        border: "0",
+        color: "var(--interactive-accent)",
+        cursor: "pointer",
+        fontSize: "12px",
+        height: "auto",
+        padding: "2px 0"
+      });
+      source.addEventListener("click", props.onOpenSource);
     }
   }
 

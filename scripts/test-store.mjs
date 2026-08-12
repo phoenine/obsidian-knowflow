@@ -8,7 +8,7 @@ import * as esbuild from "esbuild";
 const tempDir = await mkdtemp(join(tmpdir(), "knowflow-store-"));
 await esbuild.build({
   bundle: true,
-  entryPoints: ["src/services/store.ts"],
+  entryPoints: ["src/services/core/store.ts"],
   format: "esm",
   outdir: tempDir,
   platform: "node"
@@ -187,6 +187,23 @@ function createHost(initial) {
   assert.equal("chatThreads" in store.exportData(), false, "chat history belongs in markdown notes, not data.json");
 }
 
+// Every removed legacy field must trigger persistence even when chatThreads
+// is absent; otherwise the obsolete data remains in data.json until a later
+// unrelated write.
+{
+  const { host } = createHost({
+    pipelineResults: [{ sourcePath: "legacy.md" }],
+    pipelineStatuses: {},
+    learnedPaths: [],
+    dailyTaskPlans: {}
+  });
+  const store = new KnowledgeStore(host);
+  await store.load();
+
+  assert.equal(host.saveCount, 1);
+  assert.equal("pipelineResults" in await host.loadData(), false);
+}
+
 // Daily task plans persist task state and keep path references valid when
 // article folders are renamed.
 {
@@ -194,12 +211,11 @@ function createHost(initial) {
   const store = new KnowledgeStore(host);
   await store.load();
   await store.saveDailyTaskPlan({
-    generatorVersion: 2,
+    generatorVersion: 3,
     date: "2026-08-09",
     scopePath: "Articles/AI",
     generatedAt: "2026-08-09T08:00:00.000Z",
     newArticleLimit: 1,
-    reviewLimit: 1,
     tasks: [{
       id: "new_note:Articles/AI/one.md",
       type: "new_note",
@@ -207,26 +223,15 @@ function createHost(initial) {
       targetPath: "Articles/AI/one.md",
       status: "pending",
       completedAt: null
-    }, {
-      id: "review_note:Articles/AI/review.md",
-      type: "review_note",
-      title: "Review",
-      targetPath: "Articles/AI/review.md",
-      status: "pending",
-      completedAt: null
     }]
   });
 
   await store.updateDailyTaskStatus("2026-08-09", "Articles/AI", "new_note:Articles/AI/one.md", "completed", "2026-08-09T09:00:00.000Z");
-  await store.updateDailyTaskStatus("2026-08-09", "Articles/AI", "review_note:Articles/AI/review.md", "completed", "2026-08-09T10:00:00.000Z");
   assert.equal(store.getDailyTaskPlan("2026-08-09", "Articles/AI")?.tasks[0].status, "completed");
   assert.deepEqual(store.getCompletedTaskPathsSince(new Date("2026-08-09T08:30:00.000Z")), ["Articles/AI/one.md"]);
   assert.deepEqual(
     store.getCompletedTasksSince(new Date("2026-08-09T08:30:00.000Z")).map((task) => ({ path: task.targetPath, completedAt: task.completedAt })),
-    [
-      { path: "Articles/AI/one.md", completedAt: "2026-08-09T09:00:00.000Z" },
-      { path: "Articles/AI/review.md", completedAt: "2026-08-09T10:00:00.000Z" }
-    ]
+    [{ path: "Articles/AI/one.md", completedAt: "2026-08-09T09:00:00.000Z" }]
   );
 
   await store.migrateFolder("Articles/AI", "Articles/人工智能");
@@ -234,6 +239,55 @@ function createHost(initial) {
   const migrated = store.getDailyTaskPlan("2026-08-09", "Articles/人工智能");
   assert.equal(migrated?.tasks[0].targetPath, "Articles/人工智能/one.md");
   assert.equal(migrated?.tasks[0].id, "new_note:Articles/人工智能/one.md");
+}
+
+// Daily review sessions persist cross-article question references, progress,
+// completion, and source-path migrations.
+{
+  const { host } = createHost();
+  const store = new KnowledgeStore(host);
+  await store.load();
+  const reviewQuestion = {
+    key: "review-one",
+    articlePath: "Articles/AI/one.md",
+    articleTitle: "One",
+    quizPath: "Archives/one Quiz.md",
+    displayIndex: 1,
+    priority: "wrong",
+    question: {
+      id: "q1",
+      notePath: "Articles/AI/one.md",
+      question: "Question?",
+      type: "single_choice",
+      options: [{ key: "A", content: "A" }, { key: "B", content: "B" }],
+      answerKey: "A",
+      explanation: "Explanation",
+      difficulty: 3,
+      createdAt: "2026-08-01"
+    }
+  };
+  await store.saveDailyReviewSession({
+    generatorVersion: 1,
+    date: "2026-08-12",
+    generatedAt: "2026-08-12T08:00:00.000Z",
+    questionCap: 10,
+    bankSize: 20,
+    questions: [reviewQuestion],
+    answers: {},
+    completedAt: null
+  });
+  const updated = await store.recordDailyReviewAnswer("2026-08-12", {
+    questionKey: "review-one",
+    selectedKey: "B",
+    correct: false,
+    answeredAt: "2026-08-12T08:10:00.000Z"
+  });
+  assert.equal(updated?.completedAt, "2026-08-12T08:10:00.000Z");
+  assert.equal(store.getCompletedReviewSessionsSince(new Date("2026-08-12T00:00:00.000Z")).length, 1);
+
+  await store.migratePath("Articles/AI/one.md", "Articles/人工智能/one.md");
+  assert.equal(store.getDailyReviewSession("2026-08-12")?.questions[0].articlePath, "Articles/人工智能/one.md");
+  assert.equal(store.getDailyReviewSession("2026-08-12")?.questions[0].question.notePath, "Articles/人工智能/one.md");
 }
 
 await rm(tempDir, { recursive: true, force: true });

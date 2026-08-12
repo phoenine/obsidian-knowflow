@@ -8,7 +8,7 @@ import * as esbuild from "esbuild";
 const tempDir = await mkdtemp(join(tmpdir(), "knowflow-note-operations-"));
 await esbuild.build({
   bundle: true,
-  entryPoints: ["src/services/note-operation-coordinator.ts"],
+  entryPoints: ["src/services/core/note-operation-coordinator.ts"],
   format: "esm",
   outdir: tempDir,
   platform: "node"

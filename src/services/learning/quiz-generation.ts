@@ -1,3 +1,5 @@
+import { prepareArticleForAi } from "../clipping/managed-content";
+
 export type QuizMarkerKind = "bold" | "highlight" | "underline" | "italic";
 export type QuizFocusType = "concept" | "principle" | "comparison" | "application" | "pitfall";
 
@@ -17,7 +19,7 @@ const SECTION_CHARS = 12000;
 const BATCH_CHARS = 16000;
 
 export function prepareQuizSections(content: string): QuizSourceSection[] {
-  const body = removeManagedCallouts(stripFrontmatter(content));
+  const body = prepareArticleForAi(content);
   const logicalSections = splitByH2(body)
     .filter((section) => !/^(?:Knowledge Map|知识骨架)$/i.test(section.title.trim()));
   const chunks = logicalSections.flatMap((section) => splitLargeSection(section));
@@ -78,26 +80,6 @@ export function getQuizFocusTargets(count: number): Record<QuizFocusType, number
     remaining -= 1;
   }
   return targets;
-}
-
-function stripFrontmatter(content: string): string {
-  return content.replace(/\r\n/g, "\n").replace(/^---\n[\s\S]*?\n---\n?/, "");
-}
-
-function removeManagedCallouts(content: string): string {
-  const lines = content.split("\n");
-  const result: string[] = [];
-  let index = 0;
-  while (index < lines.length) {
-    if (/^> \[!(?:summary|question)\][+-]?\s+(?:AI 摘要|Quiz)\s*$/.test(lines[index])) {
-      index += 1;
-      while (index < lines.length && /^\s*>/.test(lines[index])) index += 1;
-      continue;
-    }
-    result.push(lines[index]);
-    index += 1;
-  }
-  return result.join("\n");
 }
 
 function splitByH2(content: string): Array<{ title: string; content: string }> {

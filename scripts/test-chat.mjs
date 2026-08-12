@@ -9,9 +9,10 @@ const tempDir = await mkdtemp(join(tmpdir(), "knowflow-chat-"));
 await esbuild.build({
   bundle: true,
   entryPoints: [
-    "src/services/chat-stream.ts",
-    "src/services/chat-note-service.ts",
-    "src/services/editor-bridge.ts"
+    "src/services/chat/chat-stream.ts",
+    "src/services/chat/chat-context.ts",
+    "src/services/chat/chat-note-service.ts",
+    "src/services/chat/editor-bridge.ts"
   ],
   format: "esm",
   outdir: tempDir,
@@ -31,6 +32,7 @@ await esbuild.build({
 const { estimateChatUsage, parseChatStreamData } = await import(
   pathToFileURL(join(tempDir, "chat-stream.js")).href
 );
+const { buildChatRequestMessages } = await import(pathToFileURL(join(tempDir, "chat-context.js")).href);
 const { ChatNoteService, parseThread, renderThread } = await import(pathToFileURL(join(tempDir, "chat-note-service.js")).href);
 const { insertBelowCursor } = await import(pathToFileURL(join(tempDir, "editor-bridge.js")).href);
 
@@ -49,6 +51,48 @@ assert.deepEqual(
   { promptTokens: 10, completionTokens: 4, totalTokens: 14, estimated: false }
 );
 assert.equal(estimateChatUsage([{ content: "123456" }], "123").totalTokens, 3);
+
+{
+  const managedArticle = [
+    "---",
+    "分类: AI",
+    "---",
+    "",
+    "> [!summary]- AI 摘要",
+    "> 旧摘要不应发送。",
+    "",
+    "## Knowledge Map",
+    "",
+    "```mermaid",
+    "graph LR",
+    "```",
+    "",
+    "## 正文",
+    "",
+    "真正的文章内容。",
+    "Original sentence.（内联中文翻译。） <!-- knowflow-translation -->",
+    "",
+    "> [!question]- Quiz",
+    "> [[Archives/Test Quiz.md]]"
+  ].join("\n");
+  const history = Array.from({ length: 20 }, (_, index) => ({
+    id: `m-${index}`,
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `${index}-${"x".repeat(1500)}`,
+    reasoning: "",
+    createdAt: "2026-08-05T10:00:00.000Z",
+    status: index === 19 ? "error" : "done"
+  }));
+  const messages = buildChatRequestMessages("测试", managedArticle, history);
+  assert.ok(messages[0].content.includes("真正的文章内容。"));
+  assert.ok(messages[0].content.includes("Original sentence.（内联中文翻译。）"));
+  assert.ok(!messages[0].content.includes("knowflow-translation"));
+  assert.ok(!messages[0].content.includes("旧摘要不应发送。"));
+  assert.ok(!messages[0].content.includes("graph LR"));
+  assert.ok(!messages[0].content.includes("Test Quiz"));
+  assert.ok(messages.slice(1).reduce((total, message) => total + message.content.length, 0) <= 12000);
+  assert.ok(!messages.some((message) => message.content.startsWith("19-")), "errored assistant output must be excluded");
+}
 
 const thread = {
   id: "chat-1",

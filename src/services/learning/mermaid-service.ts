@@ -1,16 +1,24 @@
 import { Notice, TFile } from "obsidian";
 import type { App } from "obsidian";
-import type { AiService } from "./ai-service";
+import type { AiService } from "../ai/ai-service";
+import { NoteOperationCoordinator } from "../core/note-operation-coordinator";
 import { findSummaryCalloutEndIndex } from "./summary-notes";
 
 export class MermaidService {
-  constructor(private app: App, private ai: AiService) {}
+  constructor(
+    private app: App,
+    private ai: AiService,
+    private noteOperations: NoteOperationCoordinator
+  ) {}
 
   async generateForFile(file: TFile): Promise<void> {
     const content = await this.app.vault.read(file);
     const mermaid = await this.ai.generateKnowledgeMap(file.basename, content);
-    const nextContent = upsertKnowledgeMap(content, mermaid);
-    await this.app.vault.modify(file, nextContent);
+    await this.noteOperations.runExclusive(file.path, async () => {
+      const current = await this.app.vault.read(file);
+      const nextContent = upsertKnowledgeMap(current, mermaid);
+      if (nextContent !== current) await this.app.vault.modify(file, nextContent);
+    });
     new Notice("KnowFlow: Mermaid knowledge map inserted");
   }
 }

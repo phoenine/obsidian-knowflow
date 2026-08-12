@@ -1,6 +1,6 @@
 import { normalizePath } from "obsidian";
 import type { App } from "obsidian";
-import type { ChatThread } from "../types";
+import type { ChatThread } from "../../types";
 
 export class ChatNoteService {
   constructor(private app: App, private folder: string) {}

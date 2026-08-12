@@ -1,5 +1,5 @@
 import { setIcon } from "obsidian";
-import type { ArticleStats, DailyTask } from "../types";
+import type { ArticleStats, DailyReviewSession, DailyTask } from "../types";
 import { iconButton, setStyles } from "./dom";
 import { renderBrandShell } from "./shell";
 
@@ -8,6 +8,7 @@ interface TaskOverviewViewProps {
   stats: ArticleStats;
   categoryStats: Array<{ name: string; total: number; learned: number }>;
   tasks: DailyTask[];
+  review: DailyReviewSession | null;
   loading: boolean;
   weeklyLearned: number;
   weeklyReviewCount: number;
@@ -17,6 +18,8 @@ interface TaskOverviewViewProps {
   onCompleteTask: (task: DailyTask) => void;
   onRefreshTask: (task: DailyTask) => void;
   onSkipTask: (task: DailyTask) => void;
+  onRefreshReview: () => void;
+  onStartReview: () => void;
 }
 
 const PALETTE = {
@@ -25,6 +28,7 @@ const PALETTE = {
   text: "#18361D",
   muted: "#6F7D70",
   accent: "#3E7F34",
+  review: "#A56F1B",
   border: "#D9E8D5",
   divider: "#D9E3D6",
   track: "#DCE7D8"
@@ -40,9 +44,12 @@ export function renderTaskOverviewView(root: HTMLElement, props: TaskOverviewVie
   const completedTasks = props.tasks.filter((task) => task.status === "completed");
   const resolvedTasks = props.tasks.filter((task) => task.status !== "pending");
   const dailyNew = countTasks(props.tasks, "new_note");
-  const dailyReview = countTasks(props.tasks, "review_note");
-  const progressPercent = props.tasks.length > 0
-    ? Math.round((resolvedTasks.length / props.tasks.length) * 100)
+  const dailyReview = props.review?.questions.length ?? 0;
+  const reviewCompleted = Boolean(props.review?.completedAt);
+  const totalTaskCount = props.tasks.length + (dailyReview > 0 ? 1 : 0);
+  const completedTaskCount = resolvedTasks.length + (reviewCompleted ? 1 : 0);
+  const progressPercent = totalTaskCount > 0
+    ? Math.round((completedTaskCount / totalTaskCount) * 100)
     : 0;
 
   const content = renderBrandShell(root, "Task Overview");
@@ -61,7 +68,7 @@ export function renderTaskOverviewView(root: HTMLElement, props: TaskOverviewVie
 
   renderTodayCard(page, {
     ...props,
-    completedCount: completedTasks.length,
+    completedCount: completedTasks.length + (reviewCompleted ? 1 : 0),
     dailyNew,
     dailyReview,
     pendingCount: pendingTasks.length,
@@ -131,8 +138,8 @@ function renderTodayCard(parent: HTMLElement, props: TodayCardProps): void {
     margin: "14px 0 12px"
   });
   dailyMetric(metrics, "新文章", `${props.dailyNew} 篇`);
-  dailyMetric(metrics, "复习", `${props.dailyReview} 篇`, true);
-  dailyMetric(metrics, "已完成", `${props.completedCount} 项`, true);
+  dailyMetric(metrics, "复习", `${props.dailyReview} 题`, true);
+  dailyMetric(metrics, "已完成", `${props.completedCount}/${props.tasks.length + (props.dailyReview > 0 ? 1 : 0)} 项`, true);
 
   divider(card);
   const taskHeading = card.createDiv();
@@ -143,28 +150,34 @@ function renderTodayCard(parent: HTMLElement, props: TodayCardProps): void {
     margin: "10px 0 4px"
   });
   createIcon(taskHeading, "calendar-check", 16, PALETTE.text);
-  setStyles(taskHeading.createDiv({ text: `今日任务 · ${props.tasks.length}` }), {
+  const totalTasks = props.tasks.length + (props.dailyReview > 0 ? 1 : 0);
+  setStyles(taskHeading.createDiv({ text: `今日任务 · ${totalTasks}` }), {
     fontSize: "14px",
     fontWeight: "600",
     lineHeight: "19px"
   });
 
   if (props.loading) {
-    stateMessage(card, "正在筛选已生成 Quiz 的复习文章…");
-  } else if (props.tasks.length === 0) {
-    stateMessage(card, "当前范围内暂无可学习的文章");
+    stateMessage(card, "正在生成全局复习题目…");
+  } else if (totalTasks === 0) {
+    stateMessage(card, props.review && props.review.bankSize > 0
+      ? "今天没有到期的复习题目"
+      : "当前暂无可学习文章或可复习题目");
   } else {
     const taskRows = props.tasks.map((task) => taskRow(card, task, props));
+    if (props.review && props.review.questions.length > 0) {
+      taskRows.push(reviewTaskRow(card, props.review, props));
+    }
     const updateTaskRows = (expanded: boolean): void => {
-      const visibleCount = expanded ? taskRows.length : Math.min(3, taskRows.length);
+      const visibleCount = expanded ? taskRows.length : Math.min(4, taskRows.length);
       for (const [index, row] of taskRows.entries()) {
         row.style.display = index < visibleCount ? "grid" : "none";
         row.style.borderBottom = index < visibleCount - 1 ? `1px solid ${PALETTE.border}` : "none";
       }
     };
     updateTaskRows(false);
-    if (props.tasks.length > 3) {
-      expandButton(card, props.tasks.length - 3, "项", updateTaskRows);
+    if (taskRows.length > 4) {
+      expandButton(card, taskRows.length - 4, "项", updateTaskRows);
     } else if (props.pendingCount === 0) {
       setStyles(card.createDiv({ text: "今日任务已完成" }), {
         color: PALETTE.accent,
@@ -175,6 +188,49 @@ function renderTodayCard(parent: HTMLElement, props: TodayCardProps): void {
       });
     }
   }
+}
+
+function reviewTaskRow(parent: HTMLElement, review: DailyReviewSession, props: TaskOverviewViewProps): HTMLElement {
+  const answered = Object.keys(review.answers).length;
+  const item = parent.createDiv({ cls: "kf-today-task-row" });
+  setStyles(item, {
+    alignItems: "center",
+    display: "grid",
+    gap: "8px",
+    gridTemplateColumns: "18px minmax(0, 1fr) 24px 24px",
+    minHeight: "38px"
+  });
+  const status = item.createDiv();
+  setStyles(status, {
+    alignItems: "center",
+    backgroundColor: review.completedAt ? PALETTE.accent : PALETTE.background,
+    border: `1.3px solid ${PALETTE.accent}`,
+    borderRadius: "50%",
+    color: PALETTE.background,
+    display: "flex",
+    height: "15px",
+    justifyContent: "center",
+    width: "15px"
+  });
+  if (review.completedAt) createIcon(status, "check", 10, PALETTE.background);
+
+  const copy = item.createDiv();
+  setStyles(copy.createDiv({ text: "今日复习" }), {
+    color: PALETTE.review,
+    fontSize: "13px",
+    fontWeight: "400",
+    lineHeight: "17px"
+  });
+
+  taskAction(item, "刷新题目", "refresh-cw", answered === 0, props.onRefreshReview);
+  taskAction(
+    item,
+    review.completedAt ? "查看结果" : answered > 0 ? "继续考试" : "开始考试",
+    "clipboard-check",
+    true,
+    props.onStartReview
+  );
+  return item;
 }
 
 function renderProgressRing(parent: HTMLElement, percent: number): void {
@@ -503,12 +559,12 @@ function renderArticleStats(
   }
   const updateCategoryRows = (expanded: boolean): void => {
     for (const [index, row] of categoryRows.entries()) {
-      row.style.display = expanded || index < 5 ? "grid" : "none";
+      row.style.display = expanded || index < 4 ? "grid" : "none";
     }
   };
   updateCategoryRows(false);
-  if (categories.length > 5) {
-    expandButton(section, categories.length - 5, "个分类", updateCategoryRows);
+  if (categories.length > 4) {
+    expandButton(section, categories.length - 4, "个分类", updateCategoryRows);
   }
 }
 

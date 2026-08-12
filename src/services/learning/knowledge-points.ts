@@ -1,4 +1,4 @@
-import type { KnowledgePoint, KnowledgePointGroup, KnowledgePointType } from "../types";
+import type { KnowledgePoint, KnowledgePointGroup, KnowledgePointType } from "../../types";
 
 const KNOWLEDGE_BLOCK_START = "<!-- knowflow:knowledge-points:start -->";
 const KNOWLEDGE_BLOCK_END = "<!-- knowflow:knowledge-points:end -->";

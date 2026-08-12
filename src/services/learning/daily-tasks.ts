@@ -1,10 +1,9 @@
-import type { DailyTask, DailyTaskPlan } from "../types";
+import type { DailyTask, DailyTaskPlan } from "../../types";
 
 export interface DailyTaskCandidate {
   path: string;
   title: string;
   learned: boolean;
-  reviewable: boolean;
 }
 
 interface CreateDailyTaskPlanOptions {
@@ -12,7 +11,6 @@ interface CreateDailyTaskPlanOptions {
   scopePath: string;
   generatedAt: string;
   newArticleLimit: number;
-  reviewLimit: number;
   candidates: DailyTaskCandidate[];
   existingTasks?: DailyTask[];
   random?: () => number;
@@ -30,28 +28,19 @@ export function createDailyTaskPlan(options: CreateDailyTaskPlanOptions): DailyT
     random,
     options.existingTasks
   );
-  const reviewTasks = selectTasks(
-    options.candidates.filter((candidate) => candidate.learned && candidate.reviewable),
-    "review_note",
-    options.reviewLimit,
-    random,
-    options.existingTasks
-  );
-
   return {
-    generatorVersion: 2,
+    generatorVersion: 3,
     date: options.date,
     scopePath: options.scopePath,
     generatedAt: options.generatedAt,
     newArticleLimit: options.newArticleLimit,
-    reviewLimit: options.reviewLimit,
-    tasks: [...newTasks, ...reviewTasks]
+    tasks: newTasks
   };
 }
 
 function selectTasks(
   candidates: DailyTaskCandidate[],
-  type: "new_note" | "review_note",
+  type: "new_note",
   limit: number,
   random: () => number,
   existingTasks: DailyTask[] = []
@@ -80,7 +69,7 @@ function sample<T>(candidates: T[], limit: number, random: () => number): T[] {
   return selected;
 }
 
-function createNoteTask(candidate: DailyTaskCandidate, type: "new_note" | "review_note"): DailyTask {
+function createNoteTask(candidate: DailyTaskCandidate, type: "new_note"): DailyTask {
   return {
     id: `${type}:${candidate.path}`,
     type,

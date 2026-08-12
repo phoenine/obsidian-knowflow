@@ -1,7 +1,7 @@
 import { TFile } from "obsidian";
 import type { App } from "obsidian";
-import { applyLearningCompletionFrontmatter } from "./frontmatter-rules";
-import { NoteOperationCoordinator } from "./note-operation-coordinator";
+import { applyLearningCompletionFrontmatter } from "../clipping/frontmatter-rules";
+import { NoteOperationCoordinator } from "../core/note-operation-coordinator";
 
 export class ArticleLearningService {
   constructor(

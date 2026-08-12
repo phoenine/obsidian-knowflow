@@ -1,15 +1,16 @@
 import { Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
-import { AiService } from "./services/ai-service";
-import { ArticleLearningService } from "./services/article-learning-service";
-import { ChatNoteService } from "./services/chat-note-service";
-import { ClippingPipeline } from "./services/clipping-pipeline";
-import { MermaidService } from "./services/mermaid-service";
-import { NoteOperationCoordinator } from "./services/note-operation-coordinator";
-import { PathRouter } from "./services/path-router";
-import { PluginDataManager } from "./services/plugin-data-manager";
-import { QuizNoteService } from "./services/quiz-note-service";
-import { KnowledgeStore } from "./services/store";
-import { SummaryNoteService } from "./services/summary-note-service";
+import { AiService } from "./services/ai/ai-service";
+import { ArticleLearningService } from "./services/learning/article-learning-service";
+import { ChatNoteService } from "./services/chat/chat-note-service";
+import { ClippingPipeline } from "./services/clipping/clipping-pipeline";
+import { MermaidService } from "./services/learning/mermaid-service";
+import { NoteOperationCoordinator } from "./services/core/note-operation-coordinator";
+import { PathRouter } from "./services/core/path-router";
+import { PluginDataManager } from "./services/core/plugin-data-manager";
+import { QuizNoteService } from "./services/learning/quiz-note-service";
+import { KnowledgeStore } from "./services/core/store";
+import { SummaryNoteService } from "./services/learning/summary-note-service";
+import { DailyReviewService } from "./services/learning/daily-review-service";
 import { DEFAULT_SETTINGS, KnowFlowSettingTab } from "./settings";
 import { KNOWFLOW_VIEW_TYPE, type AiModelConfig, type KnowFlowSettings } from "./types";
 import { KnowFlowSidebarView } from "./ui/sidebar-view";
@@ -25,6 +26,7 @@ export default class KnowFlowPlugin extends Plugin {
   pipeline: ClippingPipeline;
   quizNotes: QuizNoteService;
   summaryNotes: SummaryNoteService;
+  dailyReview: DailyReviewService;
   private noteOperations: NoteOperationCoordinator;
   private dataManager: PluginDataManager;
 
@@ -44,12 +46,13 @@ export default class KnowFlowPlugin extends Plugin {
     await this.store.load();
     this.ai = new AiService(this.settings);
     this.chatNotes = new ChatNoteService(this.app, this.settings.chatConversationFolder);
-    this.mermaid = new MermaidService(this.app, this.ai);
     this.router = new PathRouter(this.app, this.settings);
     this.noteOperations = new NoteOperationCoordinator();
+    this.mermaid = new MermaidService(this.app, this.ai, this.noteOperations);
     this.learningNotes = new ArticleLearningService(this.app, this.noteOperations);
     this.pipeline = new ClippingPipeline(this.app, this.settings, this.store, this.ai, this.noteOperations);
-    this.quizNotes = new QuizNoteService(this.app, this.settings);
+    this.quizNotes = new QuizNoteService(this.app, this.settings, this.noteOperations);
+    this.dailyReview = new DailyReviewService(this.app, this.store, this.quizNotes, this.settings);
     this.summaryNotes = new SummaryNoteService(this.app, this.noteOperations);
 
     this.registerView(KNOWFLOW_VIEW_TYPE, (leaf) => new KnowFlowSidebarView(leaf, this));
@@ -171,6 +174,7 @@ export default class KnowFlowPlugin extends Plugin {
     this.ai?.updateSettings(this.settings);
     this.pipeline?.updateSettings(this.settings);
     this.quizNotes?.updateSettings(this.settings);
+    this.dailyReview?.updateSettings(this.settings);
     this.chatNotes?.updateFolder(this.settings.chatConversationFolder);
     this.refreshView();
   }
@@ -205,15 +209,33 @@ function normalizeSettings(savedSettings: unknown): KnowFlowSettings {
   const legacyApiKey = typeof saved.apiKey === "string" ? saved.apiKey : undefined;
   const summaryModel = normalizeModelConfig(saved.summaryModel, DEFAULT_SETTINGS.summaryModel, legacyRuntime, legacyBaseUrl, legacyApiKey);
 
-  return {
+  const settings = {
     ...DEFAULT_SETTINGS,
     ...saved,
+    autoOrganize: false,
+    autoGenerateSummary: false,
+    autoGenerateQuiz: false,
+    dailyReviewQuestionCap: normalizePositiveInt(
+      saved.dailyReviewQuestionCap ?? saved.dailyReviewLimit,
+      DEFAULT_SETTINGS.dailyReviewQuestionCap
+    ),
     summaryModel,
     knowledgeMapModel: normalizeModelConfig(saved.knowledgeMapModel, summaryModel),
     pipelineModel: normalizeModelConfig(saved.pipelineModel, DEFAULT_SETTINGS.pipelineModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
     chatModel: normalizeModelConfig(saved.chatModel, DEFAULT_SETTINGS.chatModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
     quizModel: normalizeModelConfig(saved.quizModel, DEFAULT_SETTINGS.quizModel, legacyRuntime, legacyBaseUrl, legacyApiKey)
   };
+  delete (settings as typeof settings & { dailyReviewLimit?: unknown }).dailyReviewLimit;
+  return settings;
+}
+
+function normalizePositiveInt(value: unknown, fallback: number): number {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.floor(value));
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed)) return Math.max(0, parsed);
+  }
+  return fallback;
 }
 
 function normalizeModelConfig(

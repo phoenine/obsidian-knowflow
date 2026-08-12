@@ -1,6 +1,6 @@
 import { TFolder } from "obsidian";
 import type { App, TFile } from "obsidian";
-import type { KnowFlowSettings, ViewContext } from "../types";
+import type { KnowFlowSettings, ViewContext } from "../../types";
 
 function normalize(path: string): string {
   return path.replace(/^\/+|\/+$/g, "");

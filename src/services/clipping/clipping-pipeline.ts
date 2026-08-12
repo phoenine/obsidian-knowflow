@@ -1,27 +1,27 @@
 import { Notice, TFile, normalizePath } from "obsidian";
 import type { App } from "obsidian";
-import type { KnowFlowSettings } from "../types";
-import type { AiService } from "./ai-service";
+import type { KnowFlowSettings } from "../../types";
+import type { AiService } from "../ai/ai-service";
 import { removeCodeWatermarkLines } from "./cleanup-rules";
 import {
   applyFormattingDecisions,
   cleanHeadingNumberNoise,
   collectCodeCandidates,
   collectHeadingCandidates,
+  normalizeBodyHeadingLevels,
   normalizeOrphanBoldTriplet,
   preferTextLanguage,
   stripSequentialLineNumbers,
   trimCodeFenceBody
 } from "./formatting-candidates";
 import { applyArticleFrontmatter, updateFrontmatterCategory } from "./frontmatter-rules";
-import { NoteOperationCoordinator } from "./note-operation-coordinator";
+import { NoteOperationCoordinator } from "../core/note-operation-coordinator";
 import { loadUserSkillFile, loadSkill } from "./repair-skill";
 import { validateMarkdownIntegrity } from "./repair-validator";
-import { KnowledgeStore } from "./store";
+import { KnowledgeStore } from "../core/store";
 import {
   applyTranslationDecisions,
-  collectTranslationCandidates,
-  isPredominantlyEnglishArticle
+  collectTranslationCandidates
 } from "./translation-candidates";
 
 export const ARTICLE_CATEGORIES = [
@@ -138,14 +138,16 @@ export class ClippingPipeline {
       } else {
         await report("AI 判断标题", "skipped");
       }
-      formatted = this.normalizeHeadingLevels(formatted);
+      formatted = normalizeBodyHeadingLevels(formatted);
 
       // Phase 6: 英文翻译
       await report("英文翻译（可选）");
-      if (this.settings.translateEnglishClippings && isPredominantlyEnglishArticle(formatted)) {
+      if (this.settings.translateEnglishClippings) {
         const translationCandidates = collectTranslationCandidates(formatted);
-        const translations = await this.ai.translateEnglishParagraphs(title, translationCandidates);
-        formatted = applyTranslationDecisions(formatted, translationCandidates, translations);
+        if (translationCandidates.length > 0) {
+          const translations = await this.ai.translateEnglishParagraphs(title, translationCandidates);
+          formatted = applyTranslationDecisions(formatted, translationCandidates, translations);
+        }
       }
 
       // Phase 7: 验证 + 写入
@@ -183,20 +185,27 @@ export class ClippingPipeline {
   }
 
   async moveToCategory(file: TFile, category: string): Promise<TFile> {
+    return this.noteOperations.runExclusive(file.path, () => this.moveToCategoryExclusive(file, category));
+  }
+
+  private async moveToCategoryExclusive(file: TFile, category: string): Promise<TFile> {
     const targetFolder = normalizePath(`${this.settings.articlesFolder}/${category}`);
     await this.ensureCategoryFolder(targetFolder, category);
 
     const oldPath = file.path;
     const targetPath = normalizePath(`${targetFolder}/${file.name}`);
-    const content = await this.app.vault.read(file);
-    await this.app.vault.modify(file, this.updateFrontmatterCategory(content, category));
-
     if (oldPath !== targetPath) {
+      if (await this.app.vault.adapter.exists(targetPath)) {
+        throw new Error(`目标文件已存在：${targetPath}`);
+      }
       await this.app.fileManager.renameFile(file, targetPath);
     }
 
     const moved = this.app.vault.getAbstractFileByPath(targetPath);
     const movedFile = moved instanceof TFile ? moved : file;
+    const content = await this.app.vault.read(movedFile);
+    const categorized = this.updateFrontmatterCategory(content, category);
+    if (categorized !== content) await this.app.vault.modify(movedFile, categorized);
 
     await this.store.recordCategoryMove({ oldPath, newPath: movedFile.path });
     new Notice(`KnowFlow: moved to ${category}`);
@@ -262,30 +271,6 @@ export class ClippingPipeline {
       const lang = normalizeCodeLanguage(rawLang, body);
       return `\`\`\`${lang}\n${body}\n\`\`\``;
     });
-  }
-
-  /**
-   * Normalize heading levels so the shallowest body heading is H2.
-   * Article title is the implicit H1 — body headings must start at ##.
-   * # → ## (demote), ### → ## (promote), H2 → unchanged.
-   */
-  private normalizeHeadingLevels(content: string): string {
-    const lines = content.split("\n");
-    let minLevel = 6;
-    for (const line of lines) {
-      const match = /^(#{1,6})\s/.exec(line);
-      if (match) minLevel = Math.min(minLevel, match[1].length);
-    }
-    // Already H2 — no shift needed
-    if (minLevel === 2) return content;
-    // shift > 0: promote (H3+ → H2+); shift < 0: demote (H1 → H2+)
-    const shift = minLevel - 2;
-    return lines.map((line) => {
-      const match = /^(#{1,6})\s/.exec(line);
-      if (!match) return line;
-      const newLevel = Math.max(2, Math.min(6, match[1].length - shift));
-      return `${"#".repeat(newLevel)}${line.slice(match[1].length)}`;
-    }).join("\n");
   }
 
   private normalizeFinalBody(content: string): string {

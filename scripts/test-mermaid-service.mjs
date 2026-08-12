@@ -13,7 +13,7 @@ const obsidianStub = "export class Notice {}\nexport class TFile {}\n";
 const tempDir = await mkdtemp(join(tmpdir(), "knowflow-mermaid-"));
 await esbuild.build({
   bundle: true,
-  entryPoints: ["src/services/mermaid-service.ts"],
+  entryPoints: ["src/services/learning/mermaid-service.ts"],
   format: "esm",
   outdir: tempDir,
   platform: "node",
@@ -90,6 +90,42 @@ const { MermaidService } = await import(pathToFileURL(join(tempDir, "mermaid-ser
   assert.ok(!result.includes("root((旧的))"), "old mermaid content must be replaced");
 }
 
+// Edits made while the AI request is running must be merged into the latest
+// note instead of being overwritten by the request's original snapshot.
+{
+  let current = "## 正文\n\n请求开始前的内容。\n";
+  let releaseAi;
+  const aiGate = new Promise((resolve) => {
+    releaseAi = resolve;
+  });
+  const app = {
+    vault: {
+      read: async () => current,
+      modify: async (_file, next) => {
+        current = next;
+      }
+    }
+  };
+  const ai = {
+    generateKnowledgeMap: async () => {
+      await aiGate;
+      return "graph LR\n  H((\"核心主题\"))";
+    }
+  };
+  const noteOperations = {
+    runExclusive: async (_path, operation) => operation()
+  };
+  const svc = new MermaidService(app, ai, noteOperations);
+  const generation = svc.generateForFile({ basename: "标题", path: "Articles/标题.md" });
+  await Promise.resolve();
+  current = `${current.trimEnd()}\n\n用户在 AI 请求期间添加的内容。\n`;
+  releaseAi();
+  await generation;
+
+  assert.ok(current.includes("用户在 AI 请求期间添加的内容。"), "concurrent edits must survive map generation");
+  assert.ok(current.includes("## Knowledge Map"));
+}
+
 async function callUpsertKnowledgeMap(content) {
   // Exercise the same code path generateForFile() uses, via a throwaway
   // TFile-like object and a vault stub that just records the write.
@@ -111,8 +147,11 @@ async function callUpsertKnowledgeMap(content) {
       "  style A fill:#fff5f5,stroke:#ff8787"
     ].join("\n")
   };
-  const svc = new MermaidService(app, ai);
-  await svc.generateForFile({ basename: "标题" });
+  const noteOperations = {
+    runExclusive: async (_path, operation) => operation()
+  };
+  const svc = new MermaidService(app, ai, noteOperations);
+  await svc.generateForFile({ basename: "标题", path: "Articles/标题.md" });
   return written;
 }
 

@@ -1,8 +1,10 @@
 import { TFile, normalizePath } from "obsidian";
 import type { App } from "obsidian";
-import type { KnowledgePoint, KnowledgePointGroup, KnowledgePointStatus, KnowFlowSettings, QuizQuestion, QuizStats } from "../types";
+import type { KnowledgePoint, KnowledgePointGroup, KnowledgePointStatus, KnowFlowSettings, QuizQuestion, QuizStats } from "../../types";
 import { mergeKnowledgePointGroups, parseKnowledgePoints, upsertKnowledgePoints } from "./knowledge-points";
-import { appendQuizQuestion, applyQuizAnswer, buildQuizNoteContent, computeKnowledgePointStatuses, computeQuizStats, parseQuizCallout, parseQuizNote, sanitizeQuizFileName, setExamPassed, updateQuizSourcePath, upsertQuizCallout, upsertQuizQuestions } from "./quiz-notes";
+import { NoteOperationCoordinator } from "../core/note-operation-coordinator";
+import { appendQuizQuestion, applyQuizAnswer, buildQuizNoteContent, computeKnowledgePointStatuses, computeQuizStats, parseQuizCallout, parseQuizEntries, parseQuizNote, sanitizeQuizFileName, setExamPassed, updateQuizSourcePath, upsertQuizCallout, upsertQuizQuestions } from "./quiz-notes";
+import type { ParsedQuizQuestion } from "./quiz-notes";
 
 /**
  * Bridges the pure quiz-notes.ts markdown logic with the vault: creates/
@@ -12,7 +14,8 @@ import { appendQuizQuestion, applyQuizAnswer, buildQuizNoteContent, computeKnowl
 export class QuizNoteService {
   constructor(
     private app: App,
-    private settings: KnowFlowSettings
+    private settings: KnowFlowSettings,
+    private noteOperations: NoteOperationCoordinator
   ) {}
 
   updateSettings(settings: KnowFlowSettings): void {
@@ -20,6 +23,10 @@ export class QuizNoteService {
   }
 
   async saveQuiz(sourceFile: TFile, category: string, questions: QuizQuestion[]): Promise<string> {
+    return this.noteOperations.runExclusive(sourceFile.path, () => this.saveQuizExclusive(sourceFile, category, questions));
+  }
+
+  private async saveQuizExclusive(sourceFile: TFile, category: string, questions: QuizQuestion[]): Promise<string> {
     await this.ensureArchiveFolder();
     const sourceContent = await this.app.vault.read(sourceFile);
     const existingPath = parseQuizCallout(sourceContent);
@@ -56,6 +63,40 @@ export class QuizNoteService {
     return questions.length > 0 ? { quizPath, questions } : null;
   }
 
+  async loadReviewQuestions(notePath: string): Promise<{ quizPath: string; entries: ParsedQuizQuestion[] } | null> {
+    const quizPath = await this.resolveQuizPath(notePath);
+    if (!quizPath) return null;
+    const file = this.app.vault.getAbstractFileByPath(quizPath);
+    if (!(file instanceof TFile)) return null;
+    const entries = parseQuizEntries(await this.app.vault.read(file), notePath);
+    return entries.length > 0 ? { quizPath, entries } : null;
+  }
+
+  async listReviewQuestions(): Promise<Array<{
+    articlePath: string;
+    articleTitle: string;
+    quizPath: string;
+    entries: ParsedQuizQuestion[];
+  }>> {
+    const folder = `${normalizePath(this.archiveFolder())}/`;
+    const quizFiles = this.app.vault.getMarkdownFiles()
+      .filter((file) => file.path.startsWith(folder))
+      .filter((file) => !file.path.startsWith(`${folder}Daily-Quiz/`))
+      .filter((file) => /_Quiz(?: \d+)?\.md$/i.test(file.path));
+    const results = await Promise.all(quizFiles.map(async (file) => {
+      const content = await this.app.vault.read(file);
+      const articlePath = parseQuizSourcePath(content);
+      if (!articlePath) return null;
+      const sourceFile = this.app.vault.getAbstractFileByPath(articlePath);
+      if (!(sourceFile instanceof TFile)) return null;
+      const entries = parseQuizEntries(content, sourceFile.path);
+      return entries.length > 0
+        ? { articlePath: sourceFile.path, articleTitle: sourceFile.basename, quizPath: file.path, entries }
+        : null;
+    }));
+    return results.filter((result): result is NonNullable<typeof result> => result !== null);
+  }
+
   async getStats(notePath: string): Promise<QuizStats> {
     const empty: QuizStats = { total: 0, answered: 0, accuracy: null, wrong: 0 };
     const quizPath = await this.resolveQuizPath(notePath);
@@ -75,6 +116,17 @@ export class QuizNoteService {
   }
 
   async saveKnowledgePoints(
+    sourceFile: TFile,
+    category: string,
+    groups: KnowledgePointGroup[]
+  ): Promise<{ quizPath: string; groups: KnowledgePointGroup[] }> {
+    return this.noteOperations.runExclusive(
+      sourceFile.path,
+      () => this.saveKnowledgePointsExclusive(sourceFile, category, groups)
+    );
+  }
+
+  private async saveKnowledgePointsExclusive(
     sourceFile: TFile,
     category: string,
     groups: KnowledgePointGroup[]
@@ -151,10 +203,20 @@ export class QuizNoteService {
   }
 
   /** `displayIndex` is 1-based, matching the question's position in the session. Returns whether the answer was correct. */
-  async recordAnswer(quizPath: string, displayIndex: number, selectedKey: string, correctAnswerKey: string): Promise<boolean> {
+  async recordAnswer(
+    quizPath: string,
+    displayIndex: number,
+    selectedKey: string,
+    correctAnswerKey: string,
+    expectedQuestion?: string
+  ): Promise<boolean> {
     const file = this.app.vault.getAbstractFileByPath(quizPath);
     if (!(file instanceof TFile)) throw new Error(`Quiz note not found: ${quizPath}`);
     const content = await this.app.vault.read(file);
+    if (expectedQuestion) {
+      const current = parseQuizEntries(content, "")[displayIndex - 1]?.question.question;
+      if (current !== expectedQuestion) throw new Error("题库内容已变化，请刷新今日复习后重试。");
+    }
     const correct = selectedKey === correctAnswerKey;
     const date = new Date().toISOString().slice(0, 10);
     const patched = applyQuizAnswer(content, displayIndex, selectedKey, correct, date);
@@ -205,4 +267,13 @@ export class QuizNoteService {
   private archiveFolder(): string {
     return this.settings.archiveFolder || "Archives";
   }
+}
+
+function parseQuizSourcePath(content: string): string | null {
+  const frontmatter = /^---\n([\s\S]*?)\n---/.exec(content)?.[1] ?? "";
+  const field = /^(?:原文|原文链接):\s*.+$/m.exec(frontmatter)?.[0];
+  const target = field ? /\[\[([^|\]]+)(?:\|[^\]]*)?\]\]/.exec(field)?.[1]?.trim() : null;
+  if (!target) return null;
+  const normalized = normalizePath(target.replace(/^\.\.\//, "").replace(/\.md$/i, ""));
+  return `${normalized}.md`;
 }

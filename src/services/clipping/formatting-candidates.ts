@@ -253,7 +253,7 @@ function nearestNonBlank(lines: string[], start: number, step: -1 | 1): string {
 
 function isProtectedMarkdownLine(line: string): boolean {
   const trimmed = line.trim();
-  return /^(#{1,6}\s|>|!\[|\[!\[|[-*+]\s|\d+[.)]\s|\|)/.test(trimmed)
+  return /^(#{1,6}\s|>|!\[|\[!\[|<!--|[-*+]\s|\d+[.)]\s|\|)/.test(trimmed)
     || /^-{3,}$/.test(trimmed);
 }
 
@@ -561,4 +561,38 @@ export function normalizeOrphanBoldTriplet(content: string): string {
  */
 export function cleanHeadingNumberNoise(line: string): string {
   return line.replace(/^(#{1,6})\s+\d+[.\、\)]\s*\d+$/g, "$1 ");
+}
+
+/**
+ * Treat the article title as the implicit H1: anchor the first body heading at
+ * H2, preserve relative depth, and close downward level gaps. Fenced code is
+ * excluded because Markdown and shell examples commonly contain lines
+ * beginning with #/## that are not document headings.
+ */
+export function normalizeBodyHeadingLevels(content: string): string {
+  const lines = content.split("\n");
+  let inFence = false;
+  const headings: Array<{ index: number; indent: string; markers: string }> = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\s*(?:```|~~~)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const match = /^(\s{0,3})(#{1,6})(?:[ \t]+|$)/.exec(line);
+    if (match) headings.push({ index, indent: match[1], markers: match[2] });
+  }
+
+  if (headings.length === 0) return content;
+  const shift = headings[0].markers.length - 2;
+  let previousLevel = 1;
+  for (const heading of headings) {
+    const shiftedLevel = Math.max(2, Math.min(6, heading.markers.length - shift));
+    const newLevel = Math.min(shiftedLevel, previousLevel + 1);
+    lines[heading.index] = `${heading.indent}${"#".repeat(newLevel)}${lines[heading.index].slice(heading.indent.length + heading.markers.length)}`;
+    previousLevel = newLevel;
+  }
+  return lines.join("\n");
 }

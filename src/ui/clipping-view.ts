@@ -1,5 +1,5 @@
 import { setIcon } from "obsidian";
-import { ARTICLE_CATEGORIES } from "../services/clipping-pipeline";
+import { ARTICLE_CATEGORIES } from "../services/clipping/clipping-pipeline";
 import type { NoteSummary, PipelineStatus, PipelineUiState } from "../types";
 import { applyActionLayout, applyMetricsLayout, attachPressFeedback, button, cardHeader, formatDate, iconSpan, metric, row, section, setStyles, text } from "./dom";
 import { renderBrandShell } from "./shell";

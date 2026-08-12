@@ -8,7 +8,7 @@ import * as esbuild from "esbuild";
 const tempDir = await mkdtemp(join(tmpdir(), "knowflow-formatting-"));
 await esbuild.build({
   bundle: true,
-  entryPoints: ["src/services/formatting-candidates.ts"],
+  entryPoints: ["src/services/clipping/formatting-candidates.ts"],
   format: "esm",
   outdir: tempDir,
   platform: "node"
@@ -21,10 +21,48 @@ const {
   collectCodeCandidates,
   hasSameNonWhitespaceContent,
   needsCodeReformat,
+  normalizeBodyHeadingLevels,
   preferTextLanguage,
   stripSequentialLineNumbers,
   trimCodeFenceBody
 } = await import(pathToFileURL(join(tempDir, "formatting-candidates.js")).href);
+
+assert.equal(
+  normalizeBodyHeadingLevels("# 一级标题\n\n## 二级标题"),
+  "## 一级标题\n\n### 二级标题",
+  "body H1 must be demoted so the article title remains the only H1"
+);
+assert.equal(
+  normalizeBodyHeadingLevels([
+    "```markdown",
+    "## Code example heading",
+    "```",
+    "",
+    "### Actual body heading",
+    "",
+    "#### Actual child heading"
+  ].join("\n")),
+  [
+    "```markdown",
+    "## Code example heading",
+    "```",
+    "",
+    "## Actual body heading",
+    "",
+    "### Actual child heading"
+  ].join("\n"),
+  "heading levels inside fenced code must not block promotion of body H3 headings"
+);
+assert.equal(
+  normalizeBodyHeadingLevels("### 开头缺少父标题\n\n## 后续顶层标题"),
+  "## 开头缺少父标题\n\n## 后续顶层标题",
+  "the first real body heading must be H2 even when a later H2 exists"
+);
+assert.equal(
+  normalizeBodyHeadingLevels("## 顶层标题\n\n#### 跳级子标题\n\n##### 下一级标题"),
+  "## 顶层标题\n\n### 跳级子标题\n\n#### 下一级标题",
+  "heading depth must not jump by more than one level"
+);
 
 {
   const article = [
@@ -268,6 +306,14 @@ assert.equal(
     batches.flat().map((candidate) => candidate.id),
     candidates.map((candidate) => candidate.id),
     "batching must preserve every candidate in order"
+  );
+}
+
+{
+  const article = "English paragraph.\n\n中文译文。\n<!-- knowflow-translation -->";
+  assert.ok(
+    collectFormattingCandidates(article).every((candidate) => !candidate.content.includes("knowflow-translation")),
+    "managed translation markers must never become formatting candidates"
   );
 }
 

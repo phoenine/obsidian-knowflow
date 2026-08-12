@@ -224,7 +224,8 @@ function normalizeAuthor(value: string): string {
     ? trimmed.slice(1, -1).trim()
     : trimmed;
   const wikilink = /^\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|([^\]]+))?\]\]$/.exec(scalar);
-  return wikilink ? (wikilink[2] ?? wikilink[1]).trim() : trimmed;
+  const author = wikilink ? (wikilink[2] ?? wikilink[1]).trim() : scalar;
+  return author ? quoteYamlString(author) : "";
 }
 
 /**
