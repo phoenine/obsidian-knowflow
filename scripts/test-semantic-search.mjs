@@ -101,12 +101,16 @@ const files = [
 ];
 const stored = new Map();
 const directories = new Set();
+let failManifestWrite = false;
 const app = {
   vault: {
     adapter: {
       exists: async (path) => stored.has(path) || directories.has(path),
       read: async (path) => stored.get(path),
-      write: async (path, value) => { stored.set(path, value); },
+      write: async (path, value) => {
+        if (failManifestWrite && path === "semantic-index.json") throw new Error("planned manifest failure");
+        stored.set(path, value);
+      },
       readBinary: async (path) => stored.get(path).slice(0),
       writeBinary: async (path, value) => { stored.set(path, value.slice(0)); },
       remove: async (path) => { stored.delete(path); },
@@ -146,29 +150,94 @@ const transport = { embed: async (_config, inputs) => {
 const service = new SemanticIndexService(app, settings, "semantic-index.json", transport);
 await assert.rejects(() => service.rebuild(), /planned interruption/);
 assert.ok(stored.has("semantic-index-build.json"));
-assert.ok([...stored.keys()].some((path) => path.endsWith("/000000.bin")));
+const interruptedBuild = JSON.parse(stored.get("semantic-index-build.json"));
+assert.equal(interruptedBuild.version, 3);
+assert.equal(interruptedBuild.shards.length, 1);
+assert.equal([...stored.keys()].filter((path) => path.endsWith(".bin")).length, 1);
 failFruit = false;
 embedCalls = 0;
 const stats = await service.rebuild();
-assert.equal(embedCalls, 1, "resumed build should reuse the completed first article segment");
+assert.equal(embedCalls, 1, "resumed build should reuse the completed first shard");
 assert.equal(stats.files, 2);
 assert.equal(stats.compatible, true);
+assert.equal(stats.degraded, false);
 assert.ok(stored.has("semantic-index.json"));
-const manifest = JSON.parse(stored.get("semantic-index.json"));
-assert.equal(manifest.version, 2);
-assert.ok(!manifest.files.some((file) => file.path.includes("/assets/")));
+let manifest = JSON.parse(stored.get("semantic-index.json"));
+assert.equal(manifest.version, 3);
+assert.equal(manifest.shards.length, 2);
 assert.equal(Object.hasOwn(manifest, "chunks"), false);
-assert.ok(manifest.files.every((file) => !Object.hasOwn(file, "embedding")));
+assert.ok(manifest.shards.every((shard) => !Object.hasOwn(shard, "embedding")));
 assert.ok(stored.get("semantic-index.json").length < 2_000, "manifest must remain small and vector-free");
-assert.ok([...stored.keys()].some((path) => path.endsWith(".bin")));
+assert.equal([...stored.keys()].filter((path) => path.endsWith(".bin")).length, 2);
 assert.ok(!stored.has("semantic-index-build.json"));
+const shardMetadata = () => [...stored.entries()]
+  .filter(([path]) => path.includes("semantic-index-v3/") && path.endsWith(".json"))
+  .map(([path, value]) => ({ path, value: JSON.parse(value) }));
+const metadataFor = (articlePath) => shardMetadata().find((item) =>
+  item.value.articles.some((article) => article.path === articlePath)
+);
+assert.equal(metadataFor("Articles/Topic/assets/Hidden.md"), undefined);
+for (const { value } of shardMetadata()) {
+  assert.equal(value.version, 3);
+  for (const article of value.articles) {
+    assert.equal(article.vectorOffsetBytes, article.chunkStart * value.dimension * 4);
+    assert.equal(article.vectorLengthBytes, article.chunkCount * value.dimension * 4);
+  }
+}
 assert.ok((await service.searchContext("苹果", undefined, 2)).includes("检索来源"));
 const related = await service.findRelated(files[0], 5);
 assert.equal(related[0]?.path, "Articles/Fruit.md");
+
+const appleBefore = metadataFor("Articles/Apple.md");
+const appleBinaryBefore = appleBefore.path.replace(/\.json$/, ".bin");
+files[0].stat.mtime = 4;
+await service.refreshFile(files[0]);
+const appleAfter = metadataFor("Articles/Apple.md");
+assert.notEqual(appleAfter.path, appleBefore.path, "single-file updates must create a new immutable shard revision");
+assert.equal(stored.has(appleBefore.path), false);
+assert.equal(stored.has(appleBinaryBefore), false);
+assert.equal(stored.has(appleAfter.path.replace(/\.json$/, ".bin")), true);
+assert.equal([...stored.keys()].filter((path) => path.endsWith(".bin")).length, 2);
+
+const collision = new TestTFile({
+  path: "Articles/Collision-289.md", basename: "Collision-289", extension: "md", stat: { mtime: 5 }
+});
+files.push(collision);
+files[0].stat.mtime = 6;
+await Promise.all([service.refreshFile(files[0]), service.refreshFile(collision)]);
+const sharedShard = metadataFor("Articles/Apple.md");
+assert.ok(sharedShard.value.articles.some((article) => article.path === collision.path), "queued updates in one shard must not overwrite each other");
+await service.removePath(collision.path);
+files.splice(files.indexOf(collision), 1);
+
+const manifestBeforeFailure = stored.get("semantic-index.json");
+const appleBeforeFailure = metadataFor("Articles/Apple.md");
+files[0].stat.mtime = 7;
+failManifestWrite = true;
+await assert.rejects(() => service.refreshFile(files[0]), /planned manifest failure/);
+failManifestWrite = false;
+assert.equal(stored.get("semantic-index.json"), manifestBeforeFailure, "failed manifest switch must keep the old index active");
+assert.equal(stored.has(appleBeforeFailure.path), true);
+assert.equal([...stored.keys()].filter((path) => path.endsWith(".bin")).length, 2, "failed revisions must be cleaned up");
+
 const reloaded = new SemanticIndexService(app, settings, "semantic-index.json", transport);
 await reloaded.load();
 assert.equal(reloaded.getStats().chunks, 2);
 assert.ok((await reloaded.searchContext("苹果", undefined, 2)).includes("检索来源"));
+
+const fruitMetadata = metadataFor("Articles/Fruit.md");
+const fruitBinary = fruitMetadata.path.replace(/\.json$/, ".bin");
+const fruitBackup = stored.get(fruitBinary).slice(0);
+stored.delete(fruitBinary);
+const degraded = new SemanticIndexService(app, settings, "semantic-index.json", transport);
+await degraded.load();
+assert.equal(degraded.getStats().degraded, true);
+assert.equal(degraded.getStats().unhealthyShards, 1);
+assert.equal(degraded.getStats().unavailableFiles, 1);
+assert.equal(degraded.isReady(), true, "one damaged shard must not disable healthy shards");
+assert.ok((await degraded.searchContext("苹果", undefined, 2)).includes("Articles/Apple.md"));
+stored.set(fruitBinary, fruitBackup);
+
 transport.embed = async () => [[1, 0, 0]];
 await assert.rejects(
   () => service.searchContext("维度变化", undefined, 2),
@@ -192,9 +261,13 @@ assert.equal(service.getStats().files, 1);
 files[0].path = "Articles/Renamed.md";
 files[0].basename = "Renamed";
 await service.migratePath("Articles/Apple.md", "Articles/Renamed.md");
-assert.equal(JSON.parse(stored.get("semantic-index.json")).files[0].path, "Articles/Renamed.md");
+assert.ok(metadataFor("Articles/Renamed.md"));
+assert.equal(metadataFor("Articles/Apple.md"), undefined);
+manifest = JSON.parse(stored.get("semantic-index.json"));
+assert.ok(manifest.shards.length <= 1);
 await service.clear();
 assert.equal(stored.has("semantic-index.json"), false);
+assert.equal([...stored.keys()].some((path) => path.includes("semantic-index-v3/")), false);
 
 await rm(tempDir, { recursive: true, force: true });
 console.log("semantic search tests passed");

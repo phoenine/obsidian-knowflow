@@ -120,7 +120,6 @@ export default class KnowFlowPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
       if (file instanceof TFile) {
         void this.semanticIndex.migratePath(oldPath, file.path)
-          .then(() => this.semanticIndex.refreshFile(file))
           .catch((error) => console.error("KnowFlow: semantic rename failed", error));
         void this.handleFileRename(oldPath, file.path);
         return;

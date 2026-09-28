@@ -297,6 +297,12 @@ export class KnowFlowSettingTab extends PluginSettingTab {
           : "The saved index was built with a different embedding configuration. Rebuild it before searching.",
       cls: "setting-item-description"
     });
+    if (stats.degraded) {
+      semantic.createEl("p", {
+        text: `Degraded: ${stats.unhealthyShards} damaged or missing shard(s) affect ${stats.unavailableFiles} file(s). Other shards remain searchable; rebuild to repair them.`,
+        cls: "setting-item-description"
+      });
+    }
     new Setting(semantic)
       .setName("Excluded folders")
       .setDesc("Comma-separated folder names or paths under the configured Articles folder. A simple name such as assets matches at any depth.")

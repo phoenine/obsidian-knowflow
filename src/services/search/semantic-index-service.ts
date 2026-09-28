@@ -4,29 +4,84 @@ import type { AiModelConfig, KnowFlowSettings, RelatedNote, SemanticIndexStats }
 import { EmbeddingTransport } from "../ai/embedding-transport";
 import { chunkArticle, isMarkdownInFolder, normalizeEmbedding, searchSemanticChunks, type SemanticChunk } from "./semantic-search";
 
-interface PersistedFileRecord { slot: string; path: string; title: string; mtime: number; chunks: number; }
-interface PersistedSemanticIndexV2 {
-  version: 2; modelKey: string; updatedAt: string; generation: string; dimension: number; files: PersistedFileRecord[];
+interface PersistedShardRecord {
+  id: string;
+  revision: string;
+  articles: number;
+  chunks: number;
+  byteLength: number;
 }
-interface PersistedSegment {
-  version: 2; modelKey: string; path: string; title: string; mtime: number; dimension: number;
+
+interface PersistedSemanticIndexV3 {
+  version: 3;
+  modelKey: string;
+  updatedAt: string;
+  generation: string;
+  dimension: number;
+  shards: PersistedShardRecord[];
+}
+
+interface PersistedShardArticle {
+  path: string;
+  title: string;
+  mtime: number;
+  chunkStart: number;
+  chunkCount: number;
+  vectorOffsetBytes: number;
+  vectorLengthBytes: number;
   chunks: Array<{ heading: string; content: string }>;
 }
-interface BuildPointer { version: 2; modelKey: string; generation: string; }
 
-const EMPTY_INDEX: PersistedSemanticIndexV2 = {
-  version: 2, modelKey: "", updatedAt: "", generation: "", dimension: 0, files: []
-};
+interface PersistedShard {
+  version: 3;
+  modelKey: string;
+  generation: string;
+  shardId: string;
+  revision: string;
+  dimension: number;
+  articles: PersistedShardArticle[];
+}
+
+interface BuildPointer {
+  version: 3;
+  modelKey: string;
+  generation: string;
+  shards: PersistedShardRecord[];
+}
+
+interface ShardArticle {
+  path: string;
+  title: string;
+  mtime: number;
+  chunks: SemanticChunk[];
+}
+
+interface LoadedShard {
+  record: PersistedShardRecord;
+  articles: ShardArticle[];
+}
+
+interface ShardUpdate {
+  previous?: PersistedShardRecord;
+  next?: PersistedShardRecord;
+}
+
+const SHARD_COUNT = 128;
 const EMBEDDING_BATCH_SIZE = 16;
+const EMPTY_INDEX: PersistedSemanticIndexV3 = {
+  version: 3, modelKey: "", updatedAt: "", generation: "", dimension: 0, shards: []
+};
 
-/** Owns the sharded v2 semantic index and exact in-memory cosine retrieval. */
+/** Owns the fixed-shard semantic index and exact in-memory cosine retrieval. */
 export class SemanticIndexService {
-  private data: PersistedSemanticIndexV2 = cloneEmptyIndex();
+  private data: PersistedSemanticIndexV3 = cloneEmptyIndex();
   private chunks: SemanticChunk[] = [];
   private chunksLoaded = false;
   private loadPromise: Promise<void> | null = null;
   private building = false;
   private saveQueue: Promise<void> = Promise.resolve();
+  private mutationQueue: Promise<void> = Promise.resolve();
+  private unhealthyShards = new Map<string, number>();
   private readonly storageRoot: string;
   private readonly buildPointerPath: string;
 
@@ -37,18 +92,23 @@ export class SemanticIndexService {
     private transport = new EmbeddingTransport()
   ) {
     const base = indexPath.replace(/\.json$/i, "");
-    this.storageRoot = normalizePath(`${base}-v2`);
+    this.storageRoot = normalizePath(`${base}-v3`);
     this.buildPointerPath = normalizePath(`${base}-build.json`);
   }
 
   async load(): Promise<void> {
+    this.resetLoadedChunks();
     this.data = cloneEmptyIndex();
-    this.chunks = [];
-    this.chunksLoaded = false;
+    this.unhealthyShards.clear();
     try {
       if (!await this.app.vault.adapter.exists(this.indexPath)) return;
-      const parsed = JSON.parse(await this.app.vault.adapter.read(this.indexPath)) as Partial<PersistedSemanticIndexV2>;
-      if (isManifestV2(parsed)) this.data = parsed;
+      const parsed = JSON.parse(await this.app.vault.adapter.read(this.indexPath)) as Partial<PersistedSemanticIndexV3>;
+      if (!isManifestV3(parsed)) return;
+      this.data = parsed;
+      await Promise.all(parsed.shards.map(async (record) => {
+        const { meta, binary } = this.shardPaths(parsed.generation, record);
+        if (!await this.app.vault.adapter.exists(meta) || !await this.app.vault.adapter.exists(binary)) this.markUnhealthy(record);
+      }));
     } catch {
       this.data = cloneEmptyIndex();
     }
@@ -56,15 +116,21 @@ export class SemanticIndexService {
 
   updateSettings(settings: KnowFlowSettings): void { this.settings = settings; }
   isBuilding(): boolean { return this.building; }
-  isReady(): boolean { return this.data.files.some((file) => file.chunks > 0) && this.isCompatible(); }
+  isReady(): boolean {
+    return this.isCompatible() && this.data.shards.some((record) => record.chunks > 0 && !this.unhealthyShards.has(record.id));
+  }
 
   getStats(): SemanticIndexStats {
+    const unavailableFiles = Array.from(this.unhealthyShards.values()).reduce((total, count) => total + count, 0);
     return {
-      files: this.data.files.length,
-      chunks: this.data.files.reduce((total, file) => total + file.chunks, 0),
+      files: this.data.shards.reduce((total, shard) => total + shard.articles, 0),
+      chunks: this.data.shards.reduce((total, shard) => total + shard.chunks, 0),
       model: this.data.modelKey ? this.data.modelKey.split("|").slice(-1)[0] ?? "" : "",
       updatedAt: this.data.updatedAt,
-      compatible: this.isCompatible()
+      compatible: this.isCompatible(),
+      degraded: this.unhealthyShards.size > 0,
+      unhealthyShards: this.unhealthyShards.size,
+      unavailableFiles
     };
   }
 
@@ -73,36 +139,60 @@ export class SemanticIndexService {
     if (this.building) throw new Error("Semantic index is already building.");
     this.building = true;
     try {
+      await this.mutationQueue;
       const files = this.getArticleFiles().sort((left, right) => left.path.localeCompare(right.path));
+      const grouped = groupFilesByShard(files);
       const key = currentModelKey(this.settings);
-      const generation = await this.getOrCreateBuildGeneration(key);
-      const records: PersistedFileRecord[] = [];
+      const build = await this.getOrCreateBuild(key);
+      const completed = new Map(build.shards.map((record) => [record.id, record]));
+      const records: PersistedShardRecord[] = [];
       let dimension = 0;
+      let indexed = 0;
 
-      for (let index = 0; index < files.length; index += 1) {
-        const file = files[index];
-        const slot = String(index).padStart(6, "0");
-        let fileChunks = await this.loadSegment(generation, slot, key, file.path, file.stat.mtime);
-        if (!fileChunks) {
-          fileChunks = await this.embedFile(file);
-          await this.writeSegment(generation, slot, key, file, fileChunks);
+      for (const [shardId, shardFiles] of grouped) {
+        const saved = completed.get(shardId);
+        const loaded = saved ? await this.loadShard(build.generation, saved, key) : null;
+        if (loaded && shardMatchesFiles(loaded, shardFiles)) {
+          const loadedDimension = loaded.articles.flatMap((article) => article.chunks)[0]?.embedding.length ?? 0;
+          dimension = mergeDimension(dimension, loadedDimension);
+          records.push(saved!);
+          indexed += shardFiles.length;
+          onProgress?.(indexed, files.length);
+          continue;
         }
-        const fileDimension = fileChunks[0]?.embedding.length ?? 0;
-        if (fileDimension > 0 && dimension > 0 && fileDimension !== dimension) {
-          throw new Error("Embedding endpoint changed vector dimensions while building the index.");
+        if (saved) await this.removeShardFiles(build.generation, saved);
+
+        const articles: ShardArticle[] = [];
+        for (const file of shardFiles) {
+          const chunks = await this.embedFile(file);
+          dimension = mergeDimension(dimension, chunks[0]?.embedding.length ?? 0);
+          articles.push({ path: file.path, title: file.basename, mtime: file.stat.mtime, chunks });
+          indexed += 1;
+          onProgress?.(indexed, files.length);
         }
-        if (fileDimension > 0) dimension = fileDimension;
-        records.push({ slot, path: file.path, title: file.basename, mtime: file.stat.mtime, chunks: fileChunks.length });
-        onProgress?.(index + 1, files.length);
+        const record = await this.writeShard(build.generation, shardId, key, articles, dimension);
+        records.push(record);
+        await this.app.vault.adapter.write(this.buildPointerPath, JSON.stringify({
+          version: 3, modelKey: key, generation: build.generation,
+          shards: records.slice().sort((left, right) => left.id.localeCompare(right.id))
+        } satisfies BuildPointer));
       }
 
       const previousGeneration = this.data.generation;
-      this.data = { version: 2, modelKey: key, updatedAt: new Date().toISOString(), generation, dimension, files: records };
-      this.chunks = [];
-      this.chunksLoaded = false;
-      await this.saveManifest();
+      const next: PersistedSemanticIndexV3 = {
+        version: 3,
+        modelKey: key,
+        updatedAt: new Date().toISOString(),
+        generation: build.generation,
+        dimension,
+        shards: records.sort((left, right) => left.id.localeCompare(right.id))
+      };
+      await this.saveManifest(next);
+      this.data = next;
+      this.unhealthyShards.clear();
+      this.resetLoadedChunks();
       await removeIfExists(this.app.vault.adapter, this.buildPointerPath);
-      if (previousGeneration && previousGeneration !== generation) {
+      if (previousGeneration && previousGeneration !== build.generation) {
         await removeDirectoryIfExists(this.app.vault.adapter, this.generationPath(previousGeneration));
       }
       return this.getStats();
@@ -111,79 +201,89 @@ export class SemanticIndexService {
     }
   }
 
-  async refreshFile(file: TFile): Promise<void> {
-    if (this.building || !this.isReady()) return;
-    if (!this.isArticle(file)) return this.removePath(file.path);
-    const fileChunks = await this.embedFile(file);
-    this.assertDimension(fileChunks);
-    if (!(this.app.vault.getAbstractFileByPath(file.path) instanceof TFile)) return this.removePath(file.path);
-    const existing = this.data.files.find((record) => record.path === file.path);
-    const slot = existing?.slot ?? nextSlot(this.data.files);
-    await this.writeSegment(this.data.generation, slot, this.data.modelKey, file, fileChunks);
-    if (this.chunksLoaded) this.chunks = this.chunks.filter((chunk) => chunk.path !== file.path).concat(fileChunks);
-    const record = { slot, path: file.path, title: file.basename, mtime: file.stat.mtime, chunks: fileChunks.length };
-    this.data.files = this.data.files.filter((item) => item.path !== file.path).concat(record);
-    if (this.data.dimension === 0 && fileChunks[0]) this.data.dimension = fileChunks[0].embedding.length;
-    this.data.updatedAt = new Date().toISOString();
-    await this.saveManifest();
+  refreshFile(file: TFile): Promise<void> { return this.enqueueMutation(() => this.refreshFileNow(file)); }
+
+  private async refreshFileNow(file: TFile): Promise<void> {
+    if (this.building || !this.data.generation || !this.isCompatible()) return;
+    if (!this.isArticle(file)) return this.removePathNow(file.path);
+    const shardId = shardIdForPath(file.path);
+    const loaded = await this.loadActiveShard(shardId);
+    const chunks = await this.embedFile(file);
+    this.assertDimension(chunks);
+    if (!(this.app.vault.getAbstractFileByPath(file.path) instanceof TFile)) return this.removePathNow(file.path);
+    const articles = loaded.articles.filter((article) => article.path !== file.path);
+    articles.push({ path: file.path, title: file.basename, mtime: file.stat.mtime, chunks });
+    await this.replaceShards(new Map([[shardId, { previous: loaded.record, articles }]]));
   }
 
-  async removePath(path: string): Promise<void> {
-    const record = this.data.files.find((item) => item.path === path);
+  removePath(path: string): Promise<void> { return this.enqueueMutation(() => this.removePathNow(path)); }
+
+  private async removePathNow(path: string): Promise<void> {
+    if (!this.data.generation) return;
+    const shardId = shardIdForPath(path);
+    const record = this.findShard(shardId);
     if (!record) return;
-    this.data.files = this.data.files.filter((item) => item.path !== path);
-    if (this.chunksLoaded) this.chunks = this.chunks.filter((chunk) => chunk.path !== path);
-    await this.removeSegment(this.data.generation, record.slot);
-    this.data.updatedAt = new Date().toISOString();
-    await this.saveManifest();
+    const loaded = await this.requireShard(record);
+    if (!loaded.articles.some((article) => article.path === path)) return;
+    await this.replaceShards(new Map([[
+      shardId,
+      { previous: record, articles: loaded.articles.filter((article) => article.path !== path) }
+    ]]));
   }
 
-  async removeFolder(folderPath: string): Promise<void> {
+  removeFolder(folderPath: string): Promise<void> { return this.enqueueMutation(() => this.removeFolderNow(folderPath)); }
+
+  private async removeFolderNow(folderPath: string): Promise<void> {
     const prefix = `${folderPath.replace(/\/$/, "")}/`;
-    const targets = this.data.files.filter((file) => file.path.startsWith(prefix));
-    if (targets.length === 0) return;
-    const slots = new Set(targets.map((file) => file.slot));
-    this.data.files = this.data.files.filter((file) => !slots.has(file.slot));
-    if (this.chunksLoaded) this.chunks = this.chunks.filter((chunk) => !chunk.path.startsWith(prefix));
-    await Promise.all(targets.map((file) => this.removeSegment(this.data.generation, file.slot)));
-    this.data.updatedAt = new Date().toISOString();
-    await this.saveManifest();
+    const updates = new Map<string, { previous?: PersistedShardRecord; articles: ShardArticle[] }>();
+    for (const record of this.data.shards) {
+      const metadata = await this.readShardMetadata(this.data.generation, record, this.data.modelKey);
+      if (!metadata?.articles.some((article) => article.path.startsWith(prefix))) continue;
+      const loaded = await this.requireShard(record);
+      updates.set(record.id, { previous: record, articles: loaded.articles.filter((article) => !article.path.startsWith(prefix)) });
+    }
+    await this.replaceShards(updates);
   }
 
-  async migratePath(oldPath: string, newPath: string): Promise<void> {
-    const record = this.data.files.find((item) => item.path === oldPath);
-    if (!record) return;
-    if (!isMarkdownInFolder({ path: newPath, extension: "md" }, this.settings.articlesFolder, this.settings.semanticIndexExcludeFolders)) {
-      return this.removePath(oldPath);
-    }
+  migratePath(oldPath: string, newPath: string): Promise<void> {
+    return this.enqueueMutation(() => this.migratePathNow(oldPath, newPath));
+  }
+
+  private async migratePathNow(oldPath: string, newPath: string): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(newPath);
-    if (!(file instanceof TFile)) return;
-    const existing = await this.loadSegment(this.data.generation, record.slot, this.data.modelKey, oldPath, record.mtime);
-    if (!existing) throw new Error(`Semantic index segment is missing or invalid: ${oldPath}`);
-    const renamed = existing.map((chunk) => ({
-      ...chunk, id: chunk.id.replace(`${oldPath}#`, `${newPath}#`), path: newPath, title: file.basename
-    }));
-    await this.writeSegment(this.data.generation, record.slot, this.data.modelKey, file, renamed);
-    if (this.chunksLoaded) this.chunks = this.chunks.filter((chunk) => chunk.path !== oldPath).concat(renamed);
-    Object.assign(record, { path: newPath, title: file.basename, mtime: file.stat.mtime, chunks: renamed.length });
-    this.data.updatedAt = new Date().toISOString();
-    await this.saveManifest();
-  }
-
-  async migrateFolder(oldFolder: string, newFolder: string): Promise<void> {
-    const oldPrefix = `${oldFolder.replace(/\/$/, "")}/`;
-    const records = this.data.files.filter((file) => file.path.startsWith(oldPrefix));
-    for (const record of records) {
-      await this.migratePath(record.path, `${newFolder.replace(/\/$/, "")}/${record.path.slice(oldPrefix.length)}`);
+    const oldRecord = this.findShard(shardIdForPath(oldPath));
+    if (!oldRecord) {
+      if (file instanceof TFile && this.isArticle(file)) await this.refreshFileNow(file);
+      return;
     }
+    await this.migratePaths(new Map([[oldPath, newPath]]));
   }
 
-  async clear(): Promise<void> {
+  migrateFolder(oldFolder: string, newFolder: string): Promise<void> {
+    return this.enqueueMutation(() => this.migrateFolderNow(oldFolder, newFolder));
+  }
+
+  private async migrateFolderNow(oldFolder: string, newFolder: string): Promise<void> {
+    const oldPrefix = `${oldFolder.replace(/\/$/, "")}/`;
+    const newPrefix = `${newFolder.replace(/\/$/, "")}/`;
+    const paths = new Map<string, string>();
+    for (const record of this.data.shards) {
+      const metadata = await this.readShardMetadata(this.data.generation, record, this.data.modelKey);
+      for (const article of metadata?.articles ?? []) {
+        if (article.path.startsWith(oldPrefix)) paths.set(article.path, `${newPrefix}${article.path.slice(oldPrefix.length)}`);
+      }
+    }
+    await this.migratePaths(paths);
+  }
+
+  clear(): Promise<void> { return this.enqueueMutation(() => this.clearNow()); }
+
+  private async clearNow(): Promise<void> {
     const activeGeneration = this.data.generation;
     const build = await this.readBuildPointer();
     this.data = cloneEmptyIndex();
-    this.chunks = [];
-    this.chunksLoaded = false;
+    this.unhealthyShards.clear();
+    this.resetLoadedChunks();
     await removeIfExists(this.app.vault.adapter, this.indexPath);
     await removeIfExists(this.app.vault.adapter, this.buildPointerPath);
     if (activeGeneration) await removeDirectoryIfExists(this.app.vault.adapter, this.generationPath(activeGeneration));
@@ -240,9 +340,8 @@ export class SemanticIndexService {
     for (let start = 0; start < chunks.length; start += EMBEDDING_BATCH_SIZE) {
       const batch = chunks.slice(start, start + EMBEDDING_BATCH_SIZE);
       const vectors = await this.transport.embed(this.settings.embeddingModel, batch.map((chunk) => chunk.content));
-      vectors.forEach((vector, index) => {
-        batch[index].embedding = normalizeEmbedding(vector, this.settings.embeddingDimensions);
-      });
+      if (vectors.length !== batch.length) throw new Error("Embedding endpoint returned an unexpected number of vectors.");
+      vectors.forEach((vector, index) => { batch[index].embedding = normalizeEmbedding(vector, this.settings.embeddingDimensions); });
     }
     return chunks;
   }
@@ -252,10 +351,19 @@ export class SemanticIndexService {
     if (this.loadPromise) return this.loadPromise;
     this.loadPromise = (async () => {
       const chunks: SemanticChunk[] = [];
-      for (const record of this.data.files) {
-        const loaded = await this.loadSegment(this.data.generation, record.slot, this.data.modelKey, record.path, record.mtime);
-        if (!loaded) throw new Error(`Semantic index segment is missing or invalid: ${record.path}`);
-        chunks.push(...loaded);
+      for (const record of this.data.shards) {
+        const loaded = await this.loadShard(this.data.generation, record, this.data.modelKey);
+        if (!loaded) {
+          this.markUnhealthy(record);
+          continue;
+        }
+        const loadedDimension = loaded.articles.find((article) => article.chunks.length > 0)?.chunks[0].embedding.length ?? 0;
+        if (record.chunks > 0 && loadedDimension !== this.data.dimension) {
+          this.markUnhealthy(record);
+          continue;
+        }
+        this.unhealthyShards.delete(record.id);
+        for (const article of loaded.articles) chunks.push(...article.chunks);
       }
       this.chunks = chunks;
       this.chunksLoaded = true;
@@ -263,72 +371,237 @@ export class SemanticIndexService {
     try { await this.loadPromise; } finally { this.loadPromise = null; }
   }
 
-  private async getOrCreateBuildGeneration(key: string): Promise<string> {
+  private async getOrCreateBuild(key: string): Promise<BuildPointer> {
     const existing = await this.readBuildPointer();
     if (existing?.generation === this.data.generation) {
       await removeIfExists(this.app.vault.adapter, this.buildPointerPath);
     } else if (existing?.modelKey === key && await this.app.vault.adapter.exists(this.generationPath(existing.generation))) {
-      return existing.generation;
+      return existing;
     } else if (existing?.generation) {
       await removeDirectoryIfExists(this.app.vault.adapter, this.generationPath(existing.generation));
     }
-    const generation = createGenerationId();
+    const pointer: BuildPointer = { version: 3, modelKey: key, generation: createGenerationId(), shards: [] };
     await ensureDirectory(this.app.vault.adapter, this.storageRoot);
-    await ensureDirectory(this.app.vault.adapter, this.generationPath(generation));
-    await this.app.vault.adapter.write(this.buildPointerPath, JSON.stringify({ version: 2, modelKey: key, generation }));
-    return generation;
+    await ensureDirectory(this.app.vault.adapter, this.generationPath(pointer.generation));
+    await this.app.vault.adapter.write(this.buildPointerPath, JSON.stringify(pointer));
+    return pointer;
   }
 
   private async readBuildPointer(): Promise<BuildPointer | null> {
     try {
       if (!await this.app.vault.adapter.exists(this.buildPointerPath)) return null;
       const value = JSON.parse(await this.app.vault.adapter.read(this.buildPointerPath)) as Partial<BuildPointer>;
-      return value.version === 2 && typeof value.modelKey === "string" && typeof value.generation === "string" ? value as BuildPointer : null;
+      return isBuildPointer(value) ? value : null;
     } catch { return null; }
   }
 
-  private async writeSegment(generation: string, slot: string, key: string, file: TFile, chunks: SemanticChunk[]): Promise<void> {
-    const dimension = chunks[0]?.embedding.length ?? 0;
-    if (chunks.some((chunk) => chunk.embedding.length !== dimension)) throw new Error("Embedding endpoint returned inconsistent dimensions.");
-    const segment: PersistedSegment = {
-      version: 2, modelKey: key, path: file.path, title: file.basename, mtime: file.stat.mtime, dimension,
-      chunks: chunks.map((chunk) => ({ heading: chunk.heading, content: chunk.content }))
+  private async writeShard(
+    generation: string,
+    shardId: string,
+    key: string,
+    inputArticles: ShardArticle[],
+    expectedDimension: number
+  ): Promise<PersistedShardRecord> {
+    const articles = inputArticles.slice().sort((left, right) => left.path.localeCompare(right.path));
+    const firstChunk = articles.find((article) => article.chunks.length > 0)?.chunks[0];
+    const dimension = firstChunk?.embedding.length ?? expectedDimension;
+    if (dimension > 0 && expectedDimension > 0 && dimension !== expectedDimension) {
+      throw new Error("Embedding endpoint changed vector dimensions while building the index.");
+    }
+    for (const article of articles) this.assertArticleDimension(article, dimension);
+    const revision = createRevisionId();
+    const totalChunks = articles.reduce((total, article) => total + article.chunks.length, 0);
+    const vectors = new Float32Array(totalChunks * dimension);
+    let chunkStart = 0;
+    const persistedArticles: PersistedShardArticle[] = articles.map((article) => {
+      article.chunks.forEach((chunk, index) => vectors.set(chunk.embedding, (chunkStart + index) * dimension));
+      const persisted: PersistedShardArticle = {
+        path: article.path,
+        title: article.title,
+        mtime: article.mtime,
+        chunkStart,
+        chunkCount: article.chunks.length,
+        vectorOffsetBytes: chunkStart * dimension * Float32Array.BYTES_PER_ELEMENT,
+        vectorLengthBytes: article.chunks.length * dimension * Float32Array.BYTES_PER_ELEMENT,
+        chunks: article.chunks.map((chunk) => ({ heading: chunk.heading, content: chunk.content }))
+      };
+      chunkStart += article.chunks.length;
+      return persisted;
+    });
+    const shard: PersistedShard = {
+      version: 3, modelKey: key, generation, shardId, revision, dimension, articles: persistedArticles
     };
-    const vectors = new Float32Array(chunks.length * dimension);
-    chunks.forEach((chunk, index) => vectors.set(chunk.embedding, index * dimension));
-    const { meta, binary } = this.segmentPaths(generation, slot);
-    await this.app.vault.adapter.write(meta, JSON.stringify(segment));
+    const record: PersistedShardRecord = {
+      id: shardId, revision, articles: articles.length, chunks: totalChunks, byteLength: vectors.byteLength
+    };
+    const { meta, binary } = this.shardPaths(generation, record);
+    await this.app.vault.adapter.write(meta, JSON.stringify(shard));
     await this.app.vault.adapter.writeBinary(binary, vectors.buffer);
+    try {
+      const written = await this.app.vault.adapter.readBinary(binary);
+      if (written.byteLength !== record.byteLength) throw new Error(`Semantic shard ${shardId} failed binary length verification.`);
+    } catch (error) {
+      await Promise.allSettled([removeIfExists(this.app.vault.adapter, meta), removeIfExists(this.app.vault.adapter, binary)]);
+      throw error;
+    }
+    return record;
   }
 
-  private async loadSegment(generation: string, slot: string, key: string, path: string, mtime: number): Promise<SemanticChunk[] | null> {
+  private async loadShard(generation: string, record: PersistedShardRecord, key: string): Promise<LoadedShard | null> {
     try {
-      const { meta, binary } = this.segmentPaths(generation, slot);
-      if (!await this.app.vault.adapter.exists(meta) || !await this.app.vault.adapter.exists(binary)) return null;
-      const segment = JSON.parse(await this.app.vault.adapter.read(meta)) as Partial<PersistedSegment>;
-      if (!isSegmentV2(segment, key, path, mtime)) return null;
-      const vectors = new Float32Array(await this.app.vault.adapter.readBinary(binary));
-      if (vectors.length !== segment.chunks.length * segment.dimension) return null;
-      return segment.chunks.map((chunk, index) => ({
-        id: `${segment.path}#${index}`, path: segment.path, title: segment.title, heading: chunk.heading, content: chunk.content,
-        embedding: vectors.subarray(index * segment.dimension, (index + 1) * segment.dimension), mtime: segment.mtime
+      const shard = await this.readShardMetadata(generation, record, key);
+      if (!shard) return null;
+      const { binary } = this.shardPaths(generation, record);
+      if (!await this.app.vault.adapter.exists(binary)) return null;
+      const buffer = await this.app.vault.adapter.readBinary(binary);
+      if (buffer.byteLength !== record.byteLength || buffer.byteLength % Float32Array.BYTES_PER_ELEMENT !== 0) return null;
+      const vectors = new Float32Array(buffer);
+      if (vectors.length !== record.chunks * shard.dimension) return null;
+      const articles: ShardArticle[] = shard.articles.map((article) => ({
+        path: article.path,
+        title: article.title,
+        mtime: article.mtime,
+        chunks: article.chunks.map((chunk, index) => ({
+          id: `${article.path}#${index}`,
+          path: article.path,
+          title: article.title,
+          heading: chunk.heading,
+          content: chunk.content,
+          embedding: vectors.subarray((article.chunkStart + index) * shard.dimension, (article.chunkStart + index + 1) * shard.dimension),
+          mtime: article.mtime
+        }))
       }));
+      return { record, articles };
     } catch { return null; }
   }
 
-  private async removeSegment(generation: string, slot: string): Promise<void> {
-    const { meta, binary } = this.segmentPaths(generation, slot);
-    await Promise.all([removeIfExists(this.app.vault.adapter, meta), removeIfExists(this.app.vault.adapter, binary)]);
+  private async readShardMetadata(generation: string, record: PersistedShardRecord, key: string): Promise<PersistedShard | null> {
+    try {
+      const { meta } = this.shardPaths(generation, record);
+      if (!await this.app.vault.adapter.exists(meta)) return null;
+      const shard = JSON.parse(await this.app.vault.adapter.read(meta)) as Partial<PersistedShard>;
+      return isShardV3(shard, generation, record, key) ? shard : null;
+    } catch { return null; }
   }
 
-  private segmentPaths(generation: string, slot: string): { meta: string; binary: string } {
-    const root = this.generationPath(generation);
-    return { meta: normalizePath(`${root}/${slot}.json`), binary: normalizePath(`${root}/${slot}.bin`) };
+  private async loadActiveShard(shardId: string): Promise<{ record?: PersistedShardRecord; articles: ShardArticle[] }> {
+    const record = this.findShard(shardId);
+    if (!record) return { articles: [] };
+    const loaded = await this.requireShard(record);
+    return { record, articles: loaded.articles };
+  }
+
+  private async requireShard(record: PersistedShardRecord): Promise<LoadedShard> {
+    const loaded = await this.loadShard(this.data.generation, record, this.data.modelKey);
+    const loadedDimension = loaded?.articles.find((article) => article.chunks.length > 0)?.chunks[0].embedding.length ?? 0;
+    if (loaded && (record.chunks === 0 || loadedDimension === this.data.dimension)) {
+      this.unhealthyShards.delete(record.id);
+      return loaded;
+    }
+    this.markUnhealthy(record);
+    throw new Error(`Semantic index shard ${record.id} is damaged or missing. Rebuild the semantic index to repair it.`);
+  }
+
+  private async replaceShards(replacements: Map<string, { previous?: PersistedShardRecord; articles: ShardArticle[] }>): Promise<void> {
+    if (replacements.size === 0) return;
+    const updates = new Map<string, ShardUpdate>();
+    try {
+      for (const [shardId, replacement] of replacements) {
+        const next = replacement.articles.length > 0
+          ? await this.writeShard(this.data.generation, shardId, this.data.modelKey, replacement.articles, this.data.dimension)
+          : undefined;
+        updates.set(shardId, { previous: replacement.previous, next });
+      }
+      await this.commitShardUpdates(updates);
+    } catch (error) {
+      await Promise.allSettled(Array.from(updates.values()).flatMap((update) =>
+        update.next ? [this.removeShardFiles(this.data.generation, update.next)] : []
+      ));
+      throw error;
+    }
+  }
+
+  private async commitShardUpdates(updates: Map<string, ShardUpdate>): Promise<void> {
+    const nextRecords = this.data.shards.filter((record) => !updates.has(record.id));
+    for (const update of updates.values()) if (update.next) nextRecords.push(update.next);
+    const next: PersistedSemanticIndexV3 = {
+      ...this.data,
+      updatedAt: new Date().toISOString(),
+      shards: nextRecords.sort((left, right) => left.id.localeCompare(right.id))
+    };
+    await this.saveManifest(next);
+    this.data = next;
+    this.resetLoadedChunks();
+    for (const [shardId, update] of updates) {
+      this.unhealthyShards.delete(shardId);
+      if (update.previous && update.previous.revision !== update.next?.revision) {
+        await Promise.allSettled([this.removeShardFiles(this.data.generation, update.previous)]);
+      }
+    }
+  }
+
+  private async migratePaths(paths: Map<string, string>): Promise<void> {
+    if (paths.size === 0) return;
+    const touchedIds = new Set<string>();
+    for (const [oldPath, newPath] of paths) {
+      touchedIds.add(shardIdForPath(oldPath));
+      if (isMarkdownInFolder({ path: newPath, extension: "md" }, this.settings.articlesFolder, this.settings.semanticIndexExcludeFolders)) {
+        touchedIds.add(shardIdForPath(newPath));
+      }
+    }
+    const loadedById = new Map<string, { record?: PersistedShardRecord; articles: ShardArticle[] }>();
+    for (const shardId of touchedIds) loadedById.set(shardId, await this.loadActiveShard(shardId));
+
+    const moved: ShardArticle[] = [];
+    for (const [oldPath, newPath] of paths) {
+      const source = loadedById.get(shardIdForPath(oldPath));
+      const article = source?.articles.find((item) => item.path === oldPath);
+      if (!article) continue;
+      source!.articles = source!.articles.filter((item) => item.path !== oldPath);
+      const target = this.app.vault.getAbstractFileByPath(newPath);
+      if (!(target instanceof TFile) || !this.isArticle(target)) continue;
+      moved.push({
+        path: newPath,
+        title: target.basename,
+        mtime: target.stat.mtime,
+        chunks: article.chunks.map((chunk, index) => ({
+          ...chunk, id: `${newPath}#${index}`, path: newPath, title: target.basename, mtime: target.stat.mtime
+        }))
+      });
+    }
+    for (const article of moved) {
+      const target = loadedById.get(shardIdForPath(article.path))!;
+      target.articles = target.articles.filter((item) => item.path !== article.path).concat(article);
+    }
+    const replacements = new Map<string, { previous?: PersistedShardRecord; articles: ShardArticle[] }>();
+    for (const [shardId, loaded] of loadedById) {
+      replacements.set(shardId, { previous: loaded.record, articles: loaded.articles });
+    }
+    await this.replaceShards(replacements);
+  }
+
+  private findShard(shardId: string): PersistedShardRecord | undefined { return this.data.shards.find((record) => record.id === shardId); }
+
+  private enqueueMutation<T>(work: () => Promise<T>): Promise<T> {
+    const task = this.mutationQueue.then(work);
+    this.mutationQueue = task.then(() => undefined, () => undefined);
+    return task;
+  }
+
+  private shardPaths(generation: string, record: Pick<PersistedShardRecord, "id" | "revision">): { meta: string; binary: string } {
+    const base = `${this.generationPath(generation)}/shard-${record.id}-${record.revision}`;
+    return { meta: normalizePath(`${base}.json`), binary: normalizePath(`${base}.bin`) };
   }
 
   private generationPath(generation: string): string { return normalizePath(`${this.storageRoot}/${generation}`); }
   private getArticleFiles(): TFile[] { return this.app.vault.getMarkdownFiles().filter((file) => this.isArticle(file)); }
   private isArticle(file: TFile): boolean { return isMarkdownInFolder(file, this.settings.articlesFolder, this.settings.semanticIndexExcludeFolders); }
+  private markUnhealthy(record: PersistedShardRecord): void { this.unhealthyShards.set(record.id, record.articles); }
+  private resetLoadedChunks(): void { this.chunks = []; this.chunksLoaded = false; this.loadPromise = null; }
+
+  private assertArticleDimension(article: ShardArticle, dimension: number): void {
+    if (article.chunks.some((chunk) => chunk.embedding.length !== dimension)) throw new Error("Embedding endpoint returned inconsistent dimensions.");
+  }
 
   private assertDimension(chunks: Array<{ embedding: Float32Array }>): void {
     const dimension = chunks[0]?.embedding.length ?? 0;
@@ -365,42 +638,98 @@ export class SemanticIndexService {
   private isCompatible(): boolean { return this.settings.embeddingModel.runtime !== "disabled" && this.data.modelKey === currentModelKey(this.settings); }
   private assertEnabled(): void { if (this.settings.embeddingModel.runtime === "disabled") throw new Error("请先在 AI Models 中配置 Embedding model。"); }
 
-  private saveManifest(): Promise<void> {
-    const snapshot = JSON.stringify(this.data);
-    const task = this.saveQueue.then(() => this.app.vault.adapter.write(normalizePath(this.indexPath), snapshot));
+  private saveManifest(snapshot: PersistedSemanticIndexV3): Promise<void> {
+    const content = JSON.stringify(snapshot);
+    const task = this.saveQueue.then(() => this.app.vault.adapter.write(normalizePath(this.indexPath), content));
     this.saveQueue = task.catch(() => {});
     return task;
+  }
+
+  private async removeShardFiles(generation: string, record: PersistedShardRecord): Promise<void> {
+    const { meta, binary } = this.shardPaths(generation, record);
+    await Promise.all([removeIfExists(this.app.vault.adapter, meta), removeIfExists(this.app.vault.adapter, binary)]);
   }
 }
 
 function currentModelKey(settings: KnowFlowSettings): string {
   const scope = settings.articlesFolder.trim().replace(/^\/+|\/+$/g, "");
   const excluded = settings.semanticIndexExcludeFolders.map((folder) => folder.trim()).filter(Boolean).sort().join(",");
-  const config = settings.embeddingModel;
-  return `${scope}|exclude:${excluded}|dims:${settings.embeddingDimensions}|${modelKey(config)}`;
+  return `${scope}|exclude:${excluded}|dims:${settings.embeddingDimensions}|shards:${SHARD_COUNT}|${modelKey(settings.embeddingModel)}`;
 }
+
 function modelKey(config: AiModelConfig): string { return `${config.runtime}|${config.apiBaseUrl.trim().replace(/\/+$/g, "")}|${config.model.trim()}`; }
-function cloneEmptyIndex(): PersistedSemanticIndexV2 { return { ...EMPTY_INDEX, files: [] }; }
+function cloneEmptyIndex(): PersistedSemanticIndexV3 { return { ...EMPTY_INDEX, shards: [] }; }
 function createGenerationId(): string { return `gen-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`; }
-function nextSlot(files: PersistedFileRecord[]): string {
-  const next = files.reduce((max, file) => Math.max(max, Number.parseInt(file.slot, 10) || 0), -1) + 1;
-  return String(next).padStart(6, "0");
+function createRevisionId(): string { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+
+function shardIdForPath(path: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < path.length; index += 1) {
+    hash ^= path.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return String((hash >>> 0) % SHARD_COUNT).padStart(3, "0");
 }
 
-function isManifestV2(value: Partial<PersistedSemanticIndexV2>): value is PersistedSemanticIndexV2 {
-  return value.version === 2 && typeof value.modelKey === "string" && typeof value.updatedAt === "string"
-    && typeof value.generation === "string" && typeof value.dimension === "number" && Array.isArray(value.files)
-    && value.files.every((file) => Boolean(file) && typeof file.slot === "string" && typeof file.path === "string"
-      && typeof file.title === "string" && typeof file.mtime === "number" && typeof file.chunks === "number");
+function groupFilesByShard(files: TFile[]): Array<[string, TFile[]]> {
+  const grouped = new Map<string, TFile[]>();
+  for (const file of files) {
+    const id = shardIdForPath(file.path);
+    grouped.set(id, [...(grouped.get(id) ?? []), file]);
+  }
+  return Array.from(grouped.entries()).sort(([left], [right]) => left.localeCompare(right));
 }
 
-function isSegmentV2(value: Partial<PersistedSegment>, key: string, path: string, mtime: number): value is PersistedSegment {
-  return value.version === 2 && value.modelKey === key && value.path === path && value.mtime === mtime
-    && typeof value.title === "string" && typeof value.dimension === "number" && value.dimension >= 0
-    && Array.isArray(value.chunks) && value.chunks.every((chunk) => Boolean(chunk)
-      && typeof chunk.heading === "string" && typeof chunk.content === "string");
+function mergeDimension(current: number, candidate: number): number {
+  if (candidate === 0) return current;
+  if (current > 0 && current !== candidate) throw new Error("Embedding endpoint changed vector dimensions while building the index.");
+  return candidate;
 }
 
+function shardMatchesFiles(shard: LoadedShard, files: TFile[]): boolean {
+  if (shard.articles.length !== files.length) return false;
+  const expected = new Map(files.map((file) => [file.path, file.stat.mtime]));
+  return shard.articles.every((article) => expected.get(article.path) === article.mtime);
+}
+
+function isManifestV3(value: Partial<PersistedSemanticIndexV3>): value is PersistedSemanticIndexV3 {
+  return value.version === 3 && typeof value.modelKey === "string" && typeof value.updatedAt === "string"
+    && typeof value.generation === "string" && isNonNegativeInteger(value.dimension) && Array.isArray(value.shards)
+    && value.shards.every(isShardRecord);
+}
+
+function isBuildPointer(value: Partial<BuildPointer>): value is BuildPointer {
+  return value.version === 3 && typeof value.modelKey === "string" && typeof value.generation === "string"
+    && Array.isArray(value.shards) && value.shards.every(isShardRecord);
+}
+
+function isShardRecord(value: unknown): value is PersistedShardRecord {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<PersistedShardRecord>;
+  return typeof record.id === "string" && typeof record.revision === "string"
+    && isNonNegativeInteger(record.articles) && isNonNegativeInteger(record.chunks) && isNonNegativeInteger(record.byteLength);
+}
+
+function isShardV3(value: Partial<PersistedShard>, generation: string, record: PersistedShardRecord, key: string): value is PersistedShard {
+  if (value.version !== 3 || value.modelKey !== key || value.generation !== generation
+    || value.shardId !== record.id || value.revision !== record.revision
+    || !isNonNegativeInteger(value.dimension) || !Array.isArray(value.articles)
+    || value.articles.length !== record.articles
+    || record.byteLength !== record.chunks * value.dimension * Float32Array.BYTES_PER_ELEMENT) return false;
+  let expectedStart = 0;
+  for (const article of value.articles) {
+    if (!article || typeof article.path !== "string" || typeof article.title !== "string" || typeof article.mtime !== "number"
+      || article.chunkStart !== expectedStart || !isNonNegativeInteger(article.chunkCount)
+      || article.vectorOffsetBytes !== article.chunkStart * value.dimension * Float32Array.BYTES_PER_ELEMENT
+      || article.vectorLengthBytes !== article.chunkCount * value.dimension * Float32Array.BYTES_PER_ELEMENT
+      || !Array.isArray(article.chunks) || article.chunks.length !== article.chunkCount
+      || !article.chunks.every((chunk) => Boolean(chunk) && typeof chunk.heading === "string" && typeof chunk.content === "string")) return false;
+    expectedStart += article.chunkCount;
+  }
+  return expectedStart === record.chunks;
+}
+
+function isNonNegativeInteger(value: unknown): value is number { return typeof value === "number" && Number.isInteger(value) && value >= 0; }
 async function ensureDirectory(adapter: DataAdapter, path: string): Promise<void> { if (!await adapter.exists(path)) await adapter.mkdir(path); }
 async function removeIfExists(adapter: DataAdapter, path: string): Promise<void> { if (await adapter.exists(path)) await adapter.remove(path); }
 async function removeDirectoryIfExists(adapter: DataAdapter, path: string): Promise<void> { if (await adapter.exists(path)) await adapter.rmdir(path, true); }

@@ -58,6 +58,9 @@ export interface SemanticIndexStats {
   model: string;
   updatedAt: string;
   compatible: boolean;
+  degraded: boolean;
+  unhealthyShards: number;
+  unavailableFiles: number;
 }
 
 export interface NoteSummary {
