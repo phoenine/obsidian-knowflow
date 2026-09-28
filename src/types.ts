@@ -33,6 +33,7 @@ export interface KnowFlowSettings {
   chatModel: AiModelConfig;
   quizModel: AiModelConfig;
   embeddingModel: AiModelConfig;
+  embeddingDimensions: number;
   autoCreateCategoryFolders: boolean;
   confirmBeforeWrite: boolean;
   translateEnglishClippings: boolean;

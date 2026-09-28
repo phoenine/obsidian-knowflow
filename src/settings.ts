@@ -40,6 +40,7 @@ export const DEFAULT_SETTINGS: KnowFlowSettings = {
     apiKey: "",
     model: "text-embedding-3-small"
   },
+  embeddingDimensions: 0,
   confirmBeforeWrite: false,
   translateEnglishClippings: false,
   autoOrganize: false,
@@ -307,6 +308,16 @@ export class KnowFlowSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
     new Setting(semantic)
+      .setName("Embedding dimensions")
+      .setDesc("0 keeps the model's full vector. Use 1024 only with a model that supports Matryoshka truncation; KnowFlow re-normalizes truncated vectors.")
+      .addText((input) => input
+        .setPlaceholder("0")
+        .setValue(String(this.plugin.settings.embeddingDimensions))
+        .onChange(async (value) => {
+          this.plugin.settings.embeddingDimensions = toNonNegativeInt(value, 0);
+          await this.plugin.saveSettings();
+        }));
+    new Setting(semantic)
       .setName(stats.chunks > 0 ? "Rebuild index" : "Build index")
       .setDesc(`Indexes Markdown files under ${this.plugin.settings.articlesFolder}. Cloud runtimes send article chunks to the configured embedding provider.`)
       .addButton((button) => button
@@ -558,6 +569,11 @@ export class KnowFlowSettingTab extends PluginSettingTab {
 function toPositiveInt(value: string, fallback: number): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function toNonNegativeInt(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function parseFolderList(value: string): string[] {

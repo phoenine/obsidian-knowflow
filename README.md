@@ -113,7 +113,7 @@ Vault/
 
 每个模型可以独立设置 Runtime、Base URL、API Key 和 Model ID。
 
-Relevant Notes 与 Vault Search 共用本地语义索引。先在 `AI Models` 配置 Embedding model，再到 `Data` 设置 `Excluded folders` 并建立索引；索引只覆盖 `Articles folder` 所配置的文章目录（默认 `Articles/`），默认排除任意层级的 `assets` 子目录，并保存在插件目录的 `semantic-index.json`。使用 Cloud runtime 建索引时，文章分块会发送给所配置的 embedding 服务。详细设计见 [Relevant Notes 与 Vault Search](docs/relevant-notes-and-vault-search.md)。
+Relevant Notes 与 Vault Search 共用本地语义索引。先在 `AI Models` 配置 Embedding model，再到 `Data` 设置 `Excluded folders`、可选的 `Embedding dimensions` 并建立索引；索引只覆盖 `Articles folder` 所配置的文章目录（默认 `Articles/`），默认排除任意层级的 `assets` 子目录。索引使用小型清单、逐文章元数据和 Float32 二进制向量分片，支持中断后续建。使用 Cloud runtime 建索引时，文章分块会发送给所配置的 embedding 服务。详细设计见 [Relevant Notes 与 Vault Search](docs/relevant-notes-and-vault-search.md)。
 
 > [!WARNING]
 > API Key 当前以明文保存在 Vault 的 `.obsidian/plugins/knowflow/data.json`。如果 Vault 会通过 Git 或云盘同步，请排除该文件或使用不含密钥的配置。

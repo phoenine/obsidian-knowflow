@@ -36,7 +36,7 @@ await esbuild.build({
   }]
 });
 
-const { chunkArticle, cosineSimilarity, isMarkdownInFolder, searchSemanticChunks } = await import(
+const { chunkArticle, cosineSimilarity, isMarkdownInFolder, normalizeEmbedding, searchSemanticChunks } = await import(
   pathToFileURL(join(tempDir, "semantic-search.js")).href
 );
 
@@ -71,17 +71,21 @@ assert.equal(chunks.length, 2);
 assert.ok(chunks[0].content.includes("小节：RAG"));
 assert.ok(!chunks.some((chunk) => chunk.content.includes("不应进入索引")));
 assert.equal(chunks[0].id, "Articles/Test.md#0");
+assert.ok(chunks.every((chunk) => chunk.content.length <= 1800));
+const longHeading = chunkArticle("Articles/Long.md", "Long", `## ${"H".repeat(12000)}\n\nbody`, 1);
+assert.ok(longHeading.every((chunk) => chunk.content.length <= 1800));
 
 assert.equal(cosineSimilarity([1, 0], [1, 0]), 1);
 assert.equal(cosineSimilarity([1, 0], [0, 1]), 0);
 assert.equal(cosineSimilarity([1], [1, 2]), 0);
 
+assert.deepEqual(Array.from(normalizeEmbedding([3, 4], 1)), [1]);
 const indexed = [
-  { ...chunks[0], embedding: [1, 0] },
-  { ...chunks[1], id: "Articles/Other.md#0", path: "Articles/Other.md", embedding: [0.8, 0.2] },
-  { ...chunks[1], id: "Articles/Far.md#0", path: "Articles/Far.md", embedding: [0.1, 0.9] }
+  { ...chunks[0], embedding: normalizeEmbedding([1, 0]) },
+  { ...chunks[1], id: "Articles/Other.md#0", path: "Articles/Other.md", embedding: normalizeEmbedding([0.8, 0.2]) },
+  { ...chunks[1], id: "Articles/Far.md#0", path: "Articles/Far.md", embedding: normalizeEmbedding([0.1, 0.9]) }
 ];
-const hits = searchSemanticChunks(indexed, [[1, 0]], 2, "Articles/Test.md");
+const hits = searchSemanticChunks(indexed, [normalizeEmbedding([1, 0])], 2, "Articles/Test.md");
 assert.deepEqual(hits.map((hit) => hit.chunk.path), ["Articles/Other.md", "Articles/Far.md"]);
 assert.ok(hits[0].score > hits[1].score);
 
@@ -96,13 +100,21 @@ const files = [
   new TestTFile({ path: "Articles/Topic/assets/Hidden.md", basename: "Hidden", extension: "md", stat: { mtime: 3 } })
 ];
 const stored = new Map();
+const directories = new Set();
 const app = {
   vault: {
     adapter: {
-      exists: async (path) => stored.has(path),
+      exists: async (path) => stored.has(path) || directories.has(path),
       read: async (path) => stored.get(path),
       write: async (path, value) => { stored.set(path, value); },
-      remove: async (path) => { stored.delete(path); }
+      readBinary: async (path) => stored.get(path).slice(0),
+      writeBinary: async (path, value) => { stored.set(path, value.slice(0)); },
+      remove: async (path) => { stored.delete(path); },
+      mkdir: async (path) => { directories.add(path); },
+      rmdir: async (path) => {
+        directories.delete(path);
+        for (const key of [...stored.keys()]) if (key.startsWith(`${path}/`)) stored.delete(key);
+      }
     },
     getMarkdownFiles: () => files,
     cachedRead: async (file) => file.path.includes("Apple") ? "## 苹果\n苹果是一种水果。" : "## 水果\n苹果和香蕉都是水果。",
@@ -116,6 +128,7 @@ const app = {
 const settings = {
   articlesFolder: "Articles",
   semanticIndexExcludeFolders: ["assets"],
+  embeddingDimensions: 0,
   embeddingModel: {
     runtime: "openai-compatible",
     apiBaseUrl: "https://embedding.example/v1",
@@ -123,18 +136,39 @@ const settings = {
     model: "test-embedding"
   }
 };
-const transport = {
-  embed: async (_config, inputs) => inputs.map((input) => input.includes("苹果") ? [1, 0] : [0.8, 0.2])
-};
+let failFruit = true;
+let embedCalls = 0;
+const transport = { embed: async (_config, inputs) => {
+  embedCalls += 1;
+  if (failFruit && inputs.some((input) => input.includes("香蕉"))) throw new Error("planned interruption");
+  return inputs.map((input) => input.includes("苹果") ? [1, 0] : [0.8, 0.2]);
+} };
 const service = new SemanticIndexService(app, settings, "semantic-index.json", transport);
+await assert.rejects(() => service.rebuild(), /planned interruption/);
+assert.ok(stored.has("semantic-index-build.json"));
+assert.ok([...stored.keys()].some((path) => path.endsWith("/000000.bin")));
+failFruit = false;
+embedCalls = 0;
 const stats = await service.rebuild();
+assert.equal(embedCalls, 1, "resumed build should reuse the completed first article segment");
 assert.equal(stats.files, 2);
 assert.equal(stats.compatible, true);
 assert.ok(stored.has("semantic-index.json"));
-assert.ok(!JSON.parse(stored.get("semantic-index.json")).chunks.some((chunk) => chunk.path.includes("/assets/")));
+const manifest = JSON.parse(stored.get("semantic-index.json"));
+assert.equal(manifest.version, 2);
+assert.ok(!manifest.files.some((file) => file.path.includes("/assets/")));
+assert.equal(Object.hasOwn(manifest, "chunks"), false);
+assert.ok(manifest.files.every((file) => !Object.hasOwn(file, "embedding")));
+assert.ok(stored.get("semantic-index.json").length < 2_000, "manifest must remain small and vector-free");
+assert.ok([...stored.keys()].some((path) => path.endsWith(".bin")));
+assert.ok(!stored.has("semantic-index-build.json"));
 assert.ok((await service.searchContext("苹果", undefined, 2)).includes("检索来源"));
 const related = await service.findRelated(files[0], 5);
 assert.equal(related[0]?.path, "Articles/Fruit.md");
+const reloaded = new SemanticIndexService(app, settings, "semantic-index.json", transport);
+await reloaded.load();
+assert.equal(reloaded.getStats().chunks, 2);
+assert.ok((await reloaded.searchContext("苹果", undefined, 2)).includes("检索来源"));
 transport.embed = async () => [[1, 0, 0]];
 await assert.rejects(
   () => service.searchContext("维度变化", undefined, 2),
@@ -150,10 +184,15 @@ service.updateSettings(settings);
 service.updateSettings({ ...settings, semanticIndexExcludeFolders: [] });
 assert.equal(service.getStats().compatible, false);
 service.updateSettings(settings);
+service.updateSettings({ ...settings, embeddingDimensions: 1 });
+assert.equal(service.getStats().compatible, false);
+service.updateSettings(settings);
 await service.removePath("Articles/Fruit.md");
 assert.equal(service.getStats().files, 1);
+files[0].path = "Articles/Renamed.md";
+files[0].basename = "Renamed";
 await service.migratePath("Articles/Apple.md", "Articles/Renamed.md");
-assert.equal(JSON.parse(stored.get("semantic-index.json")).chunks[0].path, "Articles/Renamed.md");
+assert.equal(JSON.parse(stored.get("semantic-index.json")).files[0].path, "Articles/Renamed.md");
 await service.clear();
 assert.equal(stored.has("semantic-index.json"), false);
 

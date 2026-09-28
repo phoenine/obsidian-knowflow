@@ -6,7 +6,7 @@ export interface SemanticChunk {
   title: string;
   heading: string;
   content: string;
-  embedding: number[];
+  embedding: Float32Array;
   mtime: number;
 }
 
@@ -66,15 +66,19 @@ export function chunkArticle(path: string, title: string, markdown: string, mtim
 
   const chunks: SemanticChunk[] = [];
   for (const section of sections) {
-    for (const part of splitLongText(section.text, MAX_CHUNK_CHARS, CHUNK_OVERLAP_CHARS)) {
+    const embeddingHeading = truncate(section.heading, 300);
+    const prefix = `标题：${truncate(title, 300)}\n小节：${embeddingHeading}\n\n`;
+    const bodyLimit = Math.max(400, MAX_CHUNK_CHARS - prefix.length);
+    const overlap = Math.min(CHUNK_OVERLAP_CHARS, Math.floor(bodyLimit / 4));
+    for (const part of splitLongText(section.text, bodyLimit, overlap)) {
       const index = chunks.length;
       chunks.push({
         id: `${path}#${index}`,
         path,
         title,
         heading: section.heading,
-        content: `标题：${title}\n小节：${section.heading}\n\n${part}`,
-        embedding: [],
+        content: `${prefix}${part}`,
+        embedding: new Float32Array(),
         mtime
       });
     }
@@ -83,7 +87,7 @@ export function chunkArticle(path: string, title: string, markdown: string, mtim
 }
 
 /** Returns cosine similarity, or zero for invalid/mismatched vectors. */
-export function cosineSimilarity(left: number[], right: number[]): number {
+export function cosineSimilarity(left: ArrayLike<number>, right: ArrayLike<number>): number {
   if (left.length === 0 || left.length !== right.length) return 0;
   let dot = 0;
   let leftNorm = 0;
@@ -100,7 +104,7 @@ export function cosineSimilarity(left: number[], right: number[]): number {
 /** Ranks indexed chunks against one or more query embeddings. */
 export function searchSemanticChunks(
   chunks: SemanticChunk[],
-  queryEmbeddings: number[][],
+  queryEmbeddings: ArrayLike<number>[],
   limit: number,
   excludedPath?: string
 ): SemanticSearchHit[] {
@@ -109,11 +113,39 @@ export function searchSemanticChunks(
     .filter((chunk) => chunk.path !== excludedPath)
     .map((chunk) => ({
       chunk,
-      score: Math.max(...queryEmbeddings.map((query) => cosineSimilarity(query, chunk.embedding)))
+      score: Math.max(...queryEmbeddings.map((query) => normalizedDotProduct(query, chunk.embedding)))
     }))
     .filter((hit) => Number.isFinite(hit.score) && hit.score > 0)
     .sort((left, right) => right.score - left.score)
     .slice(0, limit);
+}
+
+function normalizedDotProduct(left: ArrayLike<number>, right: ArrayLike<number>): number {
+  if (left.length === 0 || left.length !== right.length) return 0;
+  let dot = 0;
+  for (let index = 0; index < left.length; index += 1) dot += left[index] * right[index];
+  return dot;
+}
+
+/** Converts provider vectors to normalized Float32, optionally truncating Matryoshka embeddings. */
+export function normalizeEmbedding(values: number[], dimensions = 0): Float32Array {
+  if (values.length === 0) throw new Error("Embedding vector is empty.");
+  if (dimensions > values.length) {
+    throw new Error(`Requested ${dimensions} embedding dimensions, but the model returned ${values.length}.`);
+  }
+  const length = dimensions > 0 ? dimensions : values.length;
+  const result = new Float32Array(length);
+  let norm = 0;
+  for (let index = 0; index < length; index += 1) {
+    const value = values[index];
+    if (!Number.isFinite(value)) throw new Error("Embedding vector contains a non-finite value.");
+    result[index] = value;
+    norm += value * value;
+  }
+  if (norm === 0) throw new Error("Embedding vector has zero magnitude.");
+  const scale = 1 / Math.sqrt(norm);
+  for (let index = 0; index < result.length; index += 1) result[index] *= scale;
+  return result;
 }
 
 function splitLongText(text: string, maxChars: number, overlap: number): string[] {
@@ -135,4 +167,8 @@ function splitLongText(text: string, maxChars: number, overlap: number): string[
     start = Math.max(start + 1, end - overlap);
   }
   return parts.filter(Boolean);
+}
+
+function truncate(value: string, maxChars: number): string {
+  return value.length > maxChars ? `${value.slice(0, maxChars - 1)}…` : value;
 }

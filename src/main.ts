@@ -269,6 +269,10 @@ function normalizeSettings(savedSettings: unknown): KnowFlowSettings {
       saved.dailyReviewQuestionCap ?? saved.dailyReviewLimit,
       DEFAULT_SETTINGS.dailyReviewQuestionCap
     ),
+    embeddingDimensions: normalizeNonNegativeInt(
+      saved.embeddingDimensions,
+      DEFAULT_SETTINGS.embeddingDimensions
+    ),
     summaryModel,
     knowledgeMapModel: normalizeModelConfig(saved.knowledgeMapModel, summaryModel),
     pipelineModel: normalizeModelConfig(saved.pipelineModel, DEFAULT_SETTINGS.pipelineModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
@@ -285,6 +289,15 @@ function normalizeSettings(savedSettings: unknown): KnowFlowSettings {
 }
 
 function normalizePositiveInt(value: unknown, fallback: number): number {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.floor(value));
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed)) return Math.max(0, parsed);
+  }
+  return fallback;
+}
+
+function normalizeNonNegativeInt(value: unknown, fallback: number): number {
   if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.floor(value));
   if (typeof value === "string" && value.trim()) {
     const parsed = Number.parseInt(value, 10);
