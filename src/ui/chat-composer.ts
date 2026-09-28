@@ -9,10 +9,15 @@ interface ChatComposerProps {
   tokenCount: number;
   tokenEstimated: boolean;
   sending: boolean;
+  vaultSearchEnabled: boolean;
+  vaultSearchAvailable: boolean;
+  additionalContextPaths: string[];
   onDraftChange: (value: string) => void;
   onSubmit: (question: string) => void;
   onSaveNote: () => void;
   onOpenHistory: () => void;
+  onToggleVaultSearch: () => void;
+  onRemoveContext: (path: string) => void;
 }
 
 export function renderChatComposer(root: HTMLElement, props: ChatComposerProps): void {
@@ -62,6 +67,22 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
       width: "26px"
     });
   };
+  const vaultSearch = iconButton(
+    tools,
+    props.vaultSearchEnabled ? "关闭 Vault Search" : "开启 Vault Search",
+    "database",
+    props.onToggleVaultSearch
+  );
+  setStyles(vaultSearch, {
+    backgroundColor: props.vaultSearchEnabled
+      ? "color-mix(in srgb, var(--interactive-accent) 12%, transparent)"
+      : "transparent",
+    border: "0",
+    color: props.vaultSearchEnabled ? "var(--text-accent)" : "var(--text-muted)",
+    height: "26px",
+    opacity: props.vaultSearchAvailable ? "1" : "0.45",
+    width: "26px"
+  });
   tool("保存到 Note", "download", props.onSaveNote);
   tool("历史对话", "history", props.onOpenHistory);
 
@@ -78,6 +99,7 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
 
   const contextRow = row(panel);
   setStyles(contextRow, {
+    flexWrap: "wrap",
     gap: "6px",
     minWidth: "0"
   });
@@ -103,6 +125,21 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
     textOverflow: "ellipsis",
     whiteSpace: "nowrap"
   });
+  for (const path of props.additionalContextPaths) {
+    const relatedChip = contextRow.createDiv({ cls: "kf-context-chip" });
+    applyChipStyle(relatedChip);
+    const label = path.split("/").slice(-1)[0]?.replace(/\.md$/i, "") ?? path;
+    relatedChip.createSpan({ text: label });
+    const remove = relatedChip.createEl("button", { text: "×", attr: { "aria-label": `移除 ${label}` } });
+    setStyles(remove, {
+      background: "transparent",
+      border: "0",
+      color: "var(--text-muted)",
+      cursor: "pointer",
+      padding: "0"
+    });
+    remove.addEventListener("click", () => props.onRemoveContext(path));
+  }
   const input = panel.createEl("textarea", {
     cls: "kf-input",
     attr: { placeholder: "Your AI assistant for Obsidian · @ to add context · / for prompts" }

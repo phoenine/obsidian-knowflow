@@ -3,6 +3,7 @@ import { ARTICLE_CATEGORIES } from "../services/clipping/clipping-pipeline";
 import type { NoteSummary, PipelineStatus, PipelineUiState } from "../types";
 import { applyActionLayout, applyMetricsLayout, attachPressFeedback, button, cardHeader, formatDate, iconSpan, metric, row, section, setStyles, text } from "./dom";
 import { renderBrandShell } from "./shell";
+import { renderRelevantNotesCard, type RelevantNotesCardProps } from "./relevant-notes-view";
 
 const CLIPPING_PIPELINE_STEPS = [
   "整理 Markdown 样式",
@@ -27,7 +28,7 @@ export interface SummaryCardProps {
   onGenerateSummary: () => Promise<void>;
 }
 
-interface ClippingViewProps extends SummaryCardProps {
+interface ClippingViewProps extends SummaryCardProps, RelevantNotesCardProps {
   title: string;
   pipelineState: PipelineUiState | undefined;
   persistedPipeline: PipelineStatus;
@@ -55,6 +56,7 @@ export function renderClippingView(root: HTMLElement, props: ClippingViewProps):
   renderSummaryCard(content, props);
   renderPipelineCard(content, props);
   renderMoveCard(content, props);
+  renderRelevantNotesCard(content, props);
 }
 
 export function renderSummaryCard(content: HTMLElement, props: SummaryCardProps): void {

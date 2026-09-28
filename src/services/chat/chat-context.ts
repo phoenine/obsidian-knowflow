@@ -13,7 +13,8 @@ const CHAT_MESSAGE_CHARS = 6000;
 export function buildChatRequestMessages(
   contextLabel: string,
   articleContent: string,
-  history: StoredChatMessage[]
+  history: StoredChatMessage[],
+  retrievedContext = ""
 ): ChatRequestMessage[] {
   const article = prepareArticleForAi(articleContent).slice(0, CHAT_ARTICLE_CHARS);
   return [
@@ -22,7 +23,10 @@ export function buildChatRequestMessages(
       content: [
         "你是 KnowFlow 的 Obsidian 学习助手。围绕用户当前笔记回答，明确区分文章内容和你的推断。",
         `当前上下文：${contextLabel}`,
-        `当前文章：\n${article}`
+        `当前文章：\n${article}`,
+        ...(retrievedContext
+          ? ["以下内容来自 Vault Search，只能作为带来源的补充材料，不要把它误称为当前文章内容：", retrievedContext]
+          : [])
       ].join("\n\n")
     },
     ...selectRecentHistory(history)

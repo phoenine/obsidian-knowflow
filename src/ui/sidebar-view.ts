@@ -4,7 +4,7 @@ import { ARTICLE_CATEGORIES } from "../services/clipping/clipping-pipeline";
 import { createDailyTaskPlan, type DailyTaskCandidate } from "../services/learning/daily-tasks";
 import { summarizeWeeklyReviewActivity } from "../services/learning/review-activity";
 import { insertBelowCursor } from "../services/chat/editor-bridge";
-import { KNOWFLOW_VIEW_TYPE, type ArticleStats, type ChatMessage, type ChatThread, type DailyReviewSession, type DailyTask, type DailyTaskPlan, type KnowledgePoint, type NoteSummary, type PipelineUiState, type QuizSession, type ViewContext } from "../types";
+import { KNOWFLOW_VIEW_TYPE, type ArticleStats, type ChatMessage, type ChatThread, type DailyReviewSession, type DailyTask, type DailyTaskPlan, type KnowledgePoint, type NoteSummary, type PipelineUiState, type QuizSession, type RelatedNote, type ViewContext } from "../types";
 import { renderArticleDetailView } from "./article-detail-view";
 import { renderTaskOverviewView } from "./task-overview-view";
 import { renderChatComposer } from "./chat-composer";
@@ -42,6 +42,11 @@ export class KnowFlowSidebarView extends ItemView {
   private pendingComposerFocus = false;
   private dailyTaskPlanLoads = new Set<string>();
   private dailyReviewLoads = new Set<string>();
+  private relatedNotes = new Map<string, { mtime: number; indexUpdatedAt: string; notes: RelatedNote[] }>();
+  private relatedNoteLoads = new Set<string>();
+  private relatedNoteErrors = new Map<string, string>();
+  private vaultSearchEnabled = false;
+  private chatContextPaths = new Set<string>();
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -159,6 +164,7 @@ export class KnowFlowSidebarView extends ItemView {
     // 重新生成时不展示旧摘要/指标，避免和流式过程叠在一起。
     const displaySummary = summaryPending ? null : summary;
     const selectedCategory = this.selectedCategories.get(file.path) ?? summary?.category ?? this.plugin.settings.defaultArticleCategory;
+    const related = this.getRelatedNotesProps(file);
 
     renderClippingView(root, {
       title: file.basename,
@@ -186,7 +192,8 @@ export class KnowFlowSidebarView extends ItemView {
       },
       onMoveCategory: async (category) => {
         await this.moveToCategory(file, category);
-      }
+      },
+      ...related
     });
 
     this.streamingSummaryContentEl = root.querySelector(".kf-streaming-text");
@@ -407,6 +414,7 @@ export class KnowFlowSidebarView extends ItemView {
     const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
     const readingValue = this.getFrontmatterReadingValue(frontmatter) ?? (summary && summary.readingValue > 0 ? `${summary.readingValue}/5` : "--");
     const learningStatus = this.getFrontmatterLearningStatus(frontmatter) ?? (this.plugin.store.isLearned(file.path) ? "已学习" : "未学习");
+    const related = this.getRelatedNotesProps(file);
 
     renderArticleDetailView(root, {
       title: file.basename,
@@ -429,7 +437,8 @@ export class KnowFlowSidebarView extends ItemView {
       onGenerateKnowledgeMap: () => void this.quizController.generateKnowledgeMap(file),
       onShowKnowledgePoints: () => this.openKnowledgePoints(file),
       onGenerateQuiz: () => void this.quizController.generateQuiz(file),
-      onStartQuiz: () => void this.startQuiz(file)
+      onStartQuiz: () => void this.startQuiz(file),
+      ...related
     });
 
     this.streamingSummaryContentEl = root.querySelector(".kf-streaming-text");
@@ -706,12 +715,27 @@ export class KnowFlowSidebarView extends ItemView {
       tokenCount: usage.totalTokens,
       tokenEstimated: usage.estimated,
       sending,
+      vaultSearchEnabled: this.vaultSearchEnabled,
+      vaultSearchAvailable: this.plugin.semanticIndex.isReady(),
+      additionalContextPaths: Array.from(this.chatContextPaths),
       onDraftChange: (value) => {
         this.composerDraft = value;
       },
       onSubmit: (question) => void this.submitChat(question, context, file),
       onSaveNote: () => void this.chatController.saveActiveThread(),
-      onOpenHistory: () => void this.openChatHistory()
+      onOpenHistory: () => void this.openChatHistory(),
+      onToggleVaultSearch: () => {
+        if (!this.vaultSearchEnabled && !this.plugin.semanticIndex.isReady()) {
+          new Notice("请先在 Settings → Data 建立 Semantic index。");
+          return;
+        }
+        this.vaultSearchEnabled = !this.vaultSearchEnabled;
+        this.render();
+      },
+      onRemoveContext: (path) => {
+        this.chatContextPaths.delete(path);
+        this.render();
+      }
     });
   }
 
@@ -732,8 +756,78 @@ export class KnowFlowSidebarView extends ItemView {
         const details = this.streamingReasoningEl.closest("details") as HTMLElement | null;
         if (details) details.style.display = "block";
         this.streamingReasoningEl.textContent = message.reasoning;
-      }
+      },
+      useVaultSearch: this.vaultSearchEnabled,
+      contextPaths: Array.from(this.chatContextPaths)
     });
+  }
+
+  private getRelatedNotesProps(file: TFile) {
+    const cached = this.relatedNotes.get(file.path);
+    const indexUpdatedAt = this.plugin.semanticIndex.getStats().updatedAt;
+    const fresh = cached?.mtime === file.stat.mtime && cached.indexUpdatedAt === indexUpdatedAt;
+    if (
+      this.plugin.semanticIndex.isReady()
+      && !fresh
+      && !this.relatedNoteLoads.has(file.path)
+      && !this.relatedNoteErrors.has(file.path)
+    ) {
+      void this.loadRelatedNotes(file);
+    }
+    return {
+      notes: fresh ? cached.notes : [],
+      loading: this.relatedNoteLoads.has(file.path),
+      error: this.relatedNoteErrors.get(file.path),
+      indexReady: this.plugin.semanticIndex.isReady(),
+      indexBuilding: this.plugin.semanticIndex.isBuilding(),
+      indexScope: this.plugin.settings.articlesFolder,
+      onBuildIndex: () => this.buildSemanticIndex(),
+      onRetry: () => {
+        this.relatedNoteErrors.delete(file.path);
+        void this.loadRelatedNotes(file);
+        this.render();
+      },
+      onOpen: (path: string) => void this.app.workspace.openLinkText(path, file.path, false),
+      onAddToChat: (path: string) => {
+        this.chatContextPaths.add(path);
+        this.pendingComposerFocus = true;
+        this.render();
+      }
+    };
+  }
+
+  private async loadRelatedNotes(file: TFile): Promise<void> {
+    this.relatedNoteLoads.add(file.path);
+    this.relatedNoteErrors.delete(file.path);
+    try {
+      const notes = await this.plugin.semanticIndex.findRelated(file, 5);
+      this.relatedNotes.set(file.path, {
+        mtime: file.stat.mtime,
+        indexUpdatedAt: this.plugin.semanticIndex.getStats().updatedAt,
+        notes
+      });
+    } catch (error) {
+      this.relatedNoteErrors.set(file.path, error instanceof Error ? error.message : String(error));
+    } finally {
+      this.relatedNoteLoads.delete(file.path);
+      if (this.plugin.router.getContext().activeFile?.path === file.path) this.render();
+    }
+  }
+
+  private async buildSemanticIndex(): Promise<void> {
+    if (this.plugin.semanticIndex.isBuilding()) return;
+    try {
+      const build = this.plugin.semanticIndex.rebuild();
+      this.render();
+      const stats = await build;
+      this.relatedNotes.clear();
+      this.relatedNoteErrors.clear();
+      new Notice(`KnowFlow indexed ${stats.files} files and ${stats.chunks} chunks.`);
+    } catch (error) {
+      new Notice(`KnowFlow index failed: ${error instanceof Error ? error.message : String(error)}`, 8000);
+    } finally {
+      this.render();
+    }
   }
 
   private async saveAssistantAsSummary(thread: ChatThread, message: ChatMessage): Promise<void> {

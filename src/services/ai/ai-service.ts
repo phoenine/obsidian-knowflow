@@ -66,9 +66,10 @@ export class AiService {
       onContent: (delta: string) => void;
       onReasoning: (delta: string) => void;
       onUsage: (usage: ChatUsage) => void;
+      retrievedContext?: string;
     }
   ): Promise<ChatUsage> {
-    const messages = buildChatRequestMessages(contextLabel, articleContent, history);
+    const messages = buildChatRequestMessages(contextLabel, articleContent, history, handlers.retrievedContext);
     let emitted = false;
     try {
       return await this.transport.requestTextStream(this.settings.chatModel, messages, {

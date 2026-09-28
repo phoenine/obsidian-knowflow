@@ -92,6 +92,15 @@ assert.equal(estimateChatUsage([{ content: "123456" }], "123").totalTokens, 3);
   assert.ok(!messages[0].content.includes("Test Quiz"));
   assert.ok(messages.slice(1).reduce((total, message) => total + message.content.length, 0) <= 12000);
   assert.ok(!messages.some((message) => message.content.startsWith("19-")), "errored assistant output must be excluded");
+
+  const withVaultSearch = buildChatRequestMessages(
+    "测试",
+    managedArticle,
+    [],
+    "[检索来源 1: Articles/Related.md]\n相关内容"
+  );
+  assert.ok(withVaultSearch[0].content.includes("来自 Vault Search"));
+  assert.ok(withVaultSearch[0].content.includes("Articles/Related.md"));
 }
 
 const thread = {

@@ -1,9 +1,10 @@
 import { App, Modal, Notice, PluginSettingTab, Setting, TextComponent, normalizePath, requestUrl } from "obsidian";
 import type KnowFlowPlugin from "./main";
 import { withTimeout } from "./services/ai/ai-transport";
+import { EmbeddingTransport } from "./services/ai/embedding-transport";
 import type { AiModelConfig, AiRuntime, KnowFlowSettings } from "./types";
 
-type ModelConfigKey = "summaryModel" | "knowledgeMapModel" | "pipelineModel" | "chatModel" | "quizModel";
+type ModelConfigKey = "summaryModel" | "knowledgeMapModel" | "pipelineModel" | "chatModel" | "quizModel" | "embeddingModel";
 type SettingsTabKey = "basic" | "ai-models" | "pipeline" | "learning" | "data";
 
 const DEFAULT_MODEL_CONFIG: AiModelConfig = {
@@ -23,6 +24,7 @@ const RUNTIME_DEFAULT_BASE_URL: Record<AiRuntime, string> = {
 export const DEFAULT_SETTINGS: KnowFlowSettings = {
   clippingFolder: "Clippings",
   articlesFolder: "Articles",
+  semanticIndexExcludeFolders: ["assets"],
   defaultArticleCategory: "知识积累",
   archiveFolder: "Archives",
   chatConversationFolder: "copilot-conversations",
@@ -32,6 +34,12 @@ export const DEFAULT_SETTINGS: KnowFlowSettings = {
   pipelineModel: { ...DEFAULT_MODEL_CONFIG },
   chatModel: { ...DEFAULT_MODEL_CONFIG },
   quizModel: { ...DEFAULT_MODEL_CONFIG },
+  embeddingModel: {
+    runtime: "disabled",
+    apiBaseUrl: "",
+    apiKey: "",
+    model: "text-embedding-3-small"
+  },
   confirmBeforeWrite: false,
   translateEnglishClippings: false,
   autoOrganize: false,
@@ -177,19 +185,14 @@ export class KnowFlowSettingTab extends PluginSettingTab {
   }
 
   private displayAiModels(containerEl: HTMLElement): void {
-    const ai = this.createGroup(containerEl, "AI 模型", this.aiSummary(), true);
+    const ai = this.createGroup(containerEl, "AI 模型", "", true);
 
     this.createModelEntry(ai, "Summary model", "AI Summary: generates article summary, reading value and classification.", "summaryModel");
     this.createModelEntry(ai, "Knowledge Map model", "Generates Mermaid maps and structured knowledge points for an article.", "knowledgeMapModel");
     this.createModelEntry(ai, "Pipeline model", "Clipping Pipeline: heading detection, code block recognition and language classification.", "pipelineModel");
     this.createModelEntry(ai, "Chat model", "Used by the sidebar chat composer.", "chatModel");
     this.createModelEntry(ai, "Quiz model", "Generates Markdown quiz questions, including targeted knowledge-point questions.", "quizModel");
-
-    const runtime = this.createGroup(containerEl, "Runtime support", "Cloud · Ollama · LM Studio");
-    runtime.createEl("p", {
-      text: "Each model has its own runtime, base URL, API key and model ID. Cloud uses OpenAI-compatible endpoints. Local runtimes support Ollama and LM Studio.",
-      cls: "setting-item-description"
-    });
+    this.createModelEntry(ai, "Embedding model", "Builds the local Relevant Notes and Vault Search index.", "embeddingModel");
   }
 
   private displayPipeline(containerEl: HTMLElement): void {
@@ -278,9 +281,66 @@ export class KnowFlowSettingTab extends PluginSettingTab {
   }
 
   private displayData(containerEl: HTMLElement): void {
+    const stats = this.plugin.semanticIndex.getStats();
+    const semantic = this.createGroup(
+      containerEl,
+      "Semantic index",
+      stats.chunks > 0 ? `${stats.files} files · ${stats.chunks} chunks` : "not built",
+      true
+    );
+    semantic.createEl("p", {
+      text: stats.chunks === 0
+        ? "Configure an Embedding model, then build the index for Relevant Notes and Chat Vault Search."
+        : stats.compatible
+          ? `Model: ${stats.model || "unknown"} · Updated: ${stats.updatedAt || "--"}`
+          : "The saved index was built with a different embedding configuration. Rebuild it before searching.",
+      cls: "setting-item-description"
+    });
+    new Setting(semantic)
+      .setName("Excluded folders")
+      .setDesc("Comma-separated folder names or paths under the configured Articles folder. A simple name such as assets matches at any depth.")
+      .addText((input) => input
+        .setPlaceholder("assets, Attachments")
+        .setValue(this.plugin.settings.semanticIndexExcludeFolders.join(", "))
+        .onChange(async (value) => {
+          this.plugin.settings.semanticIndexExcludeFolders = parseFolderList(value);
+          await this.plugin.saveSettings();
+        }));
+    new Setting(semantic)
+      .setName(stats.chunks > 0 ? "Rebuild index" : "Build index")
+      .setDesc(`Indexes Markdown files under ${this.plugin.settings.articlesFolder}. Cloud runtimes send article chunks to the configured embedding provider.`)
+      .addButton((button) => button
+        .setButtonText(stats.chunks > 0 ? "Rebuild" : "Build")
+        .setCta()
+        .onClick(async () => {
+          button.setDisabled(true).setButtonText("Building...");
+          try {
+            const next = await this.plugin.semanticIndex.rebuild();
+            new Notice(`KnowFlow indexed ${next.files} files and ${next.chunks} chunks.`);
+            this.plugin.refreshView();
+            this.display();
+          } catch (error) {
+            new Notice(`KnowFlow index failed: ${error instanceof Error ? error.message : String(error)}`, 8000);
+            button.setDisabled(false).setButtonText(stats.chunks > 0 ? "Rebuild" : "Build");
+          }
+        }));
+    new Setting(semantic)
+      .setName("Clear semantic index")
+      .setDesc("Deletes the derived local index. Your Markdown notes are not changed.")
+      .addButton((button) => button
+        .setButtonText("Clear")
+        .setWarning()
+        .setDisabled(stats.chunks === 0)
+        .onClick(async () => {
+          await this.plugin.semanticIndex.clear();
+          new Notice("KnowFlow semantic index cleared.");
+          this.plugin.refreshView();
+          this.display();
+        }));
+
     const privacy = this.createGroup(containerEl, "Data & Privacy", "local settings", true);
     privacy.createEl("p", {
-      text: "KnowFlow stores settings and learning state in local Obsidian plugin data. API requests should only send the current note or selected context.",
+      text: "KnowFlow stores settings, learning state and the derived semantic index locally. Chat requests send the current note and selected context; building a cloud embedding index sends article chunks to that configured provider.",
       cls: "setting-item-description"
     });
     const apiKeyWarning = privacy.createEl("p", {
@@ -362,11 +422,13 @@ export class KnowFlowSettingTab extends PluginSettingTab {
       padding: "12px 14px"
     });
     summary.createEl("strong", { text: title });
-    const desc = summary.createSpan({ text: subtitle });
-    Object.assign(desc.style, {
-      color: "var(--text-muted)",
-      fontSize: "12px"
-    });
+    if (subtitle) {
+      const desc = summary.createSpan({ text: subtitle });
+      Object.assign(desc.style, {
+        color: "var(--text-muted)",
+        fontSize: "12px"
+      });
+    }
 
     const body = details.createDiv();
     Object.assign(body.style, {
@@ -433,19 +495,25 @@ export class KnowFlowSettingTab extends PluginSettingTab {
 
   private createModelEntry(containerEl: HTMLElement, name: string, desc: string, key: ModelConfigKey): void {
     const config = this.plugin.settings[key];
+    const description = document.createDocumentFragment();
+    const purpose = description.createSpan({ text: desc });
+    const current = description.createSpan({
+      text: `Current: ${runtimeLabel(config.runtime)} / ${config.model}`
+    });
+    Object.assign(purpose.style, { display: "block" });
+    Object.assign(current.style, {
+      display: "block",
+      marginTop: "3px",
+      overflowWrap: "anywhere"
+    });
     new Setting(containerEl)
       .setName(name)
-      .setDesc(`${desc} Current: ${runtimeLabel(config.runtime)} / ${config.model}`)
+      .setDesc(description)
       .addButton((button) =>
         button
           .setButtonText("Configure")
           .onClick(() => new ModelConfigModal(this.app, this.plugin, key, name, () => this.display()).open())
       );
-  }
-
-  private aiSummary(): string {
-    const { summaryModel, knowledgeMapModel, pipelineModel, chatModel, quizModel } = this.plugin.settings;
-    return `S ${summaryModel.model} · K ${knowledgeMapModel.model} · P ${pipelineModel.model} · C ${chatModel.model} · Q ${quizModel.model}`;
   }
 
   private async validateBasicPaths(): Promise<void> {
@@ -490,6 +558,13 @@ export class KnowFlowSettingTab extends PluginSettingTab {
 function toPositiveInt(value: string, fallback: number): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseFolderList(value: string): string[] {
+  return Array.from(new Set(value
+    .split(/[,\n]/)
+    .map((folder) => folder.trim().replace(/^\/+|\/+$/g, ""))
+    .filter(Boolean)));
 }
 
 function runtimeLabel(runtime: AiRuntime): string {
@@ -634,7 +709,9 @@ class ModelConfigModal extends Modal {
 
     new Setting(contentEl)
       .setName("Test connection")
-      .setDesc("Calls the runtime /models endpoint using the current base URL and API key.")
+      .setDesc(this.key === "embeddingModel"
+        ? "Embeds a short test string using the current /embeddings endpoint."
+        : "Calls the runtime /models endpoint using the current base URL and API key.")
       .addButton((button) =>
         button
           .setButtonText("Test")
@@ -642,7 +719,11 @@ class ModelConfigModal extends Modal {
             button.setButtonText("Testing...");
             button.setDisabled(true);
             try {
-              await testModelConnection(config);
+              if (this.key === "embeddingModel") {
+                await new EmbeddingTransport().embed(config, ["KnowFlow connection test"]);
+              } else {
+                await testModelConnection(config);
+              }
               new Notice(`${this.title}: connection succeeded.`);
             } catch (error) {
               new Notice(`${this.title}: ${error instanceof Error ? error.message : String(error)}`, 8000);

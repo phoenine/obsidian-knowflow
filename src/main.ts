@@ -1,4 +1,4 @@
-import { Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import { normalizePath, Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 import { AiService } from "./services/ai/ai-service";
 import { ArticleLearningService } from "./services/learning/article-learning-service";
 import { ChatNoteService } from "./services/chat/chat-note-service";
@@ -11,6 +11,8 @@ import { QuizNoteService } from "./services/learning/quiz-note-service";
 import { KnowledgeStore } from "./services/core/store";
 import { SummaryNoteService } from "./services/learning/summary-note-service";
 import { DailyReviewService } from "./services/learning/daily-review-service";
+import { SemanticIndexService } from "./services/search/semantic-index-service";
+import { isMarkdownInFolder } from "./services/search/semantic-search";
 import { DEFAULT_SETTINGS, KnowFlowSettingTab } from "./settings";
 import { KNOWFLOW_VIEW_TYPE, type AiModelConfig, type KnowFlowSettings } from "./types";
 import { KnowFlowSidebarView } from "./ui/sidebar-view";
@@ -27,8 +29,10 @@ export default class KnowFlowPlugin extends Plugin {
   quizNotes: QuizNoteService;
   summaryNotes: SummaryNoteService;
   dailyReview: DailyReviewService;
+  semanticIndex: SemanticIndexService;
   private noteOperations: NoteOperationCoordinator;
   private dataManager: PluginDataManager;
+  private semanticRefreshTimers = new Map<string, number>();
 
   async onload(): Promise<void> {
     this.dataManager = new PluginDataManager(this);
@@ -54,6 +58,13 @@ export default class KnowFlowPlugin extends Plugin {
     this.quizNotes = new QuizNoteService(this.app, this.settings, this.noteOperations);
     this.dailyReview = new DailyReviewService(this.app, this.store, this.quizNotes, this.settings);
     this.summaryNotes = new SummaryNoteService(this.app, this.noteOperations);
+    const pluginDir = this.manifest.dir ?? `.obsidian/plugins/${this.manifest.id}`;
+    this.semanticIndex = new SemanticIndexService(
+      this.app,
+      this.settings,
+      normalizePath(`${pluginDir}/semantic-index.json`)
+    );
+    await this.semanticIndex.load();
 
     this.registerView(KNOWFLOW_VIEW_TYPE, (leaf) => new KnowFlowSidebarView(leaf, this));
 
@@ -108,10 +119,15 @@ export default class KnowFlowPlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("file-open", () => this.refreshView()));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
       if (file instanceof TFile) {
+        void this.semanticIndex.migratePath(oldPath, file.path)
+          .then(() => this.semanticIndex.refreshFile(file))
+          .catch((error) => console.error("KnowFlow: semantic rename failed", error));
         void this.handleFileRename(oldPath, file.path);
         return;
       }
       if (file instanceof TFolder) {
+        void this.semanticIndex.migrateFolder(oldPath, file.path)
+          .catch((error) => console.error("KnowFlow: semantic folder rename failed", error));
         // Obsidian fires a single rename event for the folder itself; it does
         // not emit separate events for each descendant file, so any stored
         // learning/pipeline state keyed by those old file paths must
@@ -123,16 +139,26 @@ export default class KnowFlowPlugin extends Plugin {
     }));
     this.registerEvent(this.app.vault.on("delete", (file) => {
       if (file instanceof TFile) {
+        void this.semanticIndex.removePath(file.path)
+          .catch((error) => console.error("KnowFlow: semantic delete failed", error));
         void this.store.forgetPath(file.path).then(() => this.refreshView());
         return;
       }
       if (file instanceof TFolder) {
+        void this.semanticIndex.removeFolder(file.path)
+          .catch((error) => console.error("KnowFlow: semantic folder delete failed", error));
         // Same "single event for the folder itself" caveat as rename above:
         // clean up every stored record under the deleted folder in one pass.
         void this.store.forgetFolder(file.path).then(() => this.refreshView());
         return;
       }
       this.refreshView();
+    }));
+    this.registerEvent(this.app.vault.on("create", (file) => {
+      if (file instanceof TFile) this.scheduleSemanticRefresh(file);
+    }));
+    this.registerEvent(this.app.vault.on("modify", (file) => {
+      if (file instanceof TFile) this.scheduleSemanticRefresh(file);
     }));
 
     this.addSettingTab(new KnowFlowSettingTab(this.app, this));
@@ -159,7 +185,30 @@ export default class KnowFlowPlugin extends Plugin {
   }
 
   onunload(): void {
+    for (const timer of this.semanticRefreshTimers.values()) window.clearTimeout(timer);
+    this.semanticRefreshTimers.clear();
     this.app.workspace.detachLeavesOfType(KNOWFLOW_VIEW_TYPE);
+  }
+
+  private scheduleSemanticRefresh(file: TFile): void {
+    if (!this.semanticIndex.isReady() || !this.isArticlePath(file)) return;
+    const previous = this.semanticRefreshTimers.get(file.path);
+    if (previous !== undefined) window.clearTimeout(previous);
+    const timer = window.setTimeout(() => {
+      this.semanticRefreshTimers.delete(file.path);
+      void this.semanticIndex.refreshFile(file)
+        .then(() => this.refreshView())
+        .catch((error) => console.error("KnowFlow: semantic refresh failed", error));
+    }, 1500);
+    this.semanticRefreshTimers.set(file.path, timer);
+  }
+
+  private isArticlePath(file: TFile): boolean {
+    return isMarkdownInFolder(
+      file,
+      this.settings.articlesFolder,
+      this.settings.semanticIndexExcludeFolders
+    );
   }
 
   async loadSettings(): Promise<void> {
@@ -175,6 +224,7 @@ export default class KnowFlowPlugin extends Plugin {
     this.pipeline?.updateSettings(this.settings);
     this.quizNotes?.updateSettings(this.settings);
     this.dailyReview?.updateSettings(this.settings);
+    this.semanticIndex?.updateSettings(this.settings);
     this.chatNotes?.updateFolder(this.settings.chatConversationFolder);
     this.refreshView();
   }
@@ -223,7 +273,12 @@ function normalizeSettings(savedSettings: unknown): KnowFlowSettings {
     knowledgeMapModel: normalizeModelConfig(saved.knowledgeMapModel, summaryModel),
     pipelineModel: normalizeModelConfig(saved.pipelineModel, DEFAULT_SETTINGS.pipelineModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
     chatModel: normalizeModelConfig(saved.chatModel, DEFAULT_SETTINGS.chatModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
-    quizModel: normalizeModelConfig(saved.quizModel, DEFAULT_SETTINGS.quizModel, legacyRuntime, legacyBaseUrl, legacyApiKey)
+    quizModel: normalizeModelConfig(saved.quizModel, DEFAULT_SETTINGS.quizModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
+    embeddingModel: normalizeModelConfig(saved.embeddingModel, DEFAULT_SETTINGS.embeddingModel),
+    semanticIndexExcludeFolders: normalizeFolderList(
+      saved.semanticIndexExcludeFolders,
+      DEFAULT_SETTINGS.semanticIndexExcludeFolders
+    )
   };
   delete (settings as typeof settings & { dailyReviewLimit?: unknown }).dailyReviewLimit;
   return settings;
@@ -236,6 +291,14 @@ function normalizePositiveInt(value: unknown, fallback: number): number {
     if (Number.isFinite(parsed)) return Math.max(0, parsed);
   }
   return fallback;
+}
+
+function normalizeFolderList(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) return [...fallback];
+  return Array.from(new Set(value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim().replace(/^\/+|\/+$/g, ""))
+    .filter(Boolean)));
 }
 
 function normalizeModelConfig(

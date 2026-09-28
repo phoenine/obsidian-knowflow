@@ -25,6 +25,7 @@ Clipping → 整理 → 总结 → 知识点 → Quiz → 学习状态 → 每�
 - 记录文章学习状态并展示 Task Overview。
 - 从全局 Quiz 题库生成每日复习试卷。
 - 基于当前文章上下文进行 Chat，并可保存会话。
+- 使用独立 embedding 模型发现 Relevant Notes，并为 Chat 提供可开关的 Vault Search。
 
 暂未开放：
 
@@ -103,7 +104,7 @@ Vault/
 
 ## AI 模型配置
 
-摘要、知识图谱、Pipeline、Chat 和 Quiz 可以分别配置模型。支持：
+摘要、知识图谱、Pipeline、Chat、Quiz 和 embedding 可以分别配置模型。支持：
 
 - OpenAI-compatible Cloud API
 - Ollama
@@ -111,6 +112,8 @@ Vault/
 - Disabled
 
 每个模型可以独立设置 Runtime、Base URL、API Key 和 Model ID。
+
+Relevant Notes 与 Vault Search 共用本地语义索引。先在 `AI Models` 配置 Embedding model，再到 `Data` 设置 `Excluded folders` 并建立索引；索引只覆盖 `Articles folder` 所配置的文章目录（默认 `Articles/`），默认排除任意层级的 `assets` 子目录，并保存在插件目录的 `semantic-index.json`。使用 Cloud runtime 建索引时，文章分块会发送给所配置的 embedding 服务。详细设计见 [Relevant Notes 与 Vault Search](docs/relevant-notes-and-vault-search.md)。
 
 > [!WARNING]
 > API Key 当前以明文保存在 Vault 的 `.obsidian/plugins/knowflow/data.json`。如果 Vault 会通过 Git 或云盘同步，请排除该文件或使用不含密钥的配置。

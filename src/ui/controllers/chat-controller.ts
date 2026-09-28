@@ -2,6 +2,7 @@ import { Notice, TFile } from "obsidian";
 import type { App } from "obsidian";
 import type KnowFlowPlugin from "../../main";
 import type { ChatMessage, ChatThread, ChatUsage, ViewContext } from "../../types";
+import { prepareArticleForAi } from "../../services/clipping/managed-content";
 
 export class ChatController {
   activeThread: ChatThread | null = null;
@@ -30,6 +31,8 @@ export class ChatController {
       onStart: () => void;
       onContent: (message: ChatMessage) => void;
       onReasoning: (message: ChatMessage) => void;
+      useVaultSearch?: boolean;
+      contextPaths?: string[];
     }
   ): Promise<void> {
     if (!question) {
@@ -50,6 +53,16 @@ export class ChatController {
     let requestUsage = emptyChatUsage();
     try {
       const content = file ? await this.app.vault.read(file) : "";
+      let retrievedContext = "";
+      if (handlers.useVaultSearch) {
+        try {
+          retrievedContext = await this.plugin.semanticIndex.searchContext(question, file?.path);
+        } catch (error) {
+          new Notice(`Vault Search 暂不可用，本次将只使用已附加内容：${error instanceof Error ? error.message : String(error)}`, 6000);
+        }
+      }
+      const attachedContext = await this.loadAttachedContext(handlers.contextPaths ?? []);
+      retrievedContext = [attachedContext, retrievedContext].filter(Boolean).join("\n\n");
       assistantMessage.status = "streaming";
       requestUsage = await this.plugin.ai.answerStream(
         thread.contextLabel,
@@ -67,7 +80,8 @@ export class ChatController {
           },
           onUsage: (usage) => {
             requestUsage = usage;
-          }
+          },
+          retrievedContext
         }
       );
       assistantMessage.status = "done";
@@ -112,6 +126,27 @@ export class ChatController {
     }
     const path = await this.plugin.chatNotes.saveThread(this.activeThread);
     new Notice(`Chat 已保存到 ${path}`);
+  }
+
+  private async loadAttachedContext(paths: string[]): Promise<string> {
+    const sections: string[] = [];
+    let remaining = 10000;
+    for (const path of paths) {
+      if (remaining <= 0) break;
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!(file instanceof TFile)) continue;
+      let markdown = "";
+      try {
+        markdown = await this.app.vault.cachedRead(file);
+      } catch {
+        continue;
+      }
+      const content = prepareArticleForAi(markdown).slice(0, remaining);
+      if (!content) continue;
+      sections.push(`[手动关联来源: ${file.path}]\n${content}`);
+      remaining -= content.length;
+    }
+    return sections.join("\n\n");
   }
 }
 

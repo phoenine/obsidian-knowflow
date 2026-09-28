@@ -22,6 +22,7 @@ export interface AiModelConfig {
 export interface KnowFlowSettings {
   clippingFolder: string;
   articlesFolder: string;
+  semanticIndexExcludeFolders: string[];
   defaultArticleCategory: string;
   archiveFolder: string;
   chatConversationFolder: string;
@@ -31,6 +32,7 @@ export interface KnowFlowSettings {
   pipelineModel: AiModelConfig;
   chatModel: AiModelConfig;
   quizModel: AiModelConfig;
+  embeddingModel: AiModelConfig;
   autoCreateCategoryFolders: boolean;
   confirmBeforeWrite: boolean;
   translateEnglishClippings: boolean;
@@ -39,6 +41,22 @@ export interface KnowFlowSettings {
   autoGenerateQuiz: boolean;
   dailyNewArticleLimit: number;
   dailyReviewQuestionCap: number;
+}
+
+export interface RelatedNote {
+  path: string;
+  title: string;
+  excerpt: string;
+  score: number;
+  reasons: string[];
+}
+
+export interface SemanticIndexStats {
+  files: number;
+  chunks: number;
+  model: string;
+  updatedAt: string;
+  compatible: boolean;
 }
 
 export interface NoteSummary {

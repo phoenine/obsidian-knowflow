@@ -2,8 +2,9 @@ import type { QuizStats } from "../types";
 import { renderSummaryCard, type SummaryCardProps } from "./clipping-view";
 import { applyActionLayout, applyMetricsLayout, button, cardHeader, metric, row, section, text } from "./dom";
 import { renderBrandShell } from "./shell";
+import { renderRelevantNotesCard, type RelevantNotesCardProps } from "./relevant-notes-view";
 
-interface ArticleDetailViewProps extends SummaryCardProps {
+interface ArticleDetailViewProps extends SummaryCardProps, RelevantNotesCardProps {
   title: string;
   readingValue: string;
   learningStatus: string;
@@ -29,6 +30,7 @@ export function renderArticleDetailView(root: HTMLElement, props: ArticleDetailV
   metric(metrics, "知识点", props.knowledgePointCount === null ? "--" : String(props.knowledgePointCount));
 
   renderSummaryCard(content, props);
+  renderRelevantNotesCard(content, props);
 
   const mapCard = section(content, "kf-knowledge-map");
   cardHeader(mapCard, "git-fork", "Knowledge Map", (header) => {
