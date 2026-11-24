@@ -1,19 +1,9 @@
 import { setIcon } from "obsidian";
 import { ARTICLE_CATEGORIES } from "../services/clipping/clipping-pipeline";
 import type { NoteSummary, PipelineStatus, PipelineUiState } from "../types";
-import { applyActionLayout, applyMetricsLayout, attachPressFeedback, button, cardHeader, formatDate, iconSpan, metric, row, section, setStyles, text } from "./dom";
+import { applyActionLayout, applyMetricsLayout, attachPressFeedback, button, cardHeader, iconSpan, metric, row, section, setStyles, text } from "./dom";
 import { renderBrandShell } from "./shell";
 import { renderRelevantNotesCard, type RelevantNotesCardProps } from "./relevant-notes-view";
-
-const CLIPPING_PIPELINE_STEPS = [
-  "整理 Markdown 样式",
-  "AI 判断未围栏代码",
-  "预检代码块",
-  "AI 格式化代码块",
-  "AI 判断标题",
-  "英文翻译（可选）",
-  "补全 Frontmatter"
-];
 
 export interface SummaryCardProps {
   summary: NoteSummary | null;
@@ -21,7 +11,6 @@ export interface SummaryCardProps {
   summaryError: string | undefined;
   streamingText?: string;
   streamingReasoning?: string;
-  analysisCost: number;
   sourceLabel: string;
   renderMarkdownSummary: (parent: HTMLElement, markdown: string) => void;
   onRefreshSummary: () => Promise<void>;
@@ -32,16 +21,19 @@ interface ClippingViewProps extends SummaryCardProps, RelevantNotesCardProps {
   title: string;
   pipelineState: PipelineUiState | undefined;
   persistedPipeline: PipelineStatus;
-  selectedCategory: string;
-  statusText: string;
+  currentCategory: string | undefined;
+  readingValueLabel: string;
+  suggestedCategoryLabel: string;
   recommendedActionLabel: string;
   onRunPipeline: () => Promise<void>;
-  onSelectCategory: (category: string) => void;
   onMoveCategory: (category: string) => Promise<void>;
 }
 
 export function renderClippingView(root: HTMLElement, props: ClippingViewProps): void {
-  const content = renderBrandShell(root, "Clipping assistant");
+  const content = renderBrandShell(root, "Clipping assistant", (actions) => {
+    renderOrganizeButton(actions, props);
+    renderMoveButton(actions, props);
+  });
 
   const current = section(content, "kf-current");
   const titleRow = row(current);
@@ -49,18 +41,17 @@ export function renderClippingView(root: HTMLElement, props: ClippingViewProps):
   text(titleRow, props.title, "kf-card-title");
   const metrics = row(current, "kf-metrics");
   applyMetricsLayout(metrics);
-  metric(metrics, "阅读价值", props.summary ? `${props.summary.readingValue}/5` : "--");
-  metric(metrics, "推荐动作", props.summary ? props.recommendedActionLabel : "--");
-  metric(metrics, "建议目录", props.summary?.category ?? "--");
+  metric(metrics, "阅读价值", props.readingValueLabel);
+  metric(metrics, "推荐动作", props.recommendedActionLabel);
+  metric(metrics, "建议目录", props.suggestedCategoryLabel);
 
   renderSummaryCard(content, props);
-  renderPipelineCard(content, props);
-  renderMoveCard(content, props);
   renderRelevantNotesCard(content, props);
 }
 
 export function renderSummaryCard(content: HTMLElement, props: SummaryCardProps): void {
   const summary = section(content, "kf-summary");
+  if (props.summaryPending) setStyles(summary, { minHeight: "400px" });
   let refreshButton!: HTMLButtonElement;
   cardHeader(summary, "sparkles", "AI Summary", (header) => {
     refreshButton = unborderedIconButton(header, "Refresh summary", "refresh-cw", () => {
@@ -99,7 +90,7 @@ export function renderSummaryCard(content: HTMLElement, props: SummaryCardProps)
   } else if (props.summaryPending && props.streamingReasoning) {
     const viewport = summary.createDiv({ cls: "kf-streaming-reasoning-viewport" });
     setStyles(viewport, {
-      height: "90px",
+      height: "280px",
       maskImage: "linear-gradient(to bottom, transparent 0%, black 30%, black 100%)",
       overflow: "hidden",
       position: "relative"
@@ -117,25 +108,20 @@ export function renderSummaryCard(content: HTMLElement, props: SummaryCardProps)
     const latestEl = flow.createSpan({ cls: "kf-streaming-reasoning-latest" });
     setStyles(latestEl, { color: "var(--text-normal)", fontWeight: "500" });
     updateStreamingReasoning(historyEl, latestEl, props.streamingReasoning);
-    // 推理过程中仍显示提示文案和 token 预估
     const separator = summary.createDiv({ cls: "kf-reasoning-separator" });
     setStyles(separator, {
       borderTop: "1px solid var(--background-modifier-border)",
       margin: "8px 0"
     });
-    text(summary, `正在根据当前 ${props.sourceLabel} 生成摘要、阅读价值和分类建议。`, "kf-muted");
-    text(summary, `预计消耗：约 ${props.analysisCost}k tokens`, "kf-token-estimate");
+    renderPendingSummary(summary, props.sourceLabel);
   } else {
-    text(
-      summary,
-      props.summaryPending
-        ? `正在根据当前 ${props.sourceLabel} 生成摘要、阅读价值和分类建议。`
-        : props.summaryError
-          ? `生成失败：${props.summaryError}`
-          : `当前 ${props.sourceLabel} 尚未分析。点击生成摘要后，会保存摘要、阅读价值、推荐动作和建议目录。`,
-      "kf-muted"
-    );
-    text(summary, `预计消耗：约 ${props.analysisCost}k tokens`, "kf-token-estimate");
+    if (props.summaryPending) {
+      renderPendingSummary(summary, props.sourceLabel);
+    } else if (props.summaryError) {
+      text(summary, `生成失败：${props.summaryError}`, "kf-muted");
+    } else {
+      text(summary, "还没有摘要。", "kf-muted");
+    }
     if (!props.summaryPending) {
       const summaryActions = row(summary, "kf-actions");
       applyActionLayout(summaryActions);
@@ -177,190 +163,127 @@ function splitReasoningFocus(reasoning: string): { history: string; latest: stri
   };
 }
 
-function renderPipelineCard(content: HTMLElement, props: ClippingViewProps): void {
-  const pipeline = section(content, "kf-pipeline");
-  setStyles(pipeline, {
-    backgroundColor: "color-mix(in srgb, orange 7%, var(--background-primary))",
-    borderColor: "color-mix(in srgb, orange 35%, var(--background-modifier-border))"
+function renderOrganizeButton(parent: HTMLElement, props: ClippingViewProps): void {
+  const running = props.pipelineState?.running === true;
+  const error = running ? undefined : props.pipelineState?.error ?? (props.persistedPipeline.status === "failed" ? props.persistedPipeline.error : undefined);
+  const processed = !running && !error && props.persistedPipeline.status === "processed";
+  const label = running ? "整理中" : error ? compactErrorMessage(error) : processed ? "已整理" : "整理当前文章";
+  const organize = headerIconButton(parent, label, running ? "loader-2" : "list-checks", () => {
+    if (!running) void props.onRunPipeline();
   });
-  const pipelineHeader = cardHeader(pipeline, "list-checks", "Clipping Pipeline", (header) => {
-    const raw = header.createDiv({ text: props.statusText });
-    applyStatusPill(raw);
-  });
-  setStyles(pipelineHeader, { alignItems: "flex-start" });
-
-  if (props.pipelineState?.visible) {
-    renderPipelineProgress(pipeline, props.pipelineState);
-  } else if (props.persistedPipeline.status === "processed") {
-    text(pipeline, `上次整理：${props.persistedPipeline.updatedAt ? formatDate(props.persistedPipeline.updatedAt) : "--"}。可以再次点击整理当前文章进行二次整理。`, "kf-muted");
-  } else if (props.persistedPipeline.status === "failed") {
-    const persistedError = text(pipeline, `上次整理失败：${compactErrorMessage(props.persistedPipeline.error ?? "未知错误")}`, "kf-muted");
-    setStyles(persistedError, {
-      color: "var(--text-error)",
-      fontSize: "12px"
-    });
-  } else {
-    text(pipeline, "点击整理后显示处理进度。Pipeline 会先规则清理，再调用 Summary model 优化 Markdown 格式，最后补全 Frontmatter。", "kf-muted");
-  }
-  const actions = row(pipeline, "kf-actions");
-  applyActionLayout(actions);
-  const runButton = button(actions, props.pipelineState?.running ? "整理中..." : "整理当前文章", () => {
-    void lockButton(runButton, props.onRunPipeline);
-  }, true);
-  if (props.pipelineState?.running) {
-    runButton.disabled = true;
-    setStyles(runButton, {
-      cursor: "default",
-      opacity: "0.72"
-    });
-  }
-}
-
-function renderMoveCard(content: HTMLElement, props: ClippingViewProps): void {
-  const move = section(content, "kf-move");
-  cardHeader(move, "folder-input", "分类与移动", (header) => {
-    text(header, "用户确认", "kf-pill");
-  });
-  const categoryControl = row(move);
-  setStyles(categoryControl, {
-    justifyContent: "space-between",
-    gap: "12px"
-  });
-  text(categoryControl, "移动到", "kf-muted");
-  const select = categoryControl.createEl("select");
-  setStyles(select, {
-    backgroundColor: "var(--background-primary)",
-    border: "1px solid color-mix(in srgb, var(--interactive-accent) 32%, var(--background-modifier-border))",
-    borderRadius: "7px",
-    color: "var(--text-normal)",
-    flex: "0 0 150px",
-    fontSize: "13px",
-    minWidth: "0",
-    padding: "5px 8px"
-  });
-  for (const category of ARTICLE_CATEGORIES) {
-    select.createEl("option", { text: category, value: category });
-  }
-  select.value = props.selectedCategory;
-  select.addEventListener("change", () => props.onSelectCategory(select.value));
-  const moveActions = row(move, "kf-actions");
-  applyActionLayout(moveActions);
-  button(moveActions, "移动到分类", () => void props.onMoveCategory(select.value), true);
-}
-
-function renderPipelineProgress(parent: HTMLElement, state: PipelineUiState): void {
-  const list = parent.createDiv({ cls: "kf-pipeline-progress" });
-  setStyles(list, {
-    display: "flex",
-    flexDirection: "column",
-    gap: "7px"
-  });
-
-  for (const step of CLIPPING_PIPELINE_STEPS) {
-    const done = state.completed.includes(step);
-    const skipped = state.skipped.includes(step);
-    const active = state.currentStep === step;
-    const failed = state.failedStep === step;
-    const item = row(list, "kf-pipeline-step");
-    setStyles(item, {
-      justifyContent: "space-between",
-      minHeight: "24px"
-    });
-    const left = row(item);
-    setStyles(left, { gap: "7px", minWidth: "0" });
-    const icon = left.createSpan();
-    setIcon(icon, failed ? "circle-x" : done ? "check" : skipped ? "minus" : active ? "loader-2" : "circle");
-    setStyles(icon, {
-      color: failed
-        ? "var(--text-error)"
-        : done || active
-          ? "var(--interactive-accent)"
-          : "var(--text-faint)",
-      display: "inline-flex",
-      flex: "0 0 auto"
-    });
-    text(left, step, "kf-step");
-    const info = state.stepInfo[step];
-    if (info) {
-      const infoIcon = left.createSpan({
-        cls: "kf-pipeline-step-info",
-        attr: { "aria-label": info }
-      });
-      setIcon(infoIcon, "info");
-      setStyles(infoIcon, {
-        color: "var(--text-muted)",
-        cursor: "help",
-        display: "inline-flex",
-        flex: "0 0 auto"
-      });
-      const svg = infoIcon.querySelector<SVGSVGElement>("svg");
-      if (svg) Object.assign(svg.style, { height: "13px", width: "13px" });
+  if (running) {
+    organize.disabled = true;
+    setStyles(organize, { color: "var(--interactive-accent)", cursor: "default", opacity: "1" });
+    const icon = organize.querySelector("svg");
+    if (icon) {
+      icon.style.transformBox = "fill-box";
+      icon.style.transformOrigin = "center";
+      icon.animate(
+        [{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }],
+        { duration: 900, iterations: Infinity }
+      );
     }
-    const status = item.createDiv({
-      text: failed ? "失败" : done ? "完成" : skipped ? "跳过" : active ? "进行中" : "等待"
-    });
-    setStyles(status, {
-      color: failed
-        ? "var(--text-error)"
-        : done || active
-          ? "var(--text-accent)"
-          : "var(--text-faint)",
-      flex: "0 0 auto",
-      fontSize: "12px",
-      fontWeight: active ? "600" : "500",
-      whiteSpace: "nowrap"
+  } else if (error) {
+    setStyles(organize, { color: "var(--text-error)" });
+  } else if (processed) {
+    setStyles(organize, {
+      backgroundColor: "var(--interactive-accent)",
+      borderColor: "var(--interactive-accent)",
+      color: "var(--text-on-accent)"
     });
   }
+}
 
-  if (state.error) {
-    const errorBox = parent.createDiv({ cls: "kf-pipeline-error" });
-    setStyles(errorBox, {
-      backgroundColor: "color-mix(in srgb, var(--text-error) 8%, var(--background-primary))",
-      border: "1px solid color-mix(in srgb, var(--text-error) 28%, var(--background-modifier-border))",
-      borderRadius: "8px",
+function renderMoveButton(parent: HTMLElement, props: ClippingViewProps): void {
+  const move = headerIconButton(parent, "移动到分类", "folder-input", () => {
+    const existing = parent.querySelector<HTMLElement>(".kf-move-menu");
+    if (existing) {
+      existing.remove();
+      return;
+    }
+    const menu = parent.createDiv({ cls: "kf-move-menu" });
+    setStyles(menu, {
+      backgroundColor: "var(--background-primary)",
+      border: "1px solid color-mix(in srgb, var(--interactive-accent) 28%, var(--background-modifier-border))",
+      borderRadius: "10px",
+      boxShadow: "0 8px 24px color-mix(in srgb, var(--background-modifier-box-shadow) 35%, transparent)",
       display: "flex",
       flexDirection: "column",
-      gap: "6px",
-      padding: "8px 9px"
+      maxHeight: "280px",
+      overflowY: "auto",
+      padding: "4px",
+      position: "absolute",
+      right: "0",
+      top: "calc(100% + 6px)",
+      width: "168px",
+      zIndex: "20"
     });
-    const title = text(errorBox, `失败：${state.failedStep ?? "未知步骤"}`, "kf-muted");
-    setStyles(title, {
-      color: "var(--text-error)",
-      fontSize: "12px",
-      fontWeight: "600"
-    });
-    const message = text(errorBox, compactErrorMessage(state.error), "kf-muted");
-    setStyles(message, {
-      color: "var(--text-error)",
-      fontSize: "12px",
-      lineHeight: "1.35"
-    });
-    const actions = row(errorBox);
-    applyActionLayout(actions);
-    const copy = button(actions, "复制完整错误", () => navigator.clipboard.writeText(`步骤：${state.failedStep ?? "未知步骤"}\n${state.error}`));
-    setStyles(copy, {
-      flex: "0 0 auto",
-      fontSize: "12px",
-      minHeight: "28px",
-      padding: "5px 9px"
-    });
-  }
+    const suggested = ARTICLE_CATEGORIES.find((category) => category === props.suggestedCategoryLabel);
+    const ordered = suggested ? [suggested, ...ARTICLE_CATEGORIES.filter((category) => category !== suggested)] : [...ARTICLE_CATEGORIES];
+    for (const category of ordered) {
+      const current = category === props.currentCategory;
+      const item = menu.createEl("button", { cls: "kf-move-option" });
+      setStyles(item, {
+        alignItems: "center",
+        backgroundColor: "transparent",
+        border: "0",
+        borderRadius: "7px",
+        color: "var(--text-normal)",
+        cursor: current ? "default" : "pointer",
+        display: "flex",
+        fontSize: "13px",
+        gap: "8px",
+        justifyContent: "space-between",
+        minHeight: "30px",
+        padding: "4px 8px",
+        textAlign: "left"
+      });
+      item.createSpan({ text: category });
+      const hint = current ? "当前" : category === suggested ? "建议" : "";
+      if (hint) {
+        setStyles(item.createSpan({ text: hint }), {
+          color: "var(--text-muted)",
+          flex: "0 0 auto",
+          fontSize: "11px"
+        });
+      }
+      item.addEventListener("click", () => {
+        menu.remove();
+        if (!current) void props.onMoveCategory(category);
+      });
+    }
+    const close = (event: PointerEvent) => {
+      const target = event.target;
+      if (!menu.isConnected || (target instanceof Node && (menu.contains(target) || move.contains(target)))) {
+        if (!menu.isConnected) document.removeEventListener("pointerdown", close, true);
+        return;
+      }
+      menu.remove();
+      document.removeEventListener("pointerdown", close, true);
+    };
+    document.addEventListener("pointerdown", close, true);
+  });
 }
 
-function applyStatusPill(el: HTMLElement): void {
-  setStyles(el, {
-    border: "1px solid color-mix(in srgb, var(--interactive-accent) 30%, var(--background-modifier-border))",
-    borderRadius: "7px",
-    color: "var(--text-accent)",
-    flex: "0 0 auto",
-    fontSize: "12px",
-    fontWeight: "600",
-    lineHeight: "1.2",
-    maxWidth: "70px",
-    padding: "5px 8px",
-    textAlign: "center",
-    whiteSpace: "nowrap"
+function headerIconButton(parent: HTMLElement, label: string, icon: string, onClick: () => void): HTMLButtonElement {
+  const button = parent.createEl("button", { cls: "kf-icon-button", attr: { "aria-label": label } });
+  setStyles(button, {
+    alignItems: "center",
+    backgroundColor: "var(--background-primary)",
+    border: "1px solid color-mix(in srgb, var(--interactive-accent) 28%, var(--background-modifier-border))",
+    borderRadius: "8px",
+    color: "var(--interactive-accent)",
+    cursor: "pointer",
+    display: "inline-flex",
+    height: "28px",
+    justifyContent: "center",
+    padding: "0",
+    width: "28px"
   });
+  setIcon(button, icon);
+  attachPressFeedback(button);
+  button.addEventListener("click", onClick);
+  return button;
 }
 
 function unborderedIconButton(parent: HTMLElement, label: string, icon: string, onClick: () => void): HTMLButtonElement {
@@ -405,6 +328,22 @@ async function lockButton(button: HTMLButtonElement, action: () => Promise<void>
       });
     }
   }
+}
+
+function renderPendingSummary(parent: HTMLElement, sourceLabel: string): void {
+  const line = text(parent, `正在根据当前 ${sourceLabel} 生成摘要`, "kf-muted");
+  const dots = line.createSpan();
+  setStyles(dots, { display: "inline-block", textAlign: "left", width: "1.4em" });
+  let count = 0;
+  const timer = window.setInterval(() => {
+    if (!line.isConnected) {
+      window.clearInterval(timer);
+      return;
+    }
+    count = count % 3 + 1;
+    dots.setText(".".repeat(count));
+  }, 420);
+  dots.setText(".");
 }
 
 function compactErrorMessage(error: string): string {

@@ -3,6 +3,7 @@ import type KnowFlowPlugin from "./main";
 import { withTimeout } from "./services/ai/ai-transport";
 import { EmbeddingTransport } from "./services/ai/embedding-transport";
 import type { AiModelConfig, AiRuntime, KnowFlowSettings } from "./types";
+import { DEEPSEEK_SEARCH_SECRET_ID, resolveDeepSeekSearchKey } from "./services/search/public-evidence";
 
 type ModelConfigKey = "summaryModel" | "knowledgeMapModel" | "pipelineModel" | "chatModel" | "quizModel" | "embeddingModel";
 type SettingsTabKey = "basic" | "ai-models" | "pipeline" | "learning" | "data";
@@ -187,13 +188,20 @@ export class KnowFlowSettingTab extends PluginSettingTab {
 
   private displayAiModels(containerEl: HTMLElement): void {
     const ai = this.createGroup(containerEl, "AI 模型", "", true);
-
     this.createModelEntry(ai, "Summary model", "AI Summary: generates article summary, reading value and classification.", "summaryModel");
     this.createModelEntry(ai, "Knowledge Map model", "Generates Mermaid maps and structured knowledge points for an article.", "knowledgeMapModel");
     this.createModelEntry(ai, "Pipeline model", "Clipping Pipeline: heading detection, code block recognition and language classification.", "pipelineModel");
     this.createModelEntry(ai, "Chat model", "Used by the sidebar chat composer.", "chatModel");
     this.createModelEntry(ai, "Quiz model", "Generates Markdown quiz questions, including targeted knowledge-point questions.", "quizModel");
     this.createModelEntry(ai, "Embedding model", "Builds the local Relevant Notes and Vault Search index.", "embeddingModel");
+
+    const secrets = this.app.secretStorage;
+    const separateKey = secrets?.getSecret(DEEPSEEK_SEARCH_SECRET_ID)?.trim();
+    const status = separateKey ? "Dedicated API key"
+      : resolveDeepSeekSearchKey(this.plugin.settings, secrets) ? "Using DeepSeek model key" : "Not configured";
+    this.createConfiguredEntry(ai, "DeepSeek Search", "Finds public sources for article freshness checks.", status,
+      () => new DeepSeekSearchConfigModal(this.app, () => this.display()).open()
+    );
   }
 
   private displayPipeline(containerEl: HTMLElement): void {
@@ -213,7 +221,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
 
     new Setting(pipeline)
       .setName("Translate English clippings")
-      .setDesc("When an article is predominantly English, insert a Chinese translation directly below each English prose paragraph. Code, Callouts and structured Markdown are skipped.")
+      .setDesc("Translate prose only when the original article is clearly English throughout. Chinese, mixed-language and uncertain articles are skipped. Code, standalone links, metadata and generated content are excluded; translations are appended inline.")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.translateEnglishClippings)
@@ -286,15 +294,15 @@ export class KnowFlowSettingTab extends PluginSettingTab {
     const semantic = this.createGroup(
       containerEl,
       "Semantic index",
-      stats.chunks > 0 ? `${stats.files} files · ${stats.chunks} chunks` : "not built",
+      stats.chunks > 0 ? `${stats.files} indexed summaries` : "no indexed summaries",
       true
     );
     semantic.createEl("p", {
       text: stats.chunks === 0
-        ? "Configure an Embedding model, then build the index for Relevant Notes and Chat Vault Search."
+        ? "Configure an Embedding model and build the AI summary index for Relevant Notes and Vault Search."
         : stats.compatible
           ? `Model: ${stats.model || "unknown"} · Updated: ${stats.updatedAt || "--"}`
-          : "The saved index was built with a different embedding configuration. Rebuild it before searching.",
+          : "Rebuild the saved index to use the current summary index format and embedding configuration.",
       cls: "setting-item-description"
     });
     if (stats.degraded) {
@@ -325,7 +333,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
         }));
     new Setting(semantic)
       .setName(stats.chunks > 0 ? "Rebuild index" : "Build index")
-      .setDesc(`Indexes Markdown files under ${this.plugin.settings.articlesFolder}. Cloud runtimes send article chunks to the configured embedding provider.`)
+      .setDesc(`Indexes existing AI summaries under ${this.plugin.settings.articlesFolder}. Cloud runtimes send those summaries to the configured embedding provider.`)
       .addButton((button) => button
         .setButtonText(stats.chunks > 0 ? "Rebuild" : "Build")
         .setCta()
@@ -333,7 +341,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
           button.setDisabled(true).setButtonText("Building...");
           try {
             const next = await this.plugin.semanticIndex.rebuild();
-            new Notice(`KnowFlow indexed ${next.files} files and ${next.chunks} chunks.`);
+            new Notice(`KnowFlow indexed ${next.files} AI summaries.`);
             this.plugin.refreshView();
             this.display();
           } catch (error) {
@@ -357,7 +365,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
 
     const privacy = this.createGroup(containerEl, "Data & Privacy", "local settings", true);
     privacy.createEl("p", {
-      text: "KnowFlow stores settings, learning state and the derived semantic index locally. Chat requests send the current note and selected context; building a cloud embedding index sends article chunks to that configured provider.",
+      text: "KnowFlow stores settings, learning state and the derived semantic index locally. Chat requests send the current note and selected context; cloud embedding sends AI summaries to the configured provider.",
       cls: "setting-item-description"
     });
     const apiKeyWarning = privacy.createEl("p", {
@@ -512,11 +520,21 @@ export class KnowFlowSettingTab extends PluginSettingTab {
 
   private createModelEntry(containerEl: HTMLElement, name: string, desc: string, key: ModelConfigKey): void {
     const config = this.plugin.settings[key];
+    this.createConfiguredEntry(containerEl, name, desc, `${runtimeLabel(config.runtime)} / ${config.model}`,
+      () => new ModelConfigModal(this.app, this.plugin, key, name, () => this.display()).open()
+    );
+  }
+
+  private createConfiguredEntry(
+    containerEl: HTMLElement,
+    name: string,
+    desc: string,
+    status: string,
+    configure: () => void
+  ): void {
     const description = document.createDocumentFragment();
     const purpose = description.createSpan({ text: desc });
-    const current = description.createSpan({
-      text: `Current: ${runtimeLabel(config.runtime)} / ${config.model}`
-    });
+    const current = description.createSpan({ text: `Current: ${status}` });
     Object.assign(purpose.style, { display: "block" });
     Object.assign(current.style, {
       display: "block",
@@ -526,11 +544,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName(name)
       .setDesc(description)
-      .addButton((button) =>
-        button
-          .setButtonText("Configure")
-          .onClick(() => new ModelConfigModal(this.app, this.plugin, key, name, () => this.display()).open())
-      );
+      .addButton((button) => button.setButtonText("Configure").onClick(configure));
   }
 
   private async validateBasicPaths(): Promise<void> {
@@ -638,6 +652,47 @@ async function testModelConnection(config: AiModelConfig): Promise<void> {
     if (!found) {
       new Notice(`Connection succeeded, but model "${config.model}" was not found in /models.`, 8000);
     }
+  }
+}
+
+class DeepSeekSearchConfigModal extends Modal {
+  constructor(app: App, private onSave: () => void) {
+    super(app);
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    const secrets = this.app.secretStorage;
+    const originalKey = secrets?.getSecret(DEEPSEEK_SEARCH_SECRET_ID) ?? "";
+    let apiKey = originalKey;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "DeepSeek Search" });
+    contentEl.createEl("p", {
+      text: "时效检查使用 DeepSeek 搜索公开资料。",
+      cls: "setting-item-description"
+    });
+    new Setting(contentEl)
+      .setName("API Key")
+      .setDesc(secrets
+        ? "可选。留空时复用已配置的官方 DeepSeek 模型密钥。独立密钥保存在 Obsidian Secret Storage。"
+        : "独立密钥需要 Obsidian 1.11.4 或更新版本。也可复用已配置的官方 DeepSeek 模型密钥。")
+      .addText((input) => {
+        input.inputEl.type = "password";
+        input.setPlaceholder("sk-...")
+          .setValue(apiKey)
+          .setDisabled(!secrets)
+          .onChange((value) => { apiKey = value.trim(); });
+      });
+    new Setting(contentEl)
+      .addButton((button) => button.setButtonText("Save").setCta().onClick(() => {
+        if (apiKey !== originalKey) secrets?.setSecret(DEEPSEEK_SEARCH_SECRET_ID, apiKey);
+        this.close();
+        this.onSave();
+      }));
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
   }
 }
 

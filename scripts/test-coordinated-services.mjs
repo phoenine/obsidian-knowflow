@@ -10,6 +10,7 @@ await esbuild.build({
   bundle: true,
   entryPoints: [
     "src/services/clipping/clipping-pipeline.ts",
+    "src/services/clipping/repair-validator.ts",
     "src/services/learning/quiz-note-service.ts"
   ],
   format: "esm",
@@ -23,8 +24,10 @@ await esbuild.build({
         contents: [
           "export class Notice {}",
           "export class TFile { static [Symbol.hasInstance](value) { return Boolean(value && typeof value.path === 'string' && typeof value.basename === 'string'); } }",
+          "export class TFolder {}",
+          "export const parseYaml = (text) => { if (text === 'invalid: [') throw new Error('invalid YAML'); return {}; };",
           "export const normalizePath = (value) => value.replace(/\\\\/g, '/');",
-          "export const requestUrl = async () => ({ status: 500, text: '' });"
+          "export const requestUrl = async (request) => globalThis.knowflowRequest?.(request) ?? ({ status: 500, text: '' });"
         ].join("\n"),
         loader: "js"
       }));
@@ -33,7 +36,296 @@ await esbuild.build({
 });
 
 const { ClippingPipeline } = await import(pathToFileURL(join(tempDir, "clipping", "clipping-pipeline.js")).href);
+const { inspectClippingOutput } = await import(pathToFileURL(join(tempDir, "clipping", "repair-validator.js")).href);
 const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning", "quiz-note-service.js")).href);
+
+{
+  const previousImage = globalThis.Image;
+  const previousWindow = globalThis.window;
+  const downloads = [];
+  const healthy = "https://example.com/healthy.png";
+  const broken = "https://mmbiz.qpic.cn/mmbiz_png/abcdef/640?wx_fmt=png";
+  const body = `![健康图片](${healthy})\n\n[![失效图片](${broken})](https://mp.weixin.qq.com/s/source)`;
+  let written;
+  globalThis.Image = class {
+    naturalWidth = 800;
+    naturalHeight = 600;
+    set src(url) { queueMicrotask(() => url === healthy || url.startsWith("blob:") ? this.onload() : this.onerror()); }
+  };
+  globalThis.window = { setTimeout, clearTimeout, moment: () => ({ format: () => "2026-10-22" }) };
+  globalThis.knowflowRequest = async ({ url, headers }) => {
+    downloads.push([url, headers?.Referer]);
+    return { status: 200, headers: { "content-type": "image/png" }, arrayBuffer: new Uint8Array([137, 80, 78, 71]).buffer };
+  };
+  try {
+    const app = {
+      metadataCache: { getFirstLinkpathDest: () => ({ path: "Attachments/640.png" }) },
+      vault: {
+        read: async () => body,
+        getAbstractFileByPath: () => null,
+        adapter: { exists: async () => false },
+        createBinary: async (path) => ({ path }),
+        delete: async () => {},
+        process: async (_file, transform) => { written = transform(body); }
+      },
+      fileManager: {
+        getAvailablePathForAttachment: async (name) => `Attachments/${name}`,
+        generateMarkdownLink: (file) => `[[${file.path}]]`
+      }
+    };
+    const pipeline = new ClippingPipeline(app, { templatePath: "" }, {
+      recordPipelineSuccess: async () => {},
+      setPipelineStatus: async (status) => assert.fail(status.error)
+    }, {}, { runExclusive: async (_path, operation) => operation() });
+    await pipeline.process({ path: "Clippings/Images.md", basename: "Images" });
+    assert.deepEqual(downloads, [[broken, "https://mp.weixin.qq.com/"]]);
+    assert.ok(written.includes(`![健康图片](${healthy})`));
+    assert.ok(written.includes("[![失效图片](Attachments/640.png)](https://mp.weixin.qq.com/s/source)"));
+  } finally {
+    globalThis.Image = previousImage;
+    globalThis.window = previousWindow;
+    delete globalThis.knowflowRequest;
+  }
+}
+
+{
+  const app = {
+    metadataCache: {
+      getFirstLinkpathDest: (link, source) =>
+        source === "Clippings/案例.md" && ["assets/图 1.png", "100% 图.png"].includes(link) ? { path: link } : null
+    }
+  };
+  const body = [
+    "![图一](assets/图%201.png)", "![[100% 图.png|300]]", "![未解析的图](missing.png)",
+    "", "| A | B |", "| --- |", "", "```text", "![[围栏中的示例.png]]", "```"
+  ].join("\n");
+  const result = `---\n状态: true\n---\n\n${body}`;
+  assert.deepEqual(inspectClippingOutput(app, "Clippings/案例.md", body, result), [
+    "1 处表格表头和分隔行列数不一致", "1 个本地图片或嵌入目标未解析"
+  ]);
+  assert.throws(() => inspectClippingOutput(app, "Clippings/案例.md", body, result.replace("![[100% 图.png|300]]", "")),
+    /丢失或修改/);
+  assert.throws(() => inspectClippingOutput(app, "Clippings/案例.md", body, result.replace("状态: true", "invalid: [")),
+    /无法解析为 YAML/);
+}
+
+// Language detection decides translation locally. A failed formatting batch
+// keeps the original fragment and still writes the rest of the note.
+{
+  const english = "Distributed systems are difficult because independent components can fail in many different ways.";
+  const link = "[esp32-iphone-agent](https://github.com/onehumanbeing/esp32-iphone-agent)";
+  const previousWindow = globalThis.window;
+  globalThis.window = { moment: () => ({ format: () => "2026-10-22" }) };
+  try {
+    for (const { body, enabled, reason } of [
+      { body: `这篇中文文章介绍 ESP32 开发板，以及如何选择入门项目。\n\n- ${link}`, enabled: true, reason: "正文包含中文" },
+      { body: `${english}\n\n这一段是原文自带的中文说明。`, enabled: true, reason: "正文包含中文" },
+      { body: link, enabled: true, reason: "无可翻译正文" },
+      { body: "Voici un paragraphe français qui explique comment utiliser cette bibliothèque dans une application.", enabled: true, reason: "非英文或混合语言正文" },
+      { body: english, enabled: false, reason: "未开启英文翻译" },
+      { body: `> [!summary]- AI 摘要\n> 中文摘要不改变原文语言。\n\n${english}\n\n- ${link}`, enabled: true }
+    ]) {
+      let translationCalls = 0;
+      let written;
+      let success = false;
+      const progress = [];
+      const app = { vault: {
+        read: async () => body,
+        getAbstractFileByPath: () => null,
+        process: async (_file, transform) => { written = transform(body); },
+        adapter: { exists: async () => false }
+      } };
+      const ai = {
+        translateEnglishParagraphs: async (_title, candidates) => {
+          translationCalls += 1;
+          assert.equal(candidates.length, 1, "standalone project links must not be translated");
+          return candidates.map((candidate) => ({ id: candidate.id, translation: "分布式系统的独立组件可能以多种方式发生故障。" }));
+        }
+      };
+      const pipeline = new ClippingPipeline(app, { translateEnglishClippings: enabled, templatePath: "" }, {
+        recordPipelineSuccess: async () => { success = true; },
+        setPipelineStatus: async (status) => { assert.fail(status.error); }
+      }, ai, { runExclusive: async (_path, operation) => operation() });
+      await pipeline.process({ path: "Clippings/Test.md", basename: "Test" }, (...event) => progress.push(event));
+      assert.equal(success, true);
+      assert.ok(written);
+      assert.equal(translationCalls, reason ? 0 : 1);
+      assert.ok(progress.some(([step, status, info]) => step === "英文翻译"
+        && (reason ? status === "skipped" && info === reason : status === "completed")));
+      if (body.includes(link)) assert.ok(written.includes(link));
+    }
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+}
+
+{
+  const body = "这篇笔记已经有足够长的正文，用来通过最短长度检查。\n\n记忆架构\n\n后面还有一段说明文字，避免整篇因为一次空回复而退回。";
+  let written;
+  let success = false;
+  const progress = [];
+  const previousWindow = globalThis.window;
+  globalThis.window = { moment: () => ({ format: () => "2026-10-22" }) };
+  try {
+    const app = { vault: {
+      read: async () => body,
+      getAbstractFileByPath: () => null,
+      process: async (_file, transform) => { written = transform(body); },
+      adapter: { exists: async () => false }
+    } };
+    const ai = {
+      confirmFormatting: async () => { throw new Error("AI response did not contain message content."); }
+    };
+    const pipeline = new ClippingPipeline(app, { templatePath: "", translateEnglishClippings: false }, {
+      recordPipelineSuccess: async () => { success = true; },
+      setPipelineStatus: async (status) => { assert.fail(status.error); }
+    }, ai, { runExclusive: async (_path, operation) => operation() });
+    await pipeline.process({ path: "Clippings/Memory.md", basename: "Memory" }, (...event) => progress.push(event));
+    assert.equal(success, true);
+    assert.ok(written.includes("记忆架构"));
+    const format = progress.find(([step, status]) => step === "文章样式梳理" && status === "completed");
+    assert.ok(format);
+    assert.ok(!String(format[2] ?? "").includes("未确认"));
+    assert.ok(progress.every(([, , info]) => !String(info ?? "").includes("未确认")));
+    assert.ok(progress.some(([step, status]) => step === "补全 Frontmatter" && status === "completed"));
+    assert.ok(progress.some(([step, status, info]) => step === "格式化代码块" && status === "skipped" && info === "没有代码块"));
+    assert.ok(progress.some(([step, status, info]) => step === "整理图片" && status === "skipped" && info === "图片无需整理"));
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+}
+
+{
+  const titles = ["甲标题", "乙标题", "丙标题", "丁标题", "戊标题"];
+  const body = [
+    "这篇笔记已经有足够长的正文，用来通过最短长度检查。",
+    ...titles.flatMap((title) => ["", title, "", `${title}后面是一段说明，避免这行被收成标题。`])
+  ].join("\n");
+  const previousWindow = globalThis.window;
+  globalThis.window = { moment: () => ({ format: () => "2026-10-22" }) };
+  let inFlight = 0;
+  let maxInFlight = 0;
+  try {
+    let written = "";
+    const app = { vault: {
+      read: async () => body,
+      getAbstractFileByPath: () => null,
+      process: async (_file, transform) => { written = transform(body); },
+      adapter: { exists: async () => false }
+    } };
+    const ai = {
+      confirmFormatting: async (batch) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        inFlight -= 1;
+        return batch.map((candidate) => ({ id: candidate.id, action: "heading", level: 2 }));
+      }
+    };
+    const pipeline = new ClippingPipeline(app, { templatePath: "", translateEnglishClippings: false }, {
+      recordPipelineSuccess: async () => {},
+      setPipelineStatus: async (status) => { assert.fail(status.error); }
+    }, ai, { runExclusive: async (_path, operation) => operation() });
+    await pipeline.process({ path: "Clippings/Batches.md", basename: "Batches" });
+    assert.ok(maxInFlight > 1, "formatting batches should run together");
+    for (const title of titles) assert.ok(written.includes(`## ${title}`), title);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+}
+
+{
+  const body = "这篇笔记已经有足够长的正文，用来通过最短长度检查。\n\n记忆架构说明了事件日志和派生索引如何分工。";
+  const previousWindow = globalThis.window;
+  globalThis.window = { moment: () => ({ format: () => "2026-10-22" }) };
+  try {
+    let written = "";
+    const progress = [];
+    const app = { vault: {
+      read: async () => body,
+      getAbstractFileByPath: () => null,
+      process: async (_file, transform) => { written = transform(body); },
+      adapter: { exists: async () => false }
+    } };
+    let propertyCalls = 0;
+    const pipeline = new ClippingPipeline(app, { templatePath: "", translateEnglishClippings: false }, {
+      recordPipelineSuccess: async () => {},
+      setPipelineStatus: async (status) => { assert.fail(status.error); }
+    }, {
+      proposeNoteProperties: async () => {
+        propertyCalls += 1;
+        return {
+          description: "说明事件日志和派生索引的分工。",
+          readingValue: 4,
+          category: "人工智能",
+          tags: ["agent-memory"]
+        };
+      }
+    }, { runExclusive: async (_path, operation) => operation() });
+    await pipeline.process({ path: "Clippings/Memory.md", basename: "Memory" }, (...event) => progress.push(event));
+    assert.match(written, /简要描述: "说明事件日志和派生索引的分工。"/);
+    assert.match(written, /阅读价值: 4/);
+    assert.match(written, /分类: 人工智能/);
+    assert.match(written, /  - agent-memory/);
+    assert.equal(propertyCalls, 1);
+    assert.ok(progress.some(([step, status, info]) => step === "补全 Frontmatter" && status === "completed" && String(info).includes("已更新简要描述、阅读价值、分类、标签")));
+
+    const existing = [
+      "---",
+      "简要描述: \"已有描述\"",
+      "阅读价值: 2",
+      "分类: 知识积累",
+      "tags:",
+      "  - kept",
+      "---",
+      body
+    ].join("\n");
+    const keeping = { vault: {
+      read: async () => existing,
+      getAbstractFileByPath: () => null,
+      process: async (_file, transform) => { written = transform(existing); },
+      adapter: { exists: async () => false }
+    } };
+    propertyCalls = 0;
+    await new ClippingPipeline(keeping, { templatePath: "", translateEnglishClippings: false }, {
+      recordPipelineSuccess: async () => {},
+      setPipelineStatus: async (status) => { assert.fail(status.error); }
+    }, {
+      proposeNoteProperties: async () => {
+        propertyCalls += 1;
+        return { description: "说明事件日志和派生索引的分工。", readingValue: 5, category: "人工智能", tags: ["agent-memory"] };
+      }
+    }, { runExclusive: async (_path, operation) => operation() }).process(
+      { path: "Clippings/Memory.md", basename: "Memory" }
+    );
+    assert.equal(propertyCalls, 1);
+    assert.match(written, /简要描述: "说明事件日志和派生索引的分工。"/);
+    assert.doesNotMatch(written, /已有描述/);
+    assert.match(written, /阅读价值: 5/);
+    assert.match(written, /分类: 人工智能/);
+    assert.match(written, /  - agent-memory/);
+    assert.doesNotMatch(written, /知识积累/);
+    assert.doesNotMatch(written, /  - kept/);
+
+    await new ClippingPipeline(keeping, { templatePath: "", translateEnglishClippings: false }, {
+      recordPipelineSuccess: async () => {},
+      setPipelineStatus: async (status) => { assert.fail(status.error); }
+    }, {
+      proposeNoteProperties: async () => ({})
+    }, { runExclusive: async (_path, operation) => operation() }).process(
+      { path: "Clippings/Memory.md", basename: "Memory" }
+    );
+    assert.match(written, /简要描述:\n/);
+    assert.doesNotMatch(written, /已有描述/);
+    assert.match(written, /阅读价值: 2/);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+}
 
 // Moving categories must validate the destination first, then rename before
 // changing frontmatter so a failed rename cannot alter a note left behind.
@@ -159,6 +451,44 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
   assert.equal(questions.length, 1);
   assert.equal(questions[0].articlePath, source.path);
   assert.equal(questions[0].entries[0].question.question, "哪个选项正确？");
+}
+
+{
+  const listFence = ["    ```", "keep\tlist\ttab", "    ```"].join("\n");
+  const calloutFence = ["> ```", "> keep\tcallout\ttab", "> ```"].join("\n");
+  const body = [
+    "这篇笔记已经有足够长的正文，用来通过最短长度检查。",
+    "",
+    "1. 先看嵌套代码。",
+    "",
+    listFence,
+    "",
+    "> [!note] 说明",
+    calloutFence,
+    "",
+    "后面还有一段说明文字，避免整篇因为一次空回复而退回。"
+  ].join("\n");
+  const previousWindow = globalThis.window;
+  globalThis.window = { moment: () => ({ format: () => "2026-10-22" }) };
+  try {
+    let written = "";
+    const app = { vault: {
+      read: async () => body,
+      getAbstractFileByPath: () => null,
+      process: async (_file, transform) => { written = transform(body); },
+      adapter: { exists: async () => false }
+    } };
+    const pipeline = new ClippingPipeline(app, { templatePath: "", translateEnglishClippings: false }, {
+      recordPipelineSuccess: async () => {},
+      setPipelineStatus: async (status) => { assert.fail(status.error); }
+    }, {}, { runExclusive: async (_path, operation) => operation() });
+    await pipeline.process({ path: "Clippings/Fences.md", basename: "Fences" });
+    assert.ok(written.includes(listFence), "an indented list fence must keep its tabs");
+    assert.ok(written.includes(calloutFence), "a callout fence must keep its tabs");
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
 }
 
 await rm(tempDir, { recursive: true, force: true });

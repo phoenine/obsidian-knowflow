@@ -1,0 +1,15 @@
+---
+name: clipping-update
+description: 恢复网页剪藏到 Obsidian 时丢失的阅读结构，保留原文并补全笔记属性。
+---
+
+# 整理剪藏
+
+- 让读者能通过大纲找到章节、沿正文顺畅阅读、直接比较同类信息并复制完整示例。先识别网页剪藏时丢失的章节、段落、列表、卡片或表格结构，再使用 Obsidian 原生 Markdown 恢复阅读关系。只整理当前文章，保留原文内容、顺序和引用。
+- 参照 `obsidian-markdown` 和 `obsidian-render-integrity`。清理明确的网页噪声、复制水印和排版痕迹。格式化范围仅限已有内容及笔记属性。
+- 插件先完成已经能对上原文的检查，再把拿不准的标题、代码和剪藏片段分批交给你。每批只含这些候选。对每一条返回确认或 keep，并使用候选里的原文。某一批没有可用结果时，该批保留原文，其他批次继续。代码判断参照 [提示词和代码](references/prompts-and-code.md)，标题判断参照 [标题与图注](references/headings-and-captions.md)。边界明确的提示词由 [提示词围栏脚本](scripts/prompt-blocks.ts) 处理。
+- 启用英文翻译时，程序按正文语言选出英文段落，再由 `article-translation` Skill 翻译。保留原文和 Markdown 结构。
+- 整理图片时，用 [图片修复脚本](scripts/repair-images.ts) 处理已引用但失效的图片。按 [图片恢复边界](references/image-recovery.md) 先修复本地路径，再尝试已有直链，必要时根据 Frontmatter 的原文网址和图注找回原图。成功保存附件后再更新嵌入目标。
+- 只恢复有明确证据的排版。代码、字符串、事实、数字和原文意思保持原样。不要根据猜测补远端正文、缺图或公式。
+- 只对给出的候选返回确认结果。原文位置、输出协议和持久化由程序处理。不确定时保留对应内容。
+- 按配置的 Template 补全缺失的 Frontmatter 属性，保留现有值。简要描述、阅读价值、分类和标签按 [笔记属性](references/note-properties.md) 每次整理重写。这次判断没有给出简要描述时清空该字段；其余三项没有新值时保留原值。失败不影响已经整理好的正文。保存时应用 [写入边界](references/output-checks.md)，只报告具体问题。

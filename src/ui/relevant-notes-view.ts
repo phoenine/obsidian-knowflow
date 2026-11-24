@@ -1,9 +1,9 @@
 import { setIcon } from "obsidian";
 import type { RelatedNote } from "../types";
-import { applyActionLayout, button, cardHeader, row, section, setStyles, text } from "./dom";
+import { applyActionLayout, button, cardHeader, iconButton, row, section, setStyles, text } from "./dom";
 
 export interface RelevantNotesCardProps {
-  notes: RelatedNote[];
+  notes: Array<RelatedNote & { briefDescription: string | null; addedToChat: boolean }>;
   loading: boolean;
   error?: string;
   indexReady: boolean;
@@ -18,28 +18,25 @@ export interface RelevantNotesCardProps {
 /** Renders related-note discovery with explicit index and failure states. */
 export function renderRelevantNotesCard(content: HTMLElement, props: RelevantNotesCardProps): void {
   const card = section(content, "kf-relevant-notes");
+  const indexAction = props.indexReady ? "重建摘要索引" : "建立摘要索引";
   cardHeader(card, "git-fork", "Relevant Notes", (header) => {
-    if (props.indexReady) text(header, `${props.notes.length} 篇`, "kf-pill");
-  });
-
-  if (!props.indexReady) {
-    text(
-      card,
-      props.indexBuilding
-        ? "正在建立语义索引。完成后会自动显示相关文章。"
-        : `尚未建立语义索引。先配置 Embedding model，再为 ${props.indexScope} 建立本地索引。`,
-      "kf-muted"
+    const rebuild = iconButton(
+      header,
+      props.indexBuilding ? `正在${indexAction}` : indexAction,
+      "refresh-cw",
+      () => void props.onBuildIndex()
     );
-    const actions = row(card, "kf-actions");
-    applyActionLayout(actions);
-    const build = button(actions, props.indexBuilding ? "建立中…" : "建立索引", () => {
-      void props.onBuildIndex();
-    }, true);
-    build.disabled = props.indexBuilding;
-    return;
+    setStyles(rebuild, { background: "transparent", border: "0", boxShadow: "none", flex: "0 0 auto" });
+    rebuild.disabled = props.indexBuilding;
+    rebuild.setAttribute("aria-busy", String(props.indexBuilding));
+  });
+  if (props.indexBuilding) {
+    text(card, `正在${indexAction}…`, "kf-muted").setAttribute("role", "status");
+  } else if (!props.indexReady) {
+    text(card, `可用 ${props.indexScope} 中已有的 AI 摘要建立索引。`, "kf-muted");
   }
 
-  if (props.loading) {
+  if (props.loading && props.notes.length === 0) {
     text(card, "正在查找相关文章…", "kf-muted");
     return;
   }
@@ -54,12 +51,14 @@ export function renderRelevantNotesCard(content: HTMLElement, props: RelevantNot
     text(card, "暂未找到相关文章。", "kf-muted");
     return;
   }
-
   const list = card.createDiv({ cls: "kf-relevant-list" });
   setStyles(list, { display: "flex", flexDirection: "column", gap: "6px" });
   for (const note of props.notes) {
     const item = list.createDiv({ cls: "kf-relevant-item" });
     setStyles(item, {
+      backgroundColor: note.addedToChat
+        ? "color-mix(in srgb, var(--interactive-accent) 12%, var(--background-primary))"
+        : "",
       border: "1px solid var(--background-modifier-border)",
       borderRadius: "8px",
       display: "flex",
@@ -69,45 +68,56 @@ export function renderRelevantNotesCard(content: HTMLElement, props: RelevantNot
     });
     const titleRow = row(item);
     setStyles(titleRow, { gap: "6px" });
-    const open = titleRow.createEl("button", { text: note.title, attr: { title: `打开 ${note.path}` } });
+    const open = titleRow.createEl("button", { attr: { title: `打开 ${note.title}` } });
     setStyles(open, {
       background: "transparent",
       border: "0",
+      boxShadow: "none",
       color: "var(--text-normal)",
       cursor: "pointer",
-      flex: "1",
+      display: "flex",
+      flex: "1 1 0",
       fontSize: "13px",
       fontWeight: "600",
-      overflow: "hidden",
+      justifyContent: "flex-start",
+      minWidth: "0",
       padding: "0",
-      textAlign: "left",
+      textAlign: "left"
+    });
+    setStyles(open.createSpan({ text: note.title }), {
+      minWidth: "0",
+      overflow: "hidden",
       textOverflow: "ellipsis",
       whiteSpace: "nowrap"
     });
     open.addEventListener("click", () => props.onOpen(note.path));
-    const add = titleRow.createEl("button", { attr: { "aria-label": "加入 Chat", title: "加入 Chat" } });
-    setIcon(add, "message-circle-plus");
+    const chatLabel = note.addedToChat ? "已加入对话，点击打开" : "加入 Chat";
+    const add = titleRow.createEl("button", { attr: { "aria-label": chatLabel, title: chatLabel } });
+    setIcon(add, note.addedToChat ? "check" : "message-circle-plus");
     setStyles(add, {
       background: "transparent",
       border: "0",
-      color: "var(--text-muted)",
+      color: note.addedToChat ? "var(--text-accent)" : "var(--text-muted)",
       cursor: "pointer",
       display: "inline-flex",
+      flex: "0 0 auto",
       padding: "2px"
     });
     add.addEventListener("click", () => props.onAddToChat(note.path));
-    text(item, note.path, "kf-token-estimate");
-    text(item, note.excerpt, "kf-muted");
-    const reasons = row(item);
-    setStyles(reasons, { flexWrap: "wrap", gap: "5px" });
-    for (const reason of note.reasons) {
-      const chip = reasons.createSpan({ text: reason });
-      setStyles(chip, {
-        backgroundColor: "color-mix(in srgb, var(--interactive-accent) 9%, transparent)",
-        borderRadius: "999px",
-        color: "var(--text-accent)",
-        fontSize: "11px",
-        padding: "2px 7px"
+    if (note.briefDescription) {
+      const description = text(item, note.briefDescription, "kf-muted");
+      description.title = note.briefDescription;
+      setStyles(description, {
+        color: "color-mix(in srgb, var(--text-normal) 68%, var(--background-primary))",
+        display: "-webkit-box",
+        fontSize: "12px",
+        fontWeight: "400",
+        overflow: "hidden",
+        overflowWrap: "anywhere",
+        textAlign: "left",
+        webkitBoxOrient: "vertical",
+        webkitLineClamp: "2",
+        whiteSpace: "normal"
       });
     }
   }

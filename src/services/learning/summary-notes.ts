@@ -1,7 +1,8 @@
 import { splitFrontmatter } from "../clipping/frontmatter-rules";
+import { protectedLineIndices, protectedRanges } from "../clipping/protected-markdown";
 
 // A managed AI summary is identified by its summary type and exact
-// "AI 摘要" title, regardless of where it appears in the article.
+// "AI 摘要" title outside protected Markdown blocks.
 const CALLOUT_TITLE = "> [!summary]- AI 摘要";
 const CALLOUT_TITLE_PATTERN = /^> \[!summary\][+-]? AI 摘要\s*$/;
 
@@ -12,7 +13,7 @@ export interface SummaryText {
 
 /** Renders the collapsed-by-default callout block. */
 export function buildSummaryCallout(text: SummaryText): string {
-  const body = quoteAsCallout(text.summary.trim() || "AI 未返回有效摘要。");
+  const body = quoteAsCallout(alignSummaryOutline(text.summary.trim()) || "AI 未返回有效摘要。");
   const reasonBlock = text.reason.trim() ? [">", `> **推荐理由**：${text.reason.trim()}`] : [];
   return [CALLOUT_TITLE, ...body, ...reasonBlock].join("\n");
 }
@@ -50,9 +51,51 @@ export function parseSummaryCallout(content: string): SummaryText | null {
   const reasonLine = reasonIndex >= 0 ? blockLines[reasonIndex] : "";
 
   return {
-    summary: unquoteCallout(summaryLines),
+    summary: alignSummaryOutline(unquoteCallout(summaryLines)),
     reason: reasonLine.replace(/^>\s*\*\*推荐理由\*\*：/, "").trim()
   };
+}
+
+const RANGE_ITEM = /^(\s*)(\d{1,3})\s*[-–—~～至到]\s*(\d{1,3})[.、．]\s*(.+)$/;
+const ORDERED_ITEM = /^\s*(\d+)[.、．]\s+\S/;
+
+/** Keep merged chapter ranges, but use a real ordered-list marker so they stay aligned. */
+export function alignSummaryOutline(summary: string): string {
+  let lastNumber = 0;
+  let inFence = false;
+  return summary.split("\n").map((line) => {
+    if (/^\s*(?:```|~~~)/.test(line)) {
+      inFence = !inFence;
+      return line;
+    }
+    if (inFence) return line;
+    if (/^#{1,6}\s+/.test(line)) {
+      lastNumber = 0;
+      return line;
+    }
+    const range = RANGE_ITEM.exec(line);
+    if (range) {
+      const start = Number(range[2]);
+      const end = Number(range[3]);
+      if (end >= start) {
+        const marker = lastNumber > 0 ? lastNumber + 1 : start;
+        lastNumber = marker;
+        return `${marker}. ${withChapterRange(range[4].trim(), start, end)}`;
+      }
+    }
+    const ordered = ORDERED_ITEM.exec(line);
+    if (ordered) lastNumber = Number(ordered[1]);
+    return line;
+  }).join("\n");
+}
+
+function withChapterRange(body: string, start: number, end: number): string {
+  const label = `${start}–${end}`;
+  if (body.includes(label) || body.includes(`${start}-${end}`) || body.includes(`${start}~${end}`)) return body;
+  const titled = /^([^：:]{1,40})([：:])(.*)$/.exec(body);
+  if (!titled) return `${label} ${body}`;
+  const rest = titled[3].trim();
+  return `${titled[1]}（${label}）${titled[2]}${rest}`;
 }
 
 /**
@@ -75,7 +118,8 @@ export function findSummaryCalloutEndIndex(content: string): number | null {
  * what ends it, no explicit terminator needed.
  */
 function findCalloutLineRange(lines: string[]): { start: number; end: number } | null {
-  const start = lines.findIndex((line) => CALLOUT_TITLE_PATTERN.test(line));
+  const protectedLines = protectedLineIndices(protectedRanges(lines));
+  const start = lines.findIndex((line, index) => !protectedLines.has(index) && CALLOUT_TITLE_PATTERN.test(line));
   if (start < 0) return null;
   let end = start + 1;
   while (end < lines.length && lines[end].startsWith(">")) {

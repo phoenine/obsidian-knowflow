@@ -1,28 +1,40 @@
-import { Notice, TFile, normalizePath } from "obsidian";
+import { Notice, TFile, normalizePath, parseYaml } from "obsidian";
 import type { App } from "obsidian";
 import type { KnowFlowSettings } from "../../types";
 import type { AiService } from "../ai/ai-service";
+import { protectedRanges } from "./protected-markdown";
 import { removeCodeWatermarkLines } from "./cleanup-rules";
 import {
-  applyFormattingDecisions,
-  cleanHeadingNumberNoise,
+  applyFormattingEdits,
+  batchFormattingCandidates,
+  collectClippedCodeCandidates,
   collectCodeCandidates,
   collectHeadingCandidates,
   normalizeBodyHeadingLevels,
   normalizeOrphanBoldTriplet,
-  preferTextLanguage,
-  stripSequentialLineNumbers,
-  trimCodeFenceBody
+  trimCodeFenceBody,
+  type FormattingCandidate,
+  type FormattingDecision
 } from "./formatting-candidates";
-import { applyArticleFrontmatter, updateFrontmatterCategory } from "./frontmatter-rules";
+import { applyArticleFrontmatter, fillEmptyNoteProperties, splitFrontmatter, updateFrontmatterCategory } from "./frontmatter-rules";
 import { NoteOperationCoordinator } from "../core/note-operation-coordinator";
-import { loadUserSkillFile, loadSkill } from "./repair-skill";
-import { validateMarkdownIntegrity } from "./repair-validator";
+import { SkillStore } from "../core/skill-store";
+import { SkillRunner } from "../core/skill-runner";
+import { formatPromptBlocks, promptFenceStarts } from "../../../skills/clipping-update/scripts/prompt-blocks";
+import { restoreDetachedLists } from "../../../skills/clipping-update/scripts/detached-lists";
+import { repairTableDividers } from "../../../skills/clipping-update/scripts/reading-structure";
+import { prettyJsonBlock, removeClipperFenceSpacing } from "../../../skills/clipping-update/scripts/clipped-code";
+import { planImageRepairs, saveImageRepairs } from "../../../skills/clipping-update/scripts/repair-images";
+import { inspectClippingOutput } from "./repair-validator";
 import { KnowledgeStore } from "../core/store";
 import {
   applyTranslationDecisions,
-  collectTranslationCandidates
+  planEnglishTranslation
 } from "./translation-candidates";
+
+export const CLIPPING_PIPELINE_STEPS = ["文章样式梳理", "格式化代码块", "整理图片", "英文翻译", "补全 Frontmatter"] as const;
+const [formatStep, codeStep, imageStep, translationStep, propertyStep] = CLIPPING_PIPELINE_STEPS;
+const FORMAT_CONFIRM_CONCURRENCY = 3;
 
 export const ARTICLE_CATEGORIES = [
   "人工智能",
@@ -45,7 +57,8 @@ export class ClippingPipeline {
     private settings: KnowFlowSettings,
     private store: KnowledgeStore,
     private ai: AiService,
-    private noteOperations: NoteOperationCoordinator
+    private noteOperations: NoteOperationCoordinator,
+    private skills = new SkillRunner(new SkillStore(app.vault), app.vault)
   ) {}
 
   updateSettings(settings: KnowFlowSettings): void {
@@ -56,11 +69,16 @@ export class ClippingPipeline {
     file: TFile,
     onProgress?: (step: string, status: "active" | "completed" | "skipped", info?: string) => void
   ): Promise<void> {
-    return this.noteOperations.runExclusive(file.path, () => this.processExclusive(file, onProgress));
+    const path = file.path;
+    return this.noteOperations.runExclusive(path, () => this.skills.run("clipping-update", (skill) => {
+      if (file.path !== path) throw new Error("文章已移动，请重新执行整理。");
+      return this.processExclusive(file, skill, onProgress);
+    }));
   }
 
   private async processExclusive(
     file: TFile,
+    instructions: string,
     onProgress?: (step: string, status: "active" | "completed" | "skipped", info?: string) => void
   ): Promise<void> {
     const report = async (
@@ -72,108 +90,111 @@ export class ClippingPipeline {
       await Promise.resolve();
     };
 
+    const createdAttachments: TFile[] = [];
+    let noteWritten = false;
     try {
-      await report("整理 Markdown 样式");
+      const sourcePath = file.path;
+      await report(formatStep);
       const original = await this.app.vault.read(file);
       const title = file.basename;
-      let formatted = this.stripFrontmatterBody(original);
-      this.assertReadableBody(formatted);
-
-      // Phase 1: 规则清理
-      formatted = normalizeOrphanBoldTriplet(formatted);
-      formatted = this.organizeMarkdownStyle(formatted);
-
-      // Load Clipping Repair Skill (builtin + user vault override) before any LLM call
-      const userSkill = await loadUserSkillFile(this.app.vault.adapter);
-      this.ai.setSkill(loadSkill(userSkill ?? undefined));
-
-      // Phase 2: 先识别未围栏代码，统一包成 fenced code block
-      const unfencedResult = collectCodeCandidates(formatted);
-      const highConfidence = unfencedResult.possibleCode.filter((candidate) => candidate.autoLanguage);
-      const mediumConfidence = unfencedResult.possibleCode.filter((candidate) => !candidate.autoLanguage);
-      const hasMediumCode = mediumConfidence.length > 0;
-      if (!hasMediumCode) await report("AI 判断未围栏代码", "skipped");
-      const mediumDecisions = hasMediumCode
-        ? await this.ai.analyzePossibleCodeCandidates(title, mediumConfidence)
-        : [];
-      const autoDecisions = highConfidence.map((candidate) => ({
-        id: candidate.id,
-        action: "wrap-code" as const,
-        language: candidate.autoLanguage
-      }));
-      formatted = applyFormattingDecisions(
-        formatted,
-        unfencedResult.possibleCode,
-        [...autoDecisions, ...mediumDecisions]
-      );
-      if (hasMediumCode) await report("AI 判断未围栏代码", "completed");
-
-      // Phase 3: 所有代码都已有围栏后，再统一执行确定性清理
-      await report("预检代码块");
-      formatted = this.formatCodeBlocks(formatted);
-
-      // Phase 4: 对清理后的围栏代码判断语言，并按需由 AI 修复缩进/换行
-      const fencedCode = collectCodeCandidates(formatted).fencedCode;
-      if (fencedCode.length === 0) {
-        await report("AI 格式化代码块", "skipped");
-      } else {
-        await report("AI 格式化代码块");
-        const fencedDecisions = await this.ai.analyzeFencedCodeCandidates(title, fencedCode);
-        formatted = applyFormattingDecisions(formatted, fencedCode, fencedDecisions);
-        await report("AI 格式化代码块", "completed");
+      const { frontmatter, body } = splitFrontmatter(original);
+      if (frontmatter === null && /^(?:\uFEFF)?---[ \t]*\r?\n[^#:\s][^:\r\n]*:(?:[ \t]|\r?\n|$)/.test(original)) {
+        throw new Error("Frontmatter 缺少独立的结束行，原文已保留。");
       }
+      this.assertReadableBody(body);
+      const translate = this.settings.translateEnglishClippings;
+      const prompts = formatPromptBlocks(body);
+      let formatted = normalizeBodyHeadingLevels(repairTableDividers(this.organizeMarkdownStyle(restoreDetachedLists(prompts.content))));
+      const autoWrapped = applyAutoCodeWraps(formatted);
+      formatted = autoWrapped.content;
+      const confirmation = await this.confirmCandidates(formatted, instructions);
+      formatted = confirmation.content;
+      const formatChanges = prompts.wrapped + autoWrapped.applied + confirmation.changed;
+      await report(formatStep, "completed", formatChanges > 0 ? `修改了 ${formatChanges} 处` : undefined);
 
-      // Phase 5: 标题 LLM（放在代码整理之后，候选质量更高）
-      const headingCandidates = collectHeadingCandidates(formatted);
-      if (headingCandidates.length > 0) {
-        await report("AI 判断标题");
-        const headingDecisions = await this.ai.analyzeHeadingCandidates(title, headingCandidates);
-        formatted = applyFormattingDecisions(formatted, headingCandidates, headingDecisions);
-        const converted = headingDecisions.filter((decision) => decision.action === "heading").length;
-        await report(
-          "AI 判断标题",
-          "completed",
-          `发现 ${headingCandidates.length} 个候选；转换 ${converted} 个标题；保留 ${headingCandidates.length - converted} 个`
-        );
-      } else {
-        await report("AI 判断标题", "skipped");
-      }
-      formatted = normalizeBodyHeadingLevels(formatted);
+      await report(codeStep);
+      const codeBlocks = this.formatCodeBlocks(formatted);
+      formatted = normalizeBodyHeadingLevels(codeBlocks.content);
+      let text = this.normalizeFinalBody(formatted);
+      await report(codeStep, codeBlocks.changed > 0 ? "completed" : "skipped", codeBlocks.changed > 0
+        ? `修改了 ${codeBlocks.changed} 处`
+        : codeBlocks.seen > 0 ? "代码块无需修改" : "没有代码块");
 
-      // Phase 6: 英文翻译
-      await report("英文翻译（可选）");
-      if (this.settings.translateEnglishClippings) {
-        const translationCandidates = collectTranslationCandidates(formatted);
-        if (translationCandidates.length > 0) {
-          const translations = await this.ai.translateEnglishParagraphs(title, translationCandidates);
-          formatted = applyTranslationDecisions(formatted, translationCandidates, translations);
+      await report(imageStep);
+      const imageTask = planImageRepairs(this.app, sourcePath, text, clippingSourceUrl(frontmatter));
+      let imagePlan: Awaited<ReturnType<typeof planImageRepairs>> | undefined;
+      let imageWarnings: string | undefined;
+      const finishImagePlan = async (): Promise<Awaited<ReturnType<typeof planImageRepairs>>> => {
+        if (imagePlan) return imagePlan;
+        imagePlan = await imageTask;
+        imageWarnings = imagePlan.unavailable ? `${imagePlan.unavailable} 张图片无法恢复，保留原链接` : undefined;
+        if (imagePlan.repairs.length === 0 && !imagePlan.unavailable) {
+          await report(imageStep, "skipped", "图片无需整理");
+        } else {
+          await report(imageStep, "completed", imagePlan.repairs.length
+            ? [`找到 ${imagePlan.repairs.length} 张失效图片的替代路径或原图`, imageWarnings].filter(Boolean).join("；")
+            : imageWarnings);
         }
+        return imagePlan;
+      };
+
+      const translationPlan = translate ? planEnglishTranslation(text) : { candidates: [], skipReason: "未开启英文翻译" };
+      let propertyTask: Promise<Awaited<ReturnType<ClippingPipeline["proposeNoteProperties"]>>> | undefined;
+      if (!translate || translationPlan.skipReason) {
+        await report(translationStep, "skipped", translationPlan.skipReason);
+        propertyTask = this.startNoteProperties(title, text);
+      } else {
+        await finishImagePlan();
+        await report(translationStep);
+        const translations = await this.ai.translateEnglishParagraphs(title, translationPlan.candidates);
+        text = this.normalizeFinalBody(normalizeBodyHeadingLevels(
+          applyTranslationDecisions(text, translationPlan.candidates, translations)
+        ));
+        await report(translationStep, translations.length ? "completed" : "skipped", translations.length ? undefined : "无可翻译正文");
+        propertyTask = this.startNoteProperties(title, text);
       }
 
-      // Phase 7: 验证 + 写入
-      await report("补全 Frontmatter");
-      const normalized = this.normalizeFinalBody(formatted);
-      const withFrontmatter = await this.applyFrontmatter(normalized, original, { title });
-
-      const current = await this.app.vault.read(file);
-      if (current !== original) {
-        throw new Error("文章在修复期间被用户修改，请重新执行。");
+      const resolvedImagePlan = await finishImagePlan();
+      await report(propertyStep);
+      const repaired = await saveImageRepairs(this.app, sourcePath, text, resolvedImagePlan.repairs, createdAttachments);
+      const promptCoverage = formatPromptBlocks(repaired.content);
+      if (promptCoverage.wrapped || promptCoverage.bodies.length !== prompts.bodies.length
+        || promptCoverage.bodies.some((promptBody, index) => promptBody !== prompts.bodies[index])) {
+        throw new Error("整理后的提示词围栏覆盖不完整，原文已保留。");
       }
+      const template = await this.readTemplateFrontmatter();
+      const data = { title, today: window.moment().format("YYYY-MM-DD") };
+      const proposal = await propertyTask;
 
-      const integrity = validateMarkdownIntegrity(withFrontmatter);
-      if (!integrity.valid) {
-        throw new Error(`修复后 Markdown 结构异常：${integrity.error}`);
-      }
-
-      await this.app.vault.modify(file, withFrontmatter);
+      let filled: string[] = [];
+      let warnings: string[] = [];
+      await this.app.vault.process(file, (current) => {
+        const snapshot = splitFrontmatter(current);
+        if (snapshot.body !== body || file.path !== sourcePath) {
+          throw new Error("文章在修复期间被修改或移动，请重新执行。");
+        }
+        const withFrontmatter = applyArticleFrontmatter(repaired.content, current, template, data);
+        warnings = inspectClippingOutput(this.app, sourcePath, original, withFrontmatter, repaired.targets);
+        if (imageWarnings) warnings.push(imageWarnings);
+        const properties = fillEmptyNoteProperties(withFrontmatter, proposal, { replaceExisting: true });
+        filled = properties.filled;
+        if (properties.clearedDescription) warnings.push("简要描述未生成，已清空");
+        return properties.content;
+      });
+      noteWritten = true;
 
       await this.store.recordPipelineSuccess({
         path: file.path,
         status: "processed",
         updatedAt: new Date().toISOString()
       });
-      new Notice("KnowFlow: clipping formatted");
+      const propertyInfo = [filled.length ? `已更新${filled.join("、")}` : undefined, warnings.length ? warnings.join("；") : undefined]
+        .filter(Boolean).join("；") || undefined;
+      await report(propertyStep, "completed", propertyInfo);
+      const imageResult = repaired.restored ? `已恢复 ${repaired.restored} 张图片。` : "";
+      new Notice(`KnowFlow 已整理。${imageResult}${warnings.length ? `待检查：${warnings.join("；")}` : ""}`);
     } catch (error) {
+      if (!noteWritten) await Promise.allSettled(createdAttachments.map((attachment) => this.app.vault.delete(attachment)));
       await this.store.setPipelineStatus({
         path: file.path,
         status: "failed",
@@ -220,8 +241,20 @@ export class ClippingPipeline {
     await this.app.vault.createFolder(targetFolder);
   }
 
-  private stripFrontmatterBody(content: string): string {
-    return content.replace(/\r\n/g, "\n").replace(/^---\n[\s\S]*?\n---\n?/, "");
+  private startNoteProperties(
+    title: string,
+    content: string
+  ): Promise<Awaited<ReturnType<ClippingPipeline["proposeNoteProperties"]>>> {
+    return this.proposeNoteProperties(title, content);
+  }
+
+  private async proposeNoteProperties(title: string, content: string) {
+    if (typeof this.ai.proposeNoteProperties !== "function") return undefined;
+    try {
+      return await this.ai.proposeNoteProperties(title, content, ARTICLE_CATEGORIES);
+    } catch {
+      return undefined;
+    }
   }
 
   private assertReadableBody(body: string): void {
@@ -230,64 +263,89 @@ export class ClippingPipeline {
       .replace(/!\[.*?\]\(.*?\)/g, "")
       .replace(/[#>*_\-\s`=[\]()]/g, "")
       .trim();
-    if (visibleText.length < 20) {
+    if (visibleText.length < 20 && !/!\[\[.+?\]\]|!\[[^\]\n]*\]\(.+?\)/.test(body)) {
       throw new Error("当前剪藏正文过短，可能是 Web Clipper 只保存了 Frontmatter。");
     }
   }
 
+  private async confirmCandidates(
+    content: string,
+    instructions: string
+  ): Promise<{ content: string; changed: number }> {
+    const candidates = collectUncertainCandidates(content);
+    if (candidates.length === 0) return { content, changed: 0 };
+    const batches = batchFormattingCandidates(candidates, { maxChars: 3500, maxItems: 4 });
+    const decisions: FormattingDecision[] = [];
+    let nextBatch = 0;
+    const workers = Array.from({ length: Math.min(FORMAT_CONFIRM_CONCURRENCY, batches.length) }, async () => {
+      while (nextBatch < batches.length) {
+        const batch = batches[nextBatch];
+        nextBatch += 1;
+        try {
+          decisions.push(...await this.ai.confirmFormatting(batch, instructions));
+        } catch {
+          // A failed batch keeps its original text and does not surface an unconfirmed count.
+        }
+      }
+    });
+    await Promise.all(workers);
+    const edited = applyFormattingEdits(content, candidates, decisions);
+    return { content: edited.content, changed: edited.applied };
+  }
+
   private organizeMarkdownStyle(content: string): string {
-    const noNbsp = stripOrphanBoldDelimiters(content)
-      .replace(/\u00a0/g, " ")
-      .replace(/(^|\n)\s*\*\*\s*(\n|$)/g, "$1$2");  // remove standalone ** lines
-    return mapLinesOutsideCode(noNbsp, (line) => {
-      let next = normalizeListIndent(line)
-        .replace(/\t/g, "  ")
-        .replace(/^(\s*)•\s+/g, "$1- ")
-        .replace(/\*\*\*\*([^*\n]+)\*\*\*\*/g, "**$1**")
-        .replace(/\*\*(.+?)\*\*\*\*/g, "**$1**")
-        .replace(/\*\*\*\*(.+?)\*\*/g, "**$1**")
-        .replace(/[ \t]+$/g, "");
-      // Clean trailing ** from heading lines (orphan bold artifact)
-      next = next.replace(/^(#{1,6}\s+.*?)\s*\*\*\s*$/g, "$1");
-      // Clean pure-number heading noise: "## 1. 01" → "## "
-      next = next.replace(/^(#{1,6})\s+\d+[.\、\)]\s*\d*\s*$/g, "$1 ");
-      // Strip redundant Chinese numbering after heading prefix: "## 1. 一、xxx" → "## 1. xxx"
-      next = next.replace(/^(#{1,6}\s+\d+[.\、\)]\s*)[一二三四五六七八九十]+[、.]\s*/g, "$1");
-      next = next.replace(/^(\s*)(\d+)[、)]\s+/g, "$1$2. ");
-      next = next.replace(/^(\s*)([一二三四五六七八九十]+)([、.])\s+/g, (_m, sp, num, sep) =>
-        `${sp}${chineseToArabic(num)}. `);
-      next = next.replace(/^\s+\|(\s*:?-{3,}:?\s*\|.*)$/g, "|$1");
-      return next;
+    return mapUnprotectedMarkdown(content, (plain) => {
+      const cleaned = stripOrphanBoldDelimiters(normalizeOrphanBoldTriplet(plain))
+        .replace(/\u00a0/g, " ")
+        .replace(/(^|\n)\s*\*\*\s*(\n|$)/g, "$1$2");
+      return cleaned.split("\n").map((line) => {
+        let next = normalizeListIndent(line)
+          .replace(/\t/g, "  ")
+          .replace(/^(\s*)•\s+/g, "$1- ")
+          .replace(/\*\*\*\*([^*\n]+)\*\*\*\*/g, "**$1**")
+          .replace(/\*\*(.+?)\*\*\*\*/g, "**$1**")
+          .replace(/\*\*\*\*(.+?)\*\*/g, "**$1**")
+          .replace(/[ \t]+$/g, "");
+        // Clean trailing ** from heading lines (orphan bold artifact)
+        next = next.replace(/^(#{1,6}\s+.*?)\s*\*\*\s*$/g, "$1");
+        next = next.replace(/^(\s*)(\d+)[、)]\s+/g, "$1$2. ");
+        next = next.replace(/^(\s*)([一二三四五六七八九十]+)([、.])\s+/g, (_m, sp, num, sep) =>
+          `${sp}${chineseToArabic(num)}. `);
+        next = next.replace(/^\s+\|(\s*:?-{3,}:?\s*\|.*)$/g, "|$1");
+        return next;
+      }).join("\n");
     });
   }
 
-  private formatCodeBlocks(content: string): string {
-    return removeCodeWatermarkLines(content).replace(/```([^\n`]*)\n([\s\S]*?)```/g, (_match, rawLang: string, rawBody: string) => {
-      const body = trimCodeFenceBody(stripSequentialLineNumbers(rawBody
+  private formatCodeBlocks(content: string): { content: string; changed: number; seen: number } {
+    const lines = content.split("\n");
+    const ranges = protectedRanges(lines);
+    const prompts = promptFenceStarts(lines, ranges);
+    let changed = 0;
+    let seen = 0;
+    for (const range of ranges.reverse()) {
+      const { start, end, marker, closed } = range;
+      if (prompts.has(start) || !closed || marker !== "```" || !lines[start].startsWith(marker) || lines[end] !== marker) continue;
+      const raw = lines.slice(start + 1, end).join("\n");
+      const rawLanguage = lines[start].slice(marker.length);
+      if (rawLanguage.trim().split(/\s+/).length > 1) continue;
+      seen += 1;
+      const language = rawLanguage.trim().split(/\s+/)[0] ?? "";
+      const cleaned = prettyJsonBlock(removeClipperFenceSpacing(removeCodeWatermarkLines(raw)
         .replace(/^\s*(体验AI代码助手|代码解读复制代码)\s*$/gm, "")
-        .replace(/体验AI代码助手\s*代码解读复制代码/g, "")
-        .replace(/^\s*(In \[\d+\]:|Out\[\d+\]:)\s*$/gm, "")
-        .replace(/[ \t]+$/gm, "")));
-      const lang = normalizeCodeLanguage(rawLang, body);
-      return `\`\`\`${lang}\n${body}\n\`\`\``;
-    });
+        .replace(/^\s*(In \[\d+\]:|Out\[\d+\]:)\s*$/gm, ""), language), language);
+      if (cleaned === raw) continue;
+      lines.splice(start + 1, end - start - 1, ...trimCodeFenceBody(cleaned).split("\n"));
+      changed += 1;
+    }
+    return { content: lines.join("\n"), changed, seen };
   }
 
   private normalizeFinalBody(content: string): string {
-    return content
+    return mapUnprotectedMarkdown(content, (plain) => plain
       .replace(/[ \t]+$/gm, "")
-      .replace(/\n{3,}/g, "\n\n")
+      .replace(/\n{3,}/g, "\n\n"))
       .trim() + "\n";
-  }
-
-  private async applyFrontmatter(
-    content: string,
-    originalContent: string,
-    data: { title: string }
-  ): Promise<string> {
-    const today = window.moment().format("YYYY-MM-DD");
-    const template = await this.readTemplateFrontmatter();
-    return applyArticleFrontmatter(content, originalContent, template, { ...data, today });
   }
 
   private async readTemplateFrontmatter(): Promise<string> {
@@ -301,18 +359,51 @@ export class ClippingPipeline {
   }
 }
 
-function mapLinesOutsideCode(content: string, mapper: (line: string) => string): string {
-  let inCode = false;
-  return content
-    .split("\n")
-    .map((line) => {
-      if (/^\s*```/.test(line)) {
-        inCode = !inCode;
-        return line.trimEnd();
-      }
-      return inCode ? line : mapper(line);
-    })
-    .join("\n");
+function applyAutoCodeWraps(content: string): { content: string; applied: number } {
+  const auto = collectCodeCandidates(content).possibleCode.filter((candidate) => candidate.autoLanguage);
+  if (auto.length === 0) return { content, applied: 0 };
+  const decisions: FormattingDecision[] = auto.map((candidate) => ({
+    id: candidate.id,
+    action: "wrap-code",
+    language: candidate.autoLanguage
+  }));
+  return applyFormattingEdits(content, auto, decisions);
+}
+
+function collectUncertainCandidates(content: string): FormattingCandidate[] {
+  const headings = collectHeadingCandidates(content).map((candidate, index) => ({ ...candidate, id: `heading-${index + 1}` }));
+  const code = collectCodeCandidates(content);
+  const possible = code.possibleCode
+    .filter((candidate) => !candidate.autoLanguage)
+    .map((candidate, index) => ({ ...candidate, id: `code-${index + 1}` }));
+  const fenced = code.fencedCode.map((candidate, index) => ({ ...candidate, id: `fence-${index + 1}` }));
+  const clipped = collectClippedCodeCandidates(content).map((candidate, index) => ({ ...candidate, id: `clip-${index + 1}` }));
+  return [...headings, ...possible, ...fenced, ...clipped];
+}
+
+function clippingSourceUrl(frontmatter: string | null): string | undefined {
+  if (!frontmatter) return undefined;
+  try {
+    const properties: unknown = parseYaml(frontmatter);
+    if (!properties || typeof properties !== "object") return undefined;
+    const values = properties as Record<string, unknown>;
+    return [values["网址"], values.url, values.source].find((value): value is string => typeof value === "string" && /^https?:\/\//i.test(value.trim()))?.trim();
+  } catch {
+    return undefined;
+  }
+}
+
+function mapUnprotectedMarkdown(content: string, mapper: (block: string) => string): string {
+  const lines = content.split("\n");
+  const segments: string[] = [];
+  let first = 0;
+  for (const { start, end } of protectedRanges(lines)) {
+    if (start > first) segments.push(mapper(lines.slice(first, start).join("\n")));
+    segments.push(lines.slice(start, end + 1).join("\n"));
+    first = end + 1;
+  }
+  if (first < lines.length) segments.push(mapper(lines.slice(first).join("\n")));
+  return segments.join("\n");
 }
 
 function normalizeListIndent(line: string): string {
@@ -328,27 +419,6 @@ function stripOrphanBoldDelimiters(content: string): string {
     /(^|\n)[ \t]*\*\*[ \t]*\n+([^\n*][^\n]*?)\n+[ \t]*\*\*[ \t]*(?=\n|$)/g,
     (_match, prefix: string, title: string) => `${prefix}**${title.trim()}**`
   );
-}
-
-function normalizeCodeLanguage(rawLang: string, body: string): string {
-  // Flow diagrams / Chinese prose: never keep a guessed programming language.
-  if (preferTextLanguage(body)) return "text";
-
-  const raw = rawLang.trim();
-  const lang = /^(体验AI代码助手|代码解读|复制代码)/.test(raw)
-    ? ""
-    : raw.split(/\s+/)[0]?.toLowerCase() ?? "";
-  if (lang && lang !== "plain" && lang !== "text") return lang;
-
-  const sample = body.trimStart();
-  if (/^(import|from|def|class|@[\w.]+|if __name__)/m.test(sample)) return "python";
-  if (/^(const|let|var|import .* from|export |function|async function)/m.test(sample)) return "typescript";
-  if (/^\s*[{[]/.test(sample)) return "json";
-  if (/^(curl|sudo|git|npm|pnpm|yarn|docker|kubectl|cd|mkdir|chmod)\b/m.test(sample)) return "bash";
-  if (/^(select|with|insert|update|delete|create table)\b/im.test(sample)) return "sql";
-  if (/^<[\w!?]/.test(sample)) return "html";
-  // Uncertain → text (not empty, not a guessed programming language)
-  return "text";
 }
 
 const CHINESE_DIGITS: Record<string, number> = {

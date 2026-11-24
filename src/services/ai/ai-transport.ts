@@ -5,7 +5,11 @@ import { estimateChatUsage, parseChatStreamData } from "../chat/chat-stream";
 
 const REQUEST_TIMEOUT_MS = 360000;
 
+export class EmptyAiResponseError extends Error {}
+
 export class AiTransport {
+  constructor(private skillInstructions = "") {}
+
   async requestJson<T>(config: AiModelConfig, messages: ChatRequestMessage[]): Promise<T> {
     const text = await this.requestText(config, messages, true);
     try {
@@ -26,7 +30,7 @@ export class AiTransport {
 
     const body: Record<string, unknown> = {
       model: config.model,
-      messages,
+      messages: this.withSkill(messages),
       temperature: 0.2
     };
     if (json) {
@@ -59,7 +63,7 @@ export class AiTransport {
     }
     const content = response.json?.choices?.[0]?.message?.content;
     if (typeof content !== "string" || !content.trim()) {
-      throw new Error("AI response did not contain message content.");
+      throw new EmptyAiResponseError("AI response did not contain message content.");
     }
     return content.trim();
   }
@@ -93,7 +97,7 @@ export class AiTransport {
         headers,
         body: JSON.stringify({
           model: config.model,
-          messages,
+          messages: this.withSkill(messages),
           temperature: 0.2,
           stream: true,
           stream_options: { include_usage: true }
@@ -103,7 +107,7 @@ export class AiTransport {
       if (!response.ok) {
         throw new Error(`AI stream failed: ${(await response.text()).slice(0, 220) || `HTTP ${response.status}`}`);
       }
-      if (!response.body) throw new Error("AI stream did not return a response body.");
+      if (!response.body) throw new EmptyAiResponseError("AI stream did not return a response body.");
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -147,7 +151,7 @@ export class AiTransport {
           if (line.startsWith("data:")) consume(line.slice(5).trim());
         }
       }
-      if (!answer.trim()) throw new Error("AI stream completed without answer content.");
+      if (!answer.trim()) throw new EmptyAiResponseError("AI stream completed without answer content.");
       const finalUsage = usage ?? estimateChatUsage(messages, answer);
       handlers.onUsage(finalUsage);
       return finalUsage;
@@ -159,6 +163,15 @@ export class AiTransport {
     } finally {
       window.clearTimeout(timer);
     }
+  }
+
+  private withSkill(messages: ChatRequestMessage[]): ChatRequestMessage[] {
+    const [system, ...rest] = messages;
+    if (!this.skillInstructions || system?.role !== "system") return messages;
+    return [{
+      ...system,
+      content: `${system.content}\n\n遵循本次 Skill 的操作规则；任务的资料边界、输出协议和校验约束优先。\n${this.skillInstructions}`
+    }, ...rest];
   }
 }
 

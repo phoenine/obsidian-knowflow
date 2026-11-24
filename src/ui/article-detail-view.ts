@@ -30,7 +30,6 @@ export function renderArticleDetailView(root: HTMLElement, props: ArticleDetailV
   metric(metrics, "知识点", props.knowledgePointCount === null ? "--" : String(props.knowledgePointCount));
 
   renderSummaryCard(content, props);
-  renderRelevantNotesCard(content, props);
 
   const mapCard = section(content, "kf-knowledge-map");
   cardHeader(mapCard, "git-fork", "Knowledge Map", (header) => {
@@ -75,4 +74,5 @@ export function renderArticleDetailView(root: HTMLElement, props: ArticleDetailV
     generateQuizButton.style.opacity = "0.72";
   }
   button(actions, "开始测试", props.onStartQuiz);
+  renderRelevantNotesCard(content, props);
 }

@@ -17,105 +17,33 @@ export interface FormattingCandidate {
   fenceLanguage?: string;
   /** Body looks mangled (broken indent / mashed line breaks) and needs AI reformat. */
   needsReformat?: boolean;
+  clippedLanguage?: string;
 }
 
 export interface FormattingDecision {
   id: string;
-  action: "keep" | "heading" | "wrap-code" | "set-code-language" | "reformat-code";
+  action: "keep" | "heading" | "wrap-code" | "set-code-language" | "reformat-code" | "strip-line-numbers";
   level?: number;
   language?: string;
   /** Reformatted fence body (no opening/closing fences). */
   content?: string;
+  /** One-based final source line within an explicitly marked clipper fragment. */
+  throughLine?: number;
 }
 
 import { assessUnfencedCode } from "./code-confidence";
+import { promptFenceStarts } from "../../../skills/clipping-update/scripts/prompt-blocks";
+import { protectedLineIndices, protectedRanges } from "./protected-markdown";
+import { clippedCodeRegions, restoreClippedFence } from "../../../skills/clipping-update/scripts/clipped-code";
 
 const FORMATTING_BATCH_CHARS = 16000;
 
-export function collectFormattingCandidates(content: string): FormattingCandidate[] {
-  const lines = content.split("\n");
-  const candidates: FormattingCandidate[] = [];
-  const occupied = new Set<number>();
-  let inFence = false;
-  let fenceStart = -1;
-  let fenceLanguage = "";
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const fence = /^\s*```([^\s`]*)/.exec(lines[index]);
-    if (!fence) continue;
-
-    if (!inFence) {
-      inFence = true;
-      fenceStart = index;
-      fenceLanguage = fence[1].trim();
-      continue;
-    }
-
-    for (let line = fenceStart; line <= index; line += 1) occupied.add(line);
-    const body = lines.slice(fenceStart + 1, index).join("\n");
-    const candidate = makeFencedCodeCandidate(
-      candidates.length,
-      fenceStart,
-      index,
-      body,
-      fenceLanguage,
-      lines
-    );
-    if (candidate) candidates.push(candidate);
-    inFence = false;
-    fenceStart = -1;
-    fenceLanguage = "";
-  }
-
-  let index = 0;
-  while (index < lines.length) {
-    if (occupied.has(index) || !lines[index].trim() || isProtectedMarkdownLine(lines[index])) {
-      index += 1;
-      continue;
-    }
-
-    const start = index;
-    while (
-      index + 1 < lines.length
-      && !occupied.has(index + 1)
-      && lines[index + 1].trim()
-      && !isProtectedMarkdownLine(lines[index + 1])
-    ) {
-      index += 1;
-    }
-    const end = index;
-    const block = lines.slice(start, end + 1);
-
-    if (looksLikeUnfencedCode(block, lines[start - 1] ?? "")) {
-      candidates.push(makeCandidate(candidates.length, "possible-code", start, end, block.join("\n"), lines));
-      for (let line = start; line <= end; line += 1) occupied.add(line);
-    }
-    index += 1;
-  }
-
-  index = 0;
-  while (index < lines.length) {
-    if (occupied.has(index) || !isPossibleHeadingStart(lines, index)) {
-      index += 1;
-      continue;
-    }
-
-    const range = possibleHeadingRange(lines, index);
-    candidates.push(makeCandidate(
-      candidates.length,
-      "possible-heading",
-      range.start,
-      range.end,
-      lines.slice(range.start, range.end + 1).join("\n"),
-      lines
-    ));
-    index = range.end + 1;
-  }
-
-  return candidates;
-}
-
-export function batchFormattingCandidates(candidates: FormattingCandidate[]): FormattingCandidate[][] {
+export function batchFormattingCandidates(
+  candidates: FormattingCandidate[],
+  limits: { maxChars?: number; maxItems?: number } = {}
+): FormattingCandidate[][] {
+  const maxChars = limits.maxChars ?? FORMATTING_BATCH_CHARS;
+  const maxItems = limits.maxItems ?? Number.POSITIVE_INFINITY;
   const batches: FormattingCandidate[][] = [];
   let batch: FormattingCandidate[] = [];
   let chars = 0;
@@ -124,7 +52,7 @@ export function batchFormattingCandidates(candidates: FormattingCandidate[]): Fo
     const candidateChars = (candidate.analysisContent ?? candidate.content).length
       + candidate.before.length
       + candidate.after.length;
-    if (batch.length > 0 && chars + candidateChars > FORMATTING_BATCH_CHARS) {
+    if (batch.length > 0 && (batch.length >= maxItems || chars + candidateChars > maxChars)) {
       batches.push(batch);
       batch = [];
       chars = 0;
@@ -142,6 +70,14 @@ export function applyFormattingDecisions(
   candidates: FormattingCandidate[],
   decisions: FormattingDecision[]
 ): string {
+  return applyFormattingEdits(content, candidates, decisions).content;
+}
+
+export function applyFormattingEdits(
+  content: string,
+  candidates: FormattingCandidate[],
+  decisions: FormattingDecision[]
+): { content: string; applied: number } {
   const lines = content.split("\n");
   const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   const accepted = decisions
@@ -150,6 +86,7 @@ export function applyFormattingDecisions(
     .sort((a, b) => b.candidate.startLine - a.candidate.startLine);
 
   const used = new Set<string>();
+  let applied = 0;
   for (const { decision, candidate } of accepted) {
     if (used.has(candidate.id) || decision.action === "keep") continue;
     used.add(candidate.id);
@@ -160,10 +97,18 @@ export function applyFormattingDecisions(
       const expected = `\`\`\`${fenceLang}\n${candidate.content}\n\`\`\``;
       if (current !== expected) continue;
 
+      if (decision.action === "strip-line-numbers") {
+        const body = stripSequentialLineNumbers(candidate.content);
+        if (body === candidate.content) continue;
+        lines.splice(candidate.startLine + 1, candidate.endLine - candidate.startLine - 1, ...body.split("\n"));
+        applied += 1;
+        continue;
+      }
+
       if (decision.action === "reformat-code") {
         const language = resolveFenceLanguage(decision.language, candidate);
         const body = typeof decision.content === "string" ? trimCodeFenceBody(decision.content) : "";
-        if (!language || !body || /```/.test(body) || !hasSameNonWhitespaceContent(candidate.content, body)) {
+        if (!language || !body || /```/.test(body) || !isSafeCodeReformat(candidate, body)) {
           continue;
         }
         lines.splice(
@@ -173,35 +118,52 @@ export function applyFormattingDecisions(
           ...body.split("\n"),
           "```"
         );
+        applied += 1;
         continue;
       }
 
       if (decision.action !== "set-code-language") continue;
       const language = resolveFenceLanguage(decision.language, candidate);
-      if (!language) continue;
-      lines[candidate.startLine] = `\`\`\`${language}`;
+      const opening = `\`\`\`${language}`;
+      if (!language || lines[candidate.startLine] === opening) continue;
+      lines[candidate.startLine] = opening;
+      applied += 1;
       continue;
     }
 
     if (current !== candidate.content) continue;
     if (candidate.type === "possible-code" && decision.action === "wrap-code") {
+      if (candidate.clippedLanguage) {
+        const through = decision.throughLine;
+        if (through === undefined || !Number.isInteger(through) || through < 2 || through > candidate.endLine - candidate.startLine + 1) continue;
+        const body = lines.slice(candidate.startLine + 1, candidate.startLine + through).join("\n");
+        if (!body.trim()) continue;
+        lines.splice(candidate.startLine, through, ...restoreClippedFence(body, candidate.clippedLanguage).split("\n"));
+        applied += 1;
+        continue;
+      }
       const language = normalizeLanguage(decision.language) || "text";
       lines.splice(candidate.startLine, candidate.endLine - candidate.startLine + 1, `\`\`\`${language}`, current, "```");
+      applied += 1;
       continue;
     }
 
     if (candidate.type === "possible-heading" && decision.action === "heading") {
       const level = decision.level === 3 || decision.level === 4 ? decision.level : 2;
-      const heading = candidate.content
+      const heading = stripHeadingNumberPrefix(candidate.content
         .split("\n")
         .map((line) => line.trim().replace(/^\*\*(.+)\*\*$/, "$1"))
         .filter(Boolean)
-        .join(" ");
-      lines.splice(candidate.startLine, candidate.endLine - candidate.startLine + 1, `${"#".repeat(level)} ${heading}`);
+        .join(" "));
+      if (!heading) continue;
+      const next = `${"#".repeat(level)} ${heading}`;
+      if (current === next) continue;
+      lines.splice(candidate.startLine, candidate.endLine - candidate.startLine + 1, next);
+      applied += 1;
     }
   }
 
-  return lines.join("\n");
+  return { content: lines.join("\n"), applied };
 }
 
 export function stripSequentialLineNumbers(body: string): string {
@@ -255,20 +217,6 @@ function isProtectedMarkdownLine(line: string): boolean {
   const trimmed = line.trim();
   return /^(#{1,6}\s|>|!\[|\[!\[|<!--|[-*+]\s|\d+[.)]\s|\|)/.test(trimmed)
     || /^-{3,}$/.test(trimmed);
-}
-
-function looksLikeUnfencedCode(lines: string[], previousLine: string): boolean {
-  const nonBlank = lines.filter((line) => line.trim());
-  const codeLines = nonBlank.filter((line) =>
-    /^\s*(import |from |def |class |const |let |var |function |export |async |SELECT\b|WITH\b|INSERT\b|UPDATE\b|DELETE\b|curl\b|sudo\b|git\b|npm\b|pnpm\b|yarn\b|docker\b|kubectl\b)/i.test(line)
-    || /^\s*[\w.-]+\s*:\s*\S/.test(line)
-    || /[{};]|=>/.test(line)
-  ).length;
-  const yamlLines = nonBlank.filter((line) => /^\s*[\w.-]+\s*:\s*(?:\S.*)?$/.test(line)).length;
-  const contextSuggestsCode = /(代码|命令|配置|示例|执行|运行|安装|终端|输出)\s*[:：]?\s*$/.test(previousLine.trim());
-
-  if (nonBlank.length >= 2 && (codeLines >= 2 || yamlLines >= 2)) return true;
-  return nonBlank.length === 1 && contextSuggestsCode && codeLines === 1;
 }
 
 function isPossibleHeadingStart(lines: string[], index: number): boolean {
@@ -334,6 +282,19 @@ function resolveFenceLanguage(value: string | undefined, candidate: FormattingCa
  */
 export function hasSameNonWhitespaceContent(source: string, formatted: string): boolean {
   return source.replace(/\s/g, "") === formatted.replace(/\s/g, "");
+}
+
+export function isSafeCodeReformat(candidate: FormattingCandidate, formatted: string): boolean {
+  const source = trimCodeFenceBody(candidate.content);
+  return source === formatted || restoreClippedShellContinuations(source, candidate.fenceLanguage ?? "") === formatted;
+}
+
+export function restoreClippedShellContinuations(source: string, language: string): string {
+  if (!/^(?:sh|bash|shell|zsh)$/.test(language) || /\n|<</.test(source)) return source;
+  // Clipper can place escaped continuations and their options on one line.
+  // Match continuations outside quotes and comments.
+  const tokens = /"(?:\\.|[^"\\])*"?|'[^']*'?|`(?:\\.|[^`\\])*`?|(?:^|[ \t])#[^\n]*|(?<continuation>\\[ \t]{2,})(?=--[a-zA-Z])|\\./gm;
+  return source.replace(tokens, (token, continuation: string | undefined) => continuation ? "\\\n  " : token);
 }
 
 /**
@@ -402,11 +363,12 @@ function makeFencedCodeCandidate(
 ): FormattingCandidate | null {
   const plainLooking = preferTextLanguage(body);
   const needsFmt = needsCodeReformat(body);
+  const hasNumberPrefixes = stripSequentialLineNumbers(body) !== body;
   // Clear non-code prose: leave to mechanical `text` normalization, skip LLM.
-  if (plainLooking && !needsFmt) return null;
+  if (plainLooking && !needsFmt && !hasNumberPrefixes) return null;
 
   const needsLang = isUnsetFenceLanguage(fenceLanguage);
-  if (!needsLang && !needsFmt) return null;
+  if (!needsLang && !needsFmt && !hasNumberPrefixes) return null;
 
   const candidate = makeCandidate(index, "fenced-code", startLine, endLine, body, lines);
   if (fenceLanguage) candidate.fenceLanguage = fenceLanguage;
@@ -430,14 +392,19 @@ function normalizeCandidateContent(text: string): string {
 
 export function collectHeadingCandidates(content: string): FormattingCandidate[] {
   const lines = content.split("\n");
+  const protectedLines = protectedLineIndices(protectedRanges(lines));
   const candidates: FormattingCandidate[] = [];
   let index = 0;
   while (index < lines.length) {
-    if (!isPossibleHeadingStart(lines, index)) {
+    if (protectedLines.has(index) || !isPossibleHeadingStart(lines, index)) {
       index += 1;
       continue;
     }
     const range = possibleHeadingRange(lines, index);
+    if (protectedLines.has(range.end)) {
+      index = range.end + 1;
+      continue;
+    }
     const rawContent = lines.slice(range.start, range.end + 1).join("\n");
     const normalized = normalizeCandidateContent(rawContent);
     if (!normalized) {
@@ -464,35 +431,16 @@ export function collectCodeCandidates(content: string): {
   fencedCode: FormattingCandidate[];
 } {
   const lines = content.split("\n");
-  const occupied = new Set<number>();
+  const ranges = protectedRanges(lines);
+  const occupied = protectedLineIndices(ranges);
+  const prompts = promptFenceStarts(lines, ranges);
   const fencedCode: FormattingCandidate[] = [];
-  let inFence = false;
-  let fenceStart = -1;
-  let fenceLanguage = "";
-
-  for (let i = 0; i < lines.length; i += 1) {
-    const fence = /^\s*```([^\s`]*)/.exec(lines[i]);
-    if (!fence) continue;
-    if (!inFence) {
-      inFence = true;
-      fenceStart = i;
-      fenceLanguage = fence[1].trim();
-      continue;
-    }
-    for (let j = fenceStart; j <= i; j += 1) occupied.add(j);
-    const body = lines.slice(fenceStart + 1, i).join("\n");
-    const candidate = makeFencedCodeCandidate(
-      fencedCode.length,
-      fenceStart,
-      i,
-      body,
-      fenceLanguage,
-      lines
-    );
+  for (const { start, end, marker, closed } of ranges) {
+    if (prompts.has(start) || !closed || marker !== "```" || !lines[start].startsWith(marker) || lines[end] !== marker) continue;
+    const language = lines[start].slice(marker.length).trim();
+    const body = lines.slice(start + 1, end).join("\n");
+    const candidate = makeFencedCodeCandidate(fencedCode.length, start, end, body, language, lines);
     if (candidate) fencedCode.push(candidate);
-    inFence = false;
-    fenceStart = -1;
-    fenceLanguage = "";
   }
 
   const possibleCode: FormattingCandidate[] = [];
@@ -533,6 +481,14 @@ export function collectCodeCandidates(content: string): {
   return { possibleCode, fencedCode };
 }
 
+export function collectClippedCodeCandidates(content: string): FormattingCandidate[] {
+  const lines = content.split("\n");
+  return clippedCodeRegions(lines).map(({ start, end, language }, index) => ({
+    ...makeCandidate(index, "possible-code", start, end, lines.slice(start, end + 1).join("\n"), lines),
+    clippedLanguage: language
+  }));
+}
+
 export function collectPossibleCodeCandidates(content: string): FormattingCandidate[] {
   return collectCodeCandidates(content).possibleCode;
 }
@@ -554,16 +510,6 @@ export function normalizeOrphanBoldTriplet(content: string): string {
 }
 
 /**
- * Clean pure-number noise from existing heading markers.
- * Only removes numbering when the entire content after the marker is digits:
- *   "## 1. 01" → "## "    (all digits ✓)
- *   "## 1. 概述" → kept    (has text ✗)
- */
-export function cleanHeadingNumberNoise(line: string): string {
-  return line.replace(/^(#{1,6})\s+\d+[.\、\)]\s*\d+$/g, "$1 ");
-}
-
-/**
  * Treat the article title as the implicit H1: anchor the first body heading at
  * H2, preserve relative depth, and close downward level gaps. Fenced code is
  * excluded because Markdown and shell examples commonly contain lines
@@ -571,16 +517,12 @@ export function cleanHeadingNumberNoise(line: string): string {
  */
 export function normalizeBodyHeadingLevels(content: string): string {
   const lines = content.split("\n");
-  let inFence = false;
+  const protectedLines = protectedLineIndices(protectedRanges(lines));
   const headings: Array<{ index: number; indent: string; markers: string }> = [];
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    if (/^\s*(?:```|~~~)/.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
+    if (protectedLines.has(index)) continue;
     const match = /^(\s{0,3})(#{1,6})(?:[ \t]+|$)/.exec(line);
     if (match) headings.push({ index, indent: match[1], markers: match[2] });
   }
@@ -591,8 +533,16 @@ export function normalizeBodyHeadingLevels(content: string): string {
   for (const heading of headings) {
     const shiftedLevel = Math.max(2, Math.min(6, heading.markers.length - shift));
     const newLevel = Math.min(shiftedLevel, previousLevel + 1);
-    lines[heading.index] = `${heading.indent}${"#".repeat(newLevel)}${lines[heading.index].slice(heading.indent.length + heading.markers.length)}`;
+    const text = lines[heading.index].slice(heading.indent.length + heading.markers.length).trim();
+    const title = stripHeadingNumberPrefix(text);
+    lines[heading.index] = `${heading.indent}${"#".repeat(newLevel)} ${title || text}`.trimEnd();
     previousLevel = newLevel;
   }
   return lines.join("\n");
+}
+
+const HEADING_NUMBER_PREFIX = /(?:(?:\d+(?:\.\d+)*\\?[.．、)）](?![\d.])|[一二三四五六七八九十百]+[.．、)）]|第[\d一二三四五六七八九十百]+[章节篇][：:、. \t])[ \t]*)/;
+
+export function stripHeadingNumberPrefix(text: string): string {
+  return text.replace(new RegExp(`^(?:${HEADING_NUMBER_PREFIX.source})+`), "").trim();
 }

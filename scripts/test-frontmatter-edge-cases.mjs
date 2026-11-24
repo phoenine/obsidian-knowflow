@@ -21,9 +21,15 @@ await esbuild.build({
   outdir: tempDir,
   platform: "node"
 });
-const { applyArticleFrontmatter, applyLearningCompletionFrontmatter, applySummaryFrontmatter, updateFrontmatterCategory } = await import(
+const { applyArticleFrontmatter, applyLearningCompletionFrontmatter, applySummaryFrontmatter, fillEmptyNoteProperties, updateFrontmatterCategory } = await import(
   pathToFileURL(join(tempDir, "frontmatter-rules.js")).href
 );
+
+{
+  const initial = '---\n创建日期: 2026-11-24\n学习日期: <% tp.date.now("YYYY-MM-DD") %>\n阅读价值: 0\n分类: LLM\n---\n正文';
+  const result = applyArticleFrontmatter("正文", initial, "", { title: "正文", today: "2026-11-25" });
+  assert.match(result, /创建日期: 2026-11-24\n学习日期:\n阅读价值:\n分类: LLM/);
+}
 
 const baseData = { title: "标题", today: "2026-08-04" };
 
@@ -56,6 +62,14 @@ const baseData = { title: "标题", today: "2026-08-04" };
   assert.equal(updateFrontmatterCategory(noFrontmatter, "AI"), noFrontmatter);
 }
 
+{
+  const original = "\uFEFF---\n简要描述: \"包含---的属性\"\n分类: 旧分类\n---\n\n正文";
+  const updated = updateFrontmatterCategory(original, "AI");
+  assert.ok(updated.includes('简要描述: "包含---的属性"'));
+  assert.ok(updated.includes("分类: AI"));
+  assert.ok(updated.endsWith("\n\n正文"));
+}
+
 // CRLF line endings in the original file must not break field detection or
 // produce mixed line-ending output.
 {
@@ -65,8 +79,7 @@ const baseData = { title: "标题", today: "2026-08-04" };
   assert.ok(!result.includes("\r"), "output should be normalized to \\n only");
 }
 
-// A single wikilink in 文章作者 is metadata decoration from the clipper,
-// not an intended Obsidian relation. Normalize it to a plain author name.
+// Author wikilinks are display aliases, not part of the author name.
 {
   const original = [
     "---",
@@ -76,15 +89,17 @@ const baseData = { title: "标题", today: "2026-08-04" };
     "正文"
   ].join("\n");
   const result = applyArticleFrontmatter("正文", original, "", baseData);
-  assert.ok(result.includes('文章作者: "Mars任鑫"'));
-  assert.ok(!result.includes("[[Mars任鑫]]"));
+  assert.ok(result.includes("文章作者: Mars任鑫"));
+  assert.ok(!result.includes("[["));
+  const aliased = applyArticleFrontmatter("正文", "---\n文章作者: \"[[uid|懿航]]\"\n---\n正文", "", baseData);
+  assert.ok(aliased.includes("文章作者: 懿航"));
 }
 
-// Ordinary author values keep their content and are serialized safely.
+// Ordinary author values are already valid YAML.
 {
   const original = "---\n文章作者: Mars任鑫\n---\n正文";
   const result = applyArticleFrontmatter("正文", original, "", baseData);
-  assert.ok(result.includes('文章作者: "Mars任鑫"'));
+  assert.ok(result.includes('文章作者: Mars任鑫'));
 }
 
 // YAML reserves @ at the start of a plain scalar. Author handles must remain
@@ -112,13 +127,11 @@ const baseData = { title: "标题", today: "2026-08-04" };
   assert.ok(result.includes("学习中"), "tab-indented continuation content must be preserved, not dropped");
 }
 
-// applySummaryFrontmatter (called the moment a summary is generated) is
-// what actually owns 简要描述/阅读价值/分类/tags. Inline flow-style tags
+// applySummaryFrontmatter writes the supplied property fields. Inline flow-style tags
 // (e.g. `tags: [a, b, c]`) must still be detected as the `tags` key and
 // fully replaced with the AI's tags — KnowFlow intentionally overwrites
-// the placeholder/old tags every time a summary is (re)generated (see
-// formatTagsList in frontmatter-rules.ts) so Obsidian's own tag
-// search/graph reflects the latest AI analysis.
+// the old tags when a summary supplies updated tags so Obsidian can
+// use them in tag search and graph view.
 {
   const inlineArray = [
     "---",
@@ -131,6 +144,13 @@ const baseData = { title: "标题", today: "2026-08-04" };
   assert.ok(!result.includes("[foo, bar, baz]"), "old inline tags must be replaced, not preserved");
   assert.ok(result.includes("  - AI") && result.includes("  - 效率"), "AI tags must be written as a YAML list");
   assert.ok(result.includes("分类: AI"), "applySummaryFrontmatter does overwrite 分类 with the AI's suggestion");
+}
+
+{
+  const original = "---\n简要描述: 旧描述\n阅读价值: 4\n分类: 知识积累\ntags: [Obsidian]\n---\n正文";
+  const result = applySummaryFrontmatter(original, { description: "新描述" });
+  assert.ok(result.includes("新描述"));
+  assert.ok(result.includes("阅读价值: 4\n分类: 知识积累\ntags: [Obsidian]"));
 }
 
 // When the AI returns no tags, fall back to the "clippings" placeholder
@@ -164,6 +184,73 @@ const baseData = { title: "标题", today: "2026-08-04" };
   assert.ok(result.includes("创建日期: <% tp.date.now(\"YYYY-MM-DD\") %>"), "Templater tag must be untouched");
   assert.ok(result.includes("分类: 新分类"));
 }
+
+{
+  const note = "---\n阅读价值: 0\n分类:\ntags:\n  - clippings\n简要描述:\n---\n正文";
+  const filled = fillEmptyNoteProperties(note, {
+    description: "说明事件日志。",
+    readingValue: 4,
+    category: "人工智能",
+    tags: ["agent-memory"]
+  });
+  assert.deepEqual(filled.filled, ["简要描述", "阅读价值", "分类", "标签"]);
+  assert.match(filled.content, /简要描述: "说明事件日志。"/);
+  assert.match(filled.content, /阅读价值: 4/);
+  assert.match(filled.content, /分类: 人工智能/);
+  assert.match(filled.content, /  - agent-memory/);
+  assert.doesNotMatch(filled.content, /clippings/);
+
+  const kept = fillEmptyNoteProperties("---\n简要描述: \"已有描述\"\n阅读价值: 2\n分类: 知识积累\ntags:\n  - kept\n---\n正文", {
+    description: "新描述",
+    readingValue: 5,
+    category: "人工智能",
+    tags: ["agent-memory"]
+  });
+  assert.deepEqual(kept.filled, []);
+  assert.match(kept.content, /已有描述/);
+  assert.match(kept.content, /阅读价值: 2/);
+  assert.match(kept.content, /分类: 知识积累/);
+  assert.match(kept.content, /  - kept/);
+
+  const replaced = fillEmptyNoteProperties(kept.content, {
+    description: "新描述",
+    readingValue: 5,
+    category: "人工智能",
+    tags: ["agent-memory"]
+  }, { replaceExisting: true });
+  assert.deepEqual(replaced.filled, ["简要描述", "阅读价值", "分类", "标签"]);
+  assert.match(replaced.content, /简要描述: "新描述"/);
+  assert.match(replaced.content, /阅读价值: 5/);
+  assert.match(replaced.content, /分类: 人工智能/);
+  assert.match(replaced.content, /  - agent-memory/);
+  assert.doesNotMatch(replaced.content, /kept/);
+}
+
+await esbuild.build({
+  bundle: true,
+  entryPoints: ["src/services/ai/note-properties-ai.ts"],
+  format: "esm",
+  outfile: join(tempDir, "note-properties-ai.js"),
+  platform: "node",
+  plugins: [{
+    name: "stub-obsidian",
+    setup(build) {
+      build.onResolve({ filter: /^obsidian$/ }, () => ({ path: "obsidian", namespace: "stub" }));
+      build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({ contents: "export const requestUrl = async () => ({});", loader: "js" }));
+    }
+  }]
+});
+const { readNoteProperties } = await import(pathToFileURL(join(tempDir, "note-properties-ai.js")).href);
+const categories = ["人工智能", "知识积累"];
+const accepted = readNoteProperties({
+  briefDescription: "用事件日志保存原始记录，再用派生索引提供查询。",
+  readingValue: 4,
+  category: "人工智能",
+  tags: ["agent-memory"]
+}, categories);
+assert.equal(accepted.description, "用事件日志保存原始记录，再用派生索引提供查询。");
+assert.equal(readNoteProperties({ briefDescription: "Agent就能做视频哎嘿。" }, categories).description, undefined);
+assert.equal(readNoteProperties({ briefDescription: "这篇文章太香了！" }, categories).description, undefined);
 
 await rm(tempDir, { recursive: true, force: true });
 console.log("frontmatter edge case tests passed");

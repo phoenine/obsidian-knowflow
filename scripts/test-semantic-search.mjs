@@ -36,7 +36,7 @@ await esbuild.build({
   }]
 });
 
-const { chunkArticle, cosineSimilarity, isMarkdownInFolder, normalizeEmbedding, searchSemanticChunks } = await import(
+const { chunkArticle, chunkArticleSummary, cosineSimilarity, isMarkdownInFolder, normalizeEmbedding, searchSemanticChunks, pickArticlePassage } = await import(
   pathToFileURL(join(tempDir, "semantic-search.js")).href
 );
 
@@ -74,6 +74,12 @@ assert.equal(chunks[0].id, "Articles/Test.md#0");
 assert.ok(chunks.every((chunk) => chunk.content.length <= 1800));
 const longHeading = chunkArticle("Articles/Long.md", "Long", `## ${"H".repeat(12000)}\n\nbody`, 1);
 assert.ok(longHeading.every((chunk) => chunk.content.length <= 1800));
+const summaryChunks = chunkArticleSummary("Articles/Test.md", "Test", markdown, 123);
+assert.equal(summaryChunks.length, 1);
+assert.match(summaryChunks[0].content, /不应进入索引/);
+assert.doesNotMatch(summaryChunks[0].content, /向量检索连接问题和知识/);
+assert.deepEqual(chunkArticleSummary("Articles/Legacy.md", "旧文", "一篇尚无摘要的旧文。", 1), []);
+assert.equal(pickArticlePassage(chunks, "Agent").heading, "Agent");
 
 assert.equal(cosineSimilarity([1, 0], [1, 0]), 1);
 assert.equal(cosineSimilarity([1, 0], [0, 1]), 0);
@@ -102,6 +108,9 @@ const files = [
 const stored = new Map();
 const directories = new Set();
 let failManifestWrite = false;
+let appleManagedBlock = "";
+let withSummaries = true;
+let newSummary = "";
 const app = {
   vault: {
     adapter: {
@@ -121,7 +130,13 @@ const app = {
       }
     },
     getMarkdownFiles: () => files,
-    cachedRead: async (file) => file.path.includes("Apple") ? "## 苹果\n苹果是一种水果。" : "## 水果\n苹果和香蕉都是水果。",
+    cachedRead: async (file) => withSummaries && file.basename === "Apple"
+      ? `> [!summary]- AI 摘要\n> 苹果营养概况。\n\n## 苹果\n苹果是一种水果。${appleManagedBlock}`
+      : withSummaries && file.basename === "Fruit"
+        ? "> [!summary]- AI 摘要\n> 包含苹果与香蕉的摘要。\n\n## 水果\n苹果和香蕉都是水果。"
+      : withSummaries && file.basename === "Collision-289"
+        ? "> [!summary]- AI 摘要\n> 为分片并发保存使用的独立摘要。\n\n一篇有摘要的新文章。"
+        : `${file.basename === "Renamed" ? newSummary : ""}## 文章\n这篇文章的正文。`,
     getAbstractFileByPath: (path) => files.find((file) => file.path === path) ?? null
   },
   metadataCache: {
@@ -144,6 +159,7 @@ let failFruit = true;
 let embedCalls = 0;
 const transport = { embed: async (_config, inputs) => {
   embedCalls += 1;
+  assert.ok(inputs.every((input) => !input.includes("苹果是一种水果。") && !input.includes("苹果和香蕉都是水果。")));
   if (failFruit && inputs.some((input) => input.includes("香蕉"))) throw new Error("planned interruption");
   return inputs.map((input) => input.includes("苹果") ? [1, 0] : [0.8, 0.2]);
 } };
@@ -184,14 +200,32 @@ for (const { value } of shardMetadata()) {
     assert.equal(article.vectorLengthBytes, article.chunkCount * value.dimension * 4);
   }
 }
-assert.ok((await service.searchContext("苹果", undefined, 2)).includes("检索来源"));
+const includedContext = await service.searchContext("苹果", undefined, 2);
+assert.match(includedContext, /检索来源/);
+assert.match(includedContext, /苹果是一种水果/);
+assert.doesNotMatch(includedContext, /苹果营养概况|包含苹果与香蕉的摘要/);
+const beforeMissingSummary = embedCalls;
+assert.deepEqual(await service.findRelated(files[2]), []);
+assert.equal(embedCalls, beforeMissingSummary, "a source without a summary does not embed its full article");
 const related = await service.findRelated(files[0], 5);
 assert.equal(related[0]?.path, "Articles/Fruit.md");
+const titleMatch = new TestTFile({ path: "Articles/Apple Crisp.md", basename: "Apple Crisp", extension: "md", stat: { mtime: 9 } });
+files.push(titleMatch);
+files[0].stat.mtime = 7;
+const embedBeforeFailure = transport.embed;
+transport.embed = async () => { throw new Error("embedding unavailable"); };
+const fallback = await service.findRelated(files[0], 5);
+assert.ok(fallback.some((note) => note.path === titleMatch.path), "title matches remain when embedding fails");
+transport.embed = embedBeforeFailure;
+files.splice(files.indexOf(titleMatch), 1);
 
 const appleBefore = metadataFor("Articles/Apple.md");
 const appleBinaryBefore = appleBefore.path.replace(/\.json$/, ".bin");
+appleManagedBlock = "\n\n> [!info]- KnowFlow 相关文章\n> - [[Fruit]]";
 files[0].stat.mtime = 4;
+const callsBeforeManagedWrite = embedCalls;
 await service.refreshFile(files[0]);
+assert.equal(embedCalls, callsBeforeManagedWrite, "editing a legacy related-links block must reuse unchanged embeddings");
 const appleAfter = metadataFor("Articles/Apple.md");
 assert.notEqual(appleAfter.path, appleBefore.path, "single-file updates must create a new immutable shard revision");
 assert.equal(stored.has(appleBefore.path), false);
@@ -224,6 +258,15 @@ const reloaded = new SemanticIndexService(app, settings, "semantic-index.json", 
 await reloaded.load();
 assert.equal(reloaded.getStats().chunks, 2);
 assert.ok((await reloaded.searchContext("苹果", undefined, 2)).includes("检索来源"));
+
+const currentManifest = stored.get("semantic-index.json");
+const oldManifest = JSON.parse(currentManifest);
+oldManifest.modelKey = oldManifest.modelKey.replace("|source:ai-summary-v1", "");
+stored.set("semantic-index.json", JSON.stringify(oldManifest));
+const oldIndex = new SemanticIndexService(app, settings, "semantic-index.json", transport);
+await oldIndex.load();
+assert.equal(oldIndex.isReady(), false, "full-text index requires a rebuild before summary-based queries");
+stored.set("semantic-index.json", currentManifest);
 
 const fruitMetadata = metadataFor("Articles/Fruit.md");
 const fruitBinary = fruitMetadata.path.replace(/\.json$/, ".bin");
@@ -268,6 +311,17 @@ assert.ok(manifest.shards.length <= 1);
 await service.clear();
 assert.equal(stored.has("semantic-index.json"), false);
 assert.equal([...stored.keys()].some((path) => path.includes("semantic-index-v3/")), false);
+
+withSummaries = false;
+assert.equal((await service.rebuild()).files, 0);
+assert.equal(service.hasCompatibleIndex(), true);
+assert.equal(service.isReady(), false);
+newSummary = "> [!summary]- AI 摘要\n> 这篇新生成的摘要介绍索引工作流。\n\n";
+files[0].stat.mtime += 1;
+await service.refreshFile(files[0]);
+assert.equal(service.isReady(), true);
+assert.equal(service.getStats().files, 1);
+assert.ok((await service.searchContext("索引", undefined, 1)).includes("这篇文章的正文"));
 
 await rm(tempDir, { recursive: true, force: true });
 console.log("semantic search tests passed");

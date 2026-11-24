@@ -90,12 +90,9 @@ const originalWithComplexFrontmatter = [
   "正文"
 ].join("\n");
 
-// applyArticleFrontmatter ("整理") deliberately does NOT touch
-// 简要描述/阅读价值/分类/tags any more — those are owned exclusively by
-// applySummaryFrontmatter, called the moment a summary is generated (see
-// SummaryNoteService.applySummary). Re-running the pipeline must preserve
-// whatever's already there (or the template's blank default if a summary
-// was never generated) instead of overwriting it with stale/fallback data.
+// applyArticleFrontmatter copies the template structure and keeps existing
+// property values. The later property pass rewrites 简要描述、阅读价值、分类
+// and tags when this organize pass produced new values.
 const frontmatterUpdated = applyArticleFrontmatter("正文", originalWithComplexFrontmatter, template, {
   title: "标题",
   today: "2026-08-04"
@@ -109,7 +106,7 @@ assert.ok(frontmatterUpdated.includes("简要描述:\n"), "a never-generated 简
 assert.ok(frontmatterUpdated.includes("tags:\n"), "a never-generated tags falls back to the template's blank placeholder");
 assert.ok(frontmatterUpdated.includes("学习日期:\n"));
 assert.ok(frontmatterUpdated.includes("学习状态:\n  - 学习中"));
-assert.ok(frontmatterUpdated.includes("状态: true"));
+assert.ok(frontmatterUpdated.includes("状态: false"));
 assert.ok(frontmatterUpdated.includes("\n正文\n"));
 
 const preservedH1 = applyArticleFrontmatter("# 原始一级标题\n\n正文", originalWithComplexFrontmatter, template, {
@@ -122,10 +119,8 @@ const movedCategory = updateFrontmatterCategory(frontmatterUpdated, "知识积�
 assert.ok(movedCategory.includes("分类: 知识积累"));
 assert.ok(movedCategory.includes("description: |\n  第一行\n  第二行"));
 
-// applySummaryFrontmatter is what actually writes the AI's analysis into
-// frontmatter, the moment a summary is generated — before "整理" ever
-// runs. It must only touch these four keys, leaving everything else
-// (including the body) completely alone.
+// applySummaryFrontmatter writes only the four note-property keys and leaves
+// every other field and the body alone.
 {
   const original = [
     "---",

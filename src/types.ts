@@ -47,9 +47,6 @@ export interface KnowFlowSettings {
 export interface RelatedNote {
   path: string;
   title: string;
-  excerpt: string;
-  score: number;
-  reasons: string[];
 }
 
 export interface SemanticIndexStats {
@@ -74,6 +71,8 @@ export interface NoteSummary {
   reason: string;
   tags: string[];
 }
+
+export type GeneratedNoteSummary = Pick<NoteSummary, "filePath" | "title" | "summary" | "reason">;
 
 export interface QuizStats {
   total: number;
@@ -209,6 +208,7 @@ export interface ChatMessage {
   createdAt: string;
   completedAt?: string;
   status: "pending" | "streaming" | "done" | "error";
+  kind?: "article-freshness";
   error?: string;
 }
 

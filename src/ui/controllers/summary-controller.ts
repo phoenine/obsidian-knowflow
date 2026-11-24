@@ -1,8 +1,6 @@
-import { Notice, TFile } from "obsidian";
-import type { App } from "obsidian";
+import { Notice, type App, type TFile } from "obsidian";
 import type KnowFlowPlugin from "../../main";
-import type { NoteSummary } from "../../types";
-import type { SummaryText } from "../../services/learning/summary-notes";
+import { parseSummaryCallout, type SummaryText } from "../../services/learning/summary-notes";
 
 interface CachedSummaryText {
   mtime: number;
@@ -42,7 +40,7 @@ export class SummaryController {
   getSummaryText(file: TFile): SummaryText | null | undefined {
     const cached = this.getCachedText(file);
     if (cached !== undefined) return cached;
-    void this.refreshText(file);
+    if (!this.pending.has(file.path)) void this.refreshText(file);
     return undefined;
   }
 
@@ -55,49 +53,48 @@ export class SummaryController {
     force: boolean,
     handlers: {
       onDelta: (visible: string, reasoning: string) => void;
-      onSuccess: (summary: NoteSummary) => void;
     }
   ): Promise<void> {
-    if (this.pending.has(file.path)) return;
-    if (!force && await this.readText(file)) return;
-    this.pending.add(file.path);
-    this.errors.delete(file.path);
-    this.clearStreaming(file.path);
-    this.onStateChange(file.path);
+    const path = file.path;
+    if (this.pending.has(path) || (!force && this.getCachedText(file))) return;
+    this.pending.add(path);
+    this.errors.delete(path);
+    this.clearStreaming(path);
+    this.onStateChange(path);
     try {
       const content = await this.app.vault.read(file);
+      if (!force) {
+        const existing = parseSummaryCallout(content);
+        if (existing) {
+          this.cacheText(file, existing);
+          return;
+        }
+      }
       const summary = await this.plugin.ai.summarizeStream(
-        file.path,
+        path,
         file.basename,
         content,
-        this.plugin.settings.defaultArticleCategory,
-        ({ content: fullText, reasoning }) => {
-          const visible = extractVisibleText(fullText);
-          this.streamingTexts.set(file.path, visible);
-          this.streamingReasonings.set(file.path, reasoning);
-          handlers.onDelta(visible, reasoning);
+        ({ content: preview, reasoning }) => {
+          this.streamingTexts.set(path, preview);
+          this.streamingReasonings.set(path, reasoning);
+          handlers.onDelta(preview, reasoning);
         }
       );
       await this.plugin.summaryNotes.applySummary(
         file,
         { summary: summary.summary, reason: summary.reason },
-        {
-          description: summary.briefDescription,
-          readingValue: summary.readingValue,
-          category: summary.category,
-          tags: summary.tags
-        }
+        undefined,
+        path
       );
       this.cacheText(file, { summary: summary.summary, reason: summary.reason });
-      handlers.onSuccess(summary);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.errors.set(file.path, message);
+      this.errors.set(path, message);
       new Notice(`KnowFlow summary failed: ${message}`, 8000);
     } finally {
-      this.clearStreaming(file.path);
-      this.pending.delete(file.path);
-      this.onStateChange(file.path);
+      this.clearStreaming(path);
+      this.pending.delete(path);
+      this.onStateChange(path);
     }
   }
 
@@ -131,17 +128,4 @@ export class SummaryController {
     this.streamingTexts.delete(filePath);
     this.streamingReasonings.delete(filePath);
   }
-}
-
-function extractVisibleText(raw: string): string {
-  if (!raw) return "";
-  return raw
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/[{}\[\]]/g, "\n")
-    .replace(/"\w+":\s*"/g, "")
-    .replace(/",?\s*$/gm, "")
-    .replace(/\\n/g, "\n")
-    .replace(/\\"/g, "\"")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
 }

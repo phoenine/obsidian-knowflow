@@ -20,7 +20,7 @@ await esbuild.build({
     setup(build) {
       build.onResolve({ filter: /^obsidian$/ }, () => ({ path: "obsidian", namespace: "stub-obsidian" }));
       build.onLoad({ filter: /.*/, namespace: "stub-obsidian" }, () => ({
-        contents: "export class Notice {}\nexport class TFile {}\n",
+        contents: "export class Notice {}\nexport class TFile {}\nexport const requestUrl = () => { throw new Error('Unexpected network request'); };\n",
         loader: "js"
       }));
     }
@@ -73,8 +73,8 @@ const { SummaryController } = await import(pathToFileURL(join(tempDir, "summary-
   const plugin = {
     settings: { defaultArticleCategory: "知识积累" },
     ai: {
-      summarizeStream: async (_path, _title, _content, _category, onDelta) => {
-        onDelta({ content: '{"summary":"核心观点\\n- 内容"}', reasoning: "推理" });
+      summarizeStream: async (_path, _title, _content, onDelta) => {
+        onDelta({ content: "核心观点\n- 内容", reasoning: "" });
         return {
           filePath: file.path,
           title: file.basename,
@@ -89,22 +89,78 @@ const { SummaryController } = await import(pathToFileURL(join(tempDir, "summary-
       }
     },
     summaryNotes: {
-      applySummary: async (_file, text) => { saved = text; },
+      applySummary: async (_file, text, _meta, path) => {
+        assert.equal(path, file.path);
+        saved = text;
+      },
       loadSummaryText: async () => null
     }
   };
   const controller = new SummaryController(app, plugin, (path) => stateChanges.push(path));
   let delta = "";
   await controller.ensureSummary(file, true, {
-    onDelta: (visible) => { delta = visible; },
-    onSuccess: () => {}
+    onDelta: (visible) => { delta = visible; }
   });
 
-  assert.ok(delta.includes("核心观点"));
+  assert.equal(delta, "核心观点\n- 内容");
   assert.deepEqual(saved, { summary: "核心观点\n- 内容", reason: "理由" });
   assert.deepEqual(controller.getSummaryText(file), { summary: "核心观点\n- 内容", reason: "理由" });
   assert.equal(controller.isPending(file.path), false);
   assert.deepEqual(stateChanges, [file.path, file.path]);
+}
+
+{
+  const file = { path: "Articles/Article.md", basename: "Article", extension: "md" };
+  const source = { title: "发布说明", url: "https://example.com/release" };
+  const review = {
+    path: file.path, sourcesFound: 1, checkedOn: "2026-11-23", truncated: false, risks: [],
+    corrections: [
+      { before: "版本 1", after: "版本 2", quote: "已更新至版本 2", source },
+      { before: "上限 10", after: "上限 20", quote: "上限提升至 20", source }
+    ]
+  };
+  const model = { runtime: "disabled", apiBaseUrl: "", apiKey: "", model: "" };
+  const writes = [];
+  const app = { vault: { getAbstractFileByPath: (path) => path === file.path ? file : null } };
+  const plugin = {
+    settings: {
+      summaryModel: model, knowledgeMapModel: model, pipelineModel: model, chatModel: model,
+      quizModel: model, embeddingModel: model, confirmBeforeWrite: true
+    },
+    freshness: {
+      check: async (target) => {
+        assert.equal(target, file);
+        return review;
+      },
+      apply: async (target, snapshot, selected) => {
+        assert.equal(target, file);
+        assert.equal(snapshot, review);
+        writes.push([...selected]);
+      }
+    }
+  };
+  const controller = new ChatController(app, plugin, () => {});
+  const ask = async (question) => {
+    await controller.submit(question, { mode: "article-detail", activeFile: file, selectedPath: null }, file, {
+      onStart() {}, onContent() {}, onReasoning() {}
+    });
+    return controller.activeThread.messages.at(-1);
+  };
+  const checked = await ask("检查当前文章是否过时");
+  assert.equal(checked.kind, "article-freshness");
+  assert.match(checked.content, /第 2 条/);
+  assert.deepEqual(writes, []);
+  await ask("应用第 3 条");
+  assert.deepEqual(writes, []);
+  await ask("应用第 2 条");
+  assert.deepEqual(writes, [[1]]);
+  await ask("检查并更新这篇文章");
+  assert.deepEqual(writes, [[1]], "confirmation setting should leave edits pending");
+  await ask("应用第 1、2 条");
+  assert.deepEqual(writes, [[1], [0, 1]]);
+  controller.activeThread = null;
+  assert.match((await ask("应用全部")).content, /本对话没有可应用/);
+  assert.deepEqual(writes, [[1], [0, 1]], "a new thread cannot apply an earlier review");
 }
 
 await rm(tempDir, { recursive: true, force: true });

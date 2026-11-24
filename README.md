@@ -18,14 +18,17 @@ Clipping → 整理 → 总结 → 知识点 → Quiz → 学习状态 → 每�
 
 - 整理当前 Markdown 剪藏并修复常见格式问题。
 - 补全 Frontmatter、识别代码块并处理文章分类。
-- 为英文文章生成段内中文翻译，同时保留列表结构和序号。
+- 仅为正文明确为全英文的文章生成段内中文翻译；中文、混合语言和语言不确定的文章跳过翻译，独立链接与元信息不参与翻译。
 - 生成 AI 摘要、阅读价值和文章分类建议。
 - 生成 Mermaid 知识图谱和结构化知识点。
 - 生成、保存和作答 Markdown Quiz。
 - 记录文章学习状态并展示 Task Overview。
 - 从全局 Quiz 题库生成每日复习试卷。
-- 基于当前文章上下文进行 Chat，并可保存会话。
+- 基于当前文章上下文进行 Chat，并可保存会话。默认仅显示底部「与文章对话」，点开后即可输入。收起时会保留草稿和会话，底栏会提示进行中的回复是否完成。
 - 使用独立 embedding 模型发现 Relevant Notes，并为 Chat 提供可开关的 Vault Search。
+- 摘要、文章整理、翻译、知识骨架、知识点、Quiz 和问答通过具名 Skill 执行。
+- 主动检索公开资料，核对并更新文章中的时效事实。
+- 通过标题术语和语义索引筛选相关文章。
 
 暂未开放：
 
@@ -44,6 +47,8 @@ KnowFlow 可以处理当前打开的 Markdown 剪藏，并尽量以小范围修�
 
 - 清理网页剪藏中的广告、页脚和复制水印。
 - 修复标题层级、伪标题、列表、表格、引用和代码围栏。
+- 识别「提示词」「提示词节选」等标签，用反引号 `text` 围栏保留可复制提示词，并报告处理数量。提示词位置的旧文本围栏会转换为统一格式。
+- 写入前检查 YAML、围栏、提示词覆盖及媒体目标是否保留。已有的表格和本地媒体疑点随结果提示。
 - 保护 Obsidian wikilink、embed、callout 和 Mermaid 内容。
 - 根据文章模板补全 Frontmatter。
 - 将 AI 生成内容排除在后续 AI 输入之外，减少重复 token 和旧结果锚定。
@@ -60,6 +65,15 @@ KnowFlow 可以处理当前打开的 Markdown 剪藏，并尽量以小范围修�
 - 单选 Quiz 与答案解析
 
 生成的 Quiz 以 Markdown 文件保存在 `Archives/`，而不是持续写入不断膨胀的插件数据文件。知识点和 Quiz 会保留到原文的索引关系。
+
+### 文章维护
+
+`clipping-update` 的交付是整篇笔记的阅读体验。网页剪藏进入 Obsidian 后，标题、段落、列表、对比结构和可复制示例可能被压缩或变形。Agent 通读全文，是为了结合上下文恢复这些关系，保留原意，让读者能浏览、比较和复制。流程完成或 Markdown 语法通过只是技术条件。整理后的正文应能直接作为 AI Summary 的输入，复用已有的清理结果。
+
+- **内置 Skills**。规则存于项目的 [skills 目录](skills/README.md)，构建时随插件打包。`clipping-update` 通读笔记，按 Obsidian Markdown 恢复剪藏丢失的章节、段落、列表、对比内容和可复制示例。Agent 返回基于原文位置的结构编辑，插件负责应用并保存。执行时兼容 Vault 中现有的同名 `skills/<名称>/SKILL.md`，也兼容旧版 `clipping-repair` 规则文件。
+- **生成文章摘要**。每次读取当前笔记一次，短文使用清理后的全文，长文在本地按章抽取片段，一次发给模型。卡片流式展示摘要正文，完成后按核心观点和章节梳理渲染，并按阅读评分显示推荐动作。模型没有返回摘要内容时，使用相同输入重试一次。保存时把摘要和可用的摘要属性合并到最新笔记，保留生成期间的正文编辑。
+- **文章时效检查**。打开文章后，在 KnowFlow 对话中输入「检查当前文章是否过时」。Agent 通过 [DeepSeek Search](https://api-docs.deepseek.com/guides/search/) 查找公开资料，用 Summary model 核查，返回带来源的编号修订或删除建议。回复「应用第 2 条」或「应用全部」可将对应修订写入当前对话绑定的文章。直接发送「检查并更新这篇文章」时，开启 `Confirm before write` 会先等待确认。DeepSeek Search 可复用已配置的官方 API Key，也可在 `Settings → AI Models → DeepSeek Search → Configure` 设置独立密钥。搜索及必要的网页抓取按接口请求计费。单次检查覆盖正文前 24,000 个字符，最多提出五项修订。
+- **相关文章**。Relevant Notes 先过滤弱语义匹配，再合并具体标题术语的匹配结果，最多展示五篇。共同标签只参与排序。每篇显示可点击的标题、加入 Chat 按钮和最多两行的「简要描述」。
 
 ### Task Overview
 
@@ -113,10 +127,10 @@ Vault/
 
 每个模型可以独立设置 Runtime、Base URL、API Key 和 Model ID。
 
-Relevant Notes 与 Vault Search 共用本地语义索引。先在 `AI Models` 配置 Embedding model，再到 `Data` 设置 `Excluded folders`、可选的 `Embedding dimensions` 并建立索引；索引只覆盖 `Articles folder` 所配置的文章目录（默认 `Articles/`），默认排除任意层级的 `assets` 子目录。索引使用小型清单和 128 个稳定哈希分片，chunk 元数据与 Float32 二进制向量分开保存，并支持分片级中断续建和损坏隔离。使用 Cloud runtime 建索引时，文章分块会发送给所配置的 embedding 服务。详细设计见 [Relevant Notes 与 Vault Search](docs/relevant-notes-and-vault-search.md)。
+Relevant Notes 与 Vault Search 共用本地语义索引。先在 `AI Models` 配置 Embedding model，再到 `Data` 设置 `Excluded folders`、可选的 `Embedding dimensions` 并建立索引；索引只覆盖 `Articles folder` 所配置的文章目录（默认 `Articles/`），默认排除任意层级的 `assets` 子目录。索引使用小型清单和 128 个稳定哈希分片，chunk 元数据与 Float32 二进制向量分开保存，并支持分片级中断续建和损坏隔离。每篇文章只索引已存在的 AI 摘要，无摘要的文章不生成向量。Vault Search 在命中后读取原文段落。已有全文索引在升级后需重建。使用 Cloud runtime 建索引时，AI 摘要会发送给所配置的 embedding 服务。详细设计见 [Relevant Notes 与 Vault Search](docs/relevant-notes-and-vault-search.md)。
 
 > [!WARNING]
-> API Key 当前以明文保存在 Vault 的 `.obsidian/plugins/knowflow/data.json`。如果 Vault 会通过 Git 或云盘同步，请排除该文件或使用不含密钥的配置。
+> 各模型的 API Key 当前以明文保存在 Vault 的 `.obsidian/plugins/knowflow/data.json`。如果 Vault 会通过 Git 或云盘同步，请排除该文件或使用不含密钥的配置。
 
 ## 使用方式
 

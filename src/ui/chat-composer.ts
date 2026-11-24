@@ -1,5 +1,5 @@
 import { setIcon } from "obsidian";
-import { attachPressFeedback, iconButton, row, setStyles } from "./dom";
+import { attachPressFeedback, button, iconButton, iconSpan, row, setStyles } from "./dom";
 
 interface ChatComposerProps {
   contextLabel: string;
@@ -18,21 +18,61 @@ interface ChatComposerProps {
   onOpenHistory: () => void;
   onToggleVaultSearch: () => void;
   onRemoveContext: (path: string) => void;
+  onCollapse: () => void;
 }
 
-export function renderChatComposer(root: HTMLElement, props: ChatComposerProps): void {
-  const composer = root.createDiv({ cls: "kf-composer" });
-  setStyles(composer, {
+function createComposer(root: HTMLElement, padding: string): HTMLElement {
+  return setStyles(root.createDiv({ cls: "kf-composer" }), {
     backgroundColor: "var(--background-primary)",
     borderTop: "1px solid color-mix(in srgb, var(--interactive-accent) 18%, var(--background-modifier-border))",
     display: "flex",
     flexDirection: "column",
+    flexShrink: "0",
     gap: "8px",
-    padding: "10px 12px"
+    padding
   });
+}
+
+export function renderCollapsedChatComposer(
+  root: HTMLElement,
+  status: string,
+  restoreFocus: boolean,
+  onExpand: () => void
+): void {
+  root.style.paddingBottom = "0";
+  const composer = createComposer(root, "6px 12px 4px");
+  const toggle = setStyles(button(composer, "", onExpand), {
+    gap: "7px",
+    justifyContent: "flex-start",
+    minWidth: "0",
+    textAlign: "left"
+  });
+  toggle.addClass("kf-composer-expand");
+  toggle.setAttribute("aria-expanded", "false");
+  iconSpan(toggle, "message-square").setAttribute("aria-hidden", "true");
+  toggle.createSpan({ text: "与文章对话" });
+  if (status) {
+    setStyles(toggle.createSpan({ text: status }), {
+      color: "var(--text-muted)",
+      fontSize: "12px",
+      fontWeight: "500"
+    });
+  }
+  const chevron = iconSpan(toggle, "chevron-up");
+  chevron.setAttribute("aria-hidden", "true");
+  setStyles(chevron, { color: "var(--text-muted)", marginLeft: "auto" });
+  if (restoreFocus) window.requestAnimationFrame(() => {
+    if (toggle.isConnected) toggle.focus({ preventScroll: true });
+  });
+}
+
+export function renderChatComposer(root: HTMLElement, props: ChatComposerProps): void {
+  const composer = createComposer(root, "10px 12px");
 
   const toolbar = row(composer, "kf-composer-toolbar");
   setStyles(toolbar, {
+    flexWrap: "wrap",
+    gap: "4px 8px",
     justifyContent: "space-between",
     minHeight: "24px"
   });
@@ -43,12 +83,6 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
     fontSize: "13px",
     fontWeight: "600"
   });
-  const chevron = mode.createSpan();
-  setIcon(chevron, "chevron-down");
-  setStyles(chevron, {
-    color: "var(--text-muted)",
-    display: "inline-flex"
-  });
   setStyles(mode.createDiv({
     text: `${props.tokenEstimated ? "~" : ""}${formatTokenCount(props.tokenCount)}`,
     cls: "kf-chat-tokens"
@@ -58,15 +92,14 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
     fontWeight: "600"
   });
   const tools = row(toolbar);
-  setStyles(tools, { gap: "2px" });
-  const tool = (label: string, icon: string, onClick: () => void): void => {
+  setStyles(tools, { gap: "2px", marginLeft: "auto" });
+  const tool = (label: string, icon: string, onClick: () => void): HTMLButtonElement =>
     setStyles(iconButton(tools, label, icon, onClick), {
       backgroundColor: "transparent",
       border: "0",
       height: "26px",
       width: "26px"
     });
-  };
   const vaultSearch = iconButton(
     tools,
     props.vaultSearchEnabled ? "关闭 Vault Search" : "开启 Vault Search",
@@ -85,6 +118,7 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
   });
   tool("保存到 Note", "download", props.onSaveNote);
   tool("历史对话", "history", props.onOpenHistory);
+  tool("收起对话", "chevron-down", props.onCollapse).setAttribute("aria-expanded", "true");
 
   const panel = composer.createDiv({ cls: "kf-composer-panel" });
   setStyles(panel, {
@@ -116,33 +150,28 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
     justifyContent: "center",
     width: "26px"
   });
-  const chip = contextRow.createDiv({ cls: "kf-context-chip" });
-  applyChipStyle(chip);
-  const chipText = chip.createSpan({ text: props.contextLabel || "Current" });
-  setStyles(chipText, {
-    display: "block",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap"
-  });
+  createContextChip(contextRow, props.contextLabel || "Current", "calc(100% - 34px)");
   for (const path of props.additionalContextPaths) {
-    const relatedChip = contextRow.createDiv({ cls: "kf-context-chip" });
-    applyChipStyle(relatedChip);
     const label = path.split("/").slice(-1)[0]?.replace(/\.md$/i, "") ?? path;
-    relatedChip.createSpan({ text: label });
-    const remove = relatedChip.createEl("button", { text: "×", attr: { "aria-label": `移除 ${label}` } });
+    const relatedChip = createContextChip(contextRow, label, "100%");
+    const removeLabel = `移除 ${label}`;
+    const remove = relatedChip.createEl("button", { text: "×", attr: { "aria-label": removeLabel, title: removeLabel } });
     setStyles(remove, {
       background: "transparent",
       border: "0",
+      boxShadow: "none",
       color: "var(--text-muted)",
       cursor: "pointer",
-      padding: "0"
+      flex: "0 0 auto",
+      height: "18px",
+      padding: "0",
+      width: "18px"
     });
     remove.addEventListener("click", () => props.onRemoveContext(path));
   }
   const input = panel.createEl("textarea", {
     cls: "kf-input",
-    attr: { placeholder: "Your AI assistant for Obsidian · @ to add context · / for prompts" }
+    attr: { placeholder: "输入问题，或请 Agent 检查文章时效" }
   });
   setStyles(input, {
     backgroundColor: "transparent",
@@ -182,7 +211,8 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
     // progress ticks) tore down and recreated this textarea, so the user
     // doesn't lose their place mid-sentence.
     window.requestAnimationFrame(() => {
-      input.focus();
+      if (!input.isConnected) return;
+      input.focus({ preventScroll: true });
       input.setSelectionRange(input.value.length, input.value.length);
     });
   }
@@ -245,19 +275,28 @@ function formatTokenCount(value: number): string {
   return `${rounded}k tokens`;
 }
 
-export function applyChipStyle(el: HTMLElement): void {
-  setStyles(el, {
+function createContextChip(parent: HTMLElement, label: string, maxWidth: string): HTMLDivElement {
+  const chip = setStyles(parent.createDiv({ cls: "kf-context-chip" }), {
+    alignItems: "center",
     alignSelf: "flex-start",
     border: "1px solid var(--background-modifier-border)",
     borderRadius: "7px",
+    boxSizing: "border-box",
     color: "var(--text-normal)",
     display: "inline-flex",
     fontSize: "12px",
     fontWeight: "500",
     gap: "6px",
-    maxWidth: "calc(100% - 34px)",
+    maxWidth,
     minWidth: "0",
-    padding: "4px 8px",
+    padding: "4px 8px"
+  });
+  setStyles(chip.createSpan({ text: label, attr: { title: label } }), {
+    display: "block",
+    minWidth: "0",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
     whiteSpace: "nowrap"
   });
+  return chip;
 }

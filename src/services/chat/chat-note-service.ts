@@ -2,6 +2,8 @@ import { normalizePath } from "obsidian";
 import type { App } from "obsidian";
 import type { ChatThread } from "../../types";
 
+const FRESHNESS_MARKER = "<!-- knowflow-chat:article-freshness -->";
+
 export class ChatNoteService {
   constructor(private app: App, private folder: string) {}
 
@@ -57,6 +59,7 @@ export function renderThread(thread: ChatThread): string {
     lines.push(`**${message.role === "user" ? "user" : "ai"}**: ${message.role === "user" ? message.content.trim() : ""}`);
     lines.push("");
     if (message.role === "assistant") {
+      if (message.kind === "article-freshness") lines.push(FRESHNESS_MARKER, "");
       lines.push(message.content.trim());
       lines.push("");
     }
@@ -111,10 +114,12 @@ function parseCopilotMessages(body: string): ChatThread["messages"] {
     const end = matches[index + 1]?.index ?? body.length;
     const block = `${match[2]}\n${body.slice(start, end)}`;
     const timestamp = /\[Timestamp:\s*([^\]]+)\]/i.exec(block)?.[1]?.trim();
-    const content = block
+    const kind = role === "assistant" && block.trimStart().startsWith(FRESHNESS_MARKER) ? "article-freshness" : undefined;
+    let content = block
       .replace(/\n?\[Context:[^\]]*\]\s*/gi, "\n")
       .replace(/\n?\[Timestamp:[^\]]*\]\s*/gi, "\n")
       .trim();
+    if (kind) content = content.slice(FRESHNESS_MARKER.length).trimStart();
     const createdAt = parseTimestamp(timestamp)?.toISOString() ?? new Date().toISOString();
     return {
       id: `message-${index}-${new Date(createdAt).getTime()}`,
@@ -123,7 +128,8 @@ function parseCopilotMessages(body: string): ChatThread["messages"] {
       reasoning: "",
       createdAt,
       completedAt: role === "assistant" ? createdAt : undefined,
-      status: "done"
+      status: "done",
+      kind
     };
   });
 }

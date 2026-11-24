@@ -1,4 +1,5 @@
 import { prepareArticleForAi } from "../clipping/managed-content";
+import { parseSummaryCallout } from "../learning/summary-notes";
 
 export interface SemanticChunk {
   id: string;
@@ -17,6 +18,7 @@ export interface SemanticSearchHit {
 
 const MAX_CHUNK_CHARS = 1800;
 const CHUNK_OVERLAP_CHARS = 180;
+export const SUMMARY_INDEX_SOURCE = "ai-summary-v1";
 
 /** Avoids scheduling semantic work for unrelated Vault files. */
 export function isMarkdownInFolder(
@@ -39,7 +41,19 @@ export function isMarkdownInFolder(
   });
 }
 
-/** Splits source Markdown into heading-aware chunks suitable for embedding. */
+/** One vector per existing usable summary. Full text is retrieved separately for citations. */
+export function chunkArticleSummary(path: string, title: string, markdown: string, mtime: number): SemanticChunk[] {
+  const summary = parseSummaryCallout(markdown)?.summary.trim();
+  if (!summary || summary === "AI 未返回有效摘要。") return [];
+  const prefix = `标题：${truncate(title, 300)}\n小节：AI 摘要\n\n`;
+  return [{
+    id: `${path}#0`, path, title, heading: "AI 摘要",
+    content: prefix + truncate(summary, MAX_CHUNK_CHARS - prefix.length),
+    embedding: new Float32Array(), mtime
+  }];
+}
+
+/** Splits original Markdown into heading-aware passages for on-demand citations. */
 export function chunkArticle(path: string, title: string, markdown: string, mtime: number): SemanticChunk[] {
   const content = prepareArticleForAi(markdown);
   if (!content) return [];
@@ -84,6 +98,30 @@ export function chunkArticle(path: string, title: string, markdown: string, mtim
     }
   }
   return chunks;
+}
+
+/** Chooses one current passage from a candidate article without embedding its body. */
+export function pickArticlePassage(chunks: SemanticChunk[], query: string): SemanticChunk | undefined {
+  const terms = new Set(query.toLowerCase().match(/[a-z0-9][a-z0-9.+_-]{1,}|[\p{Script=Han}]+/gu)
+    ?.flatMap((term) => /^\p{Script=Han}/u.test(term) && term.length > 2
+      ? Array.from({ length: term.length - 1 }, (_, index) => term.slice(index, index + 2))
+      : [term]) ?? []);
+  let best: SemanticChunk | undefined;
+  let bestScore = -1;
+  for (const chunk of chunks) {
+    const body = chunk.content.slice(chunk.content.indexOf("\n\n") + 2).toLowerCase();
+    const heading = chunk.heading.toLowerCase();
+    let score = 0;
+    for (const term of terms) {
+      if (body.includes(term)) score += 1;
+      if (heading !== chunk.title.toLowerCase() && heading.includes(term)) score += 1;
+    }
+    if (score > bestScore) {
+      best = chunk;
+      bestScore = score;
+    }
+  }
+  return best;
 }
 
 /** Returns cosine similarity, or zero for invalid/mismatched vectors. */

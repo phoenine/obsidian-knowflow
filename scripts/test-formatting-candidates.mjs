@@ -8,7 +8,13 @@ import * as esbuild from "esbuild";
 const tempDir = await mkdtemp(join(tmpdir(), "knowflow-formatting-"));
 await esbuild.build({
   bundle: true,
-  entryPoints: ["src/services/clipping/formatting-candidates.ts"],
+  entryPoints: {
+    "formatting-candidates": "src/services/clipping/formatting-candidates.ts",
+    "prompt-blocks": "skills/clipping-update/scripts/prompt-blocks.ts",
+    "clipped-code": "skills/clipping-update/scripts/clipped-code.ts",
+    "reading-structure": "skills/clipping-update/scripts/reading-structure.ts",
+    "detached-lists": "skills/clipping-update/scripts/detached-lists.ts"
+  },
   format: "esm",
   outdir: tempDir,
   platform: "node"
@@ -16,17 +22,109 @@ await esbuild.build({
 const {
   applyFormattingDecisions,
   batchFormattingCandidates,
-  collectFormattingCandidates,
   collectHeadingCandidates,
   collectCodeCandidates,
+  collectClippedCodeCandidates,
   hasSameNonWhitespaceContent,
   needsCodeReformat,
   normalizeBodyHeadingLevels,
   preferTextLanguage,
+  restoreClippedShellContinuations,
   stripSequentialLineNumbers,
   trimCodeFenceBody
 } = await import(pathToFileURL(join(tempDir, "formatting-candidates.js")).href);
+const { formatPromptBlocks } = await import(pathToFileURL(join(tempDir, "prompt-blocks.js")).href);
+const { prettyJsonBlock, removeClipperFenceSpacing, removePythonClipperSpacing, repairClippedYaml } = await import(pathToFileURL(join(tempDir, "clipped-code.js")).href);
+const { repairTableDividers } = await import(pathToFileURL(join(tempDir, "reading-structure.js")).href);
+const { restoreDetachedLists } = await import(pathToFileURL(join(tempDir, "detached-lists.js")).href);
 
+{
+  const lines = ["# config.yaml", "memory:", "  root:./agent_memory", "  inject:", "    max_lines: 200", "    max_bytes: 25600", "    index_only: true"];
+  const parseConfig = (source) => {
+    if (!source.includes("  root: ./agent_memory")) throw new Error("Malformed YAML path");
+    return { memory: { root: "./agent_memory", inject: { max_lines: 200, max_bytes: 25600, index_only: true } } };
+  };
+  assert.equal(repairClippedYaml(lines.join("\n\n"), parseConfig), lines.join("\n").replace("root:./", "root: ./"));
+
+  const multiline = ["description: |", "  第一行", "  第二行", "options:", "  first: true", "  second: true"].join("\n\n");
+  assert.equal(repairClippedYaml(multiline, (source) => ({ description: source.includes("第一行\n\n  第二行") ? "第一行\n\n第二行" : "第一行\n第二行" })), multiline);
+}
+
+{
+  const header = "| 模型 | 无记忆 | 有记忆 | 增益 |";
+  const row = "| 模型 A | 0.644 | 0.833 | +0.189 |";
+  const divider = "| --- | --- | --- |";
+  assert.equal(repairTableDividers([header, divider, row].join("\n")), [header, "| --- | --- | --- | --- |", row].join("\n"));
+  const incomplete = [header, divider, "| 模型 A | 0.644 |"].join("\n");
+  assert.equal(repairTableDividers(incomplete), incomplete);
+}
+
+{
+  const source = ["import os", "import sys", "class Tool:", "    def run(self):", '        text = """第一段', "第二段", '"""', "        print(text)", "        return True"].join("\n\n");
+  const expected = ["import os", "import sys", "", "class Tool:", "    def run(self):", '        text = """第一段', "", "第二段", "", '"""', "        print(text)", "        return True"].join("\n");
+  assert.equal(removePythonClipperSpacing(source), expected);
+  assert.equal(removePythonClipperSpacing(expected), expected);
+}
+
+{
+  const yaml = ["# config.yaml", "memory:", "  root:./agent_memory", "  inject:", "    max_lines: 200", "    max_bytes: 25600"].join("\n\n");
+  assert.equal(removeClipperFenceSpacing(yaml, "yaml"), yaml.replace(/\n\n/g, "\n"));
+  const tree = ["agent_memory/", "├─ transcripts/", "│ └─ 2026-11-23/", "│ └─ s_8f3a.jsonl", "├─ notes/", "└─ config.yaml"].join("\n\n");
+  assert.equal(removeClipperFenceSpacing(tree, "bash"), tree.replace(/\n\n/g, "\n"));
+  const python = [
+    "# memory/notes.py",
+    "import re, time",
+    "NOTE_TEMPLATE = \"\"\"---",
+    "",
+    "id: {id}",
+    "",
+    "claim: {claim}",
+    "",
+    "evidence: {evidence}",
+    "",
+    "status: {status}",
+    "",
+    "---",
+    "",
+    "\"\"\"",
+    "def write_note():",
+    "    return NOTE_TEMPLATE"
+  ].join("\n");
+  const compactTemplate = [
+    "# memory/notes.py",
+    "import re, time",
+    "NOTE_TEMPLATE = \"\"\"---",
+    "id: {id}",
+    "claim: {claim}",
+    "evidence: {evidence}",
+    "status: {status}",
+    "---",
+    "\"\"\"",
+    "def write_note():",
+    "    return NOTE_TEMPLATE"
+  ].join("\n");
+  assert.equal(removeClipperFenceSpacing(python, "python"), compactTemplate);
+  const prompt = ["把经验写进记忆。", "", "下次还会用到的结论才值得记。", "", "每条记忆必须给出依据。", "", "一条记忆只讲一件事。", "", "没有依据就不要写入。"].join("\n");
+  assert.equal(removeClipperFenceSpacing(prompt, "text"), prompt);
+  assert.equal(removeClipperFenceSpacing(["def run():", "", "    return 1"].join("\n"), "python"), ["def run():", "", "    return 1"].join("\n"));
+}
+
+{
+  const source = ["...python", "", "def build\\_injection(root):", "", "　　return root", "", "下一段正文。"].join("\n");
+  const candidates = collectClippedCodeCandidates(source);
+  assert.equal(candidates.length, 1);
+  assert.equal(applyFormattingDecisions(source, candidates, [{ id: candidates[0].id, action: "wrap-code", throughLine: 5 }]),
+    ["```python", "def build_injection(root):", "", "    return root", "```", "", "下一段正文。"].join("\n"));
+}
+
+assert.equal(
+  normalizeBodyHeadingLevels("## 1. 简介\n\n### 二、 实现\n\n## 2026 年趋势\n\n## 3 种方法"),
+  "## 简介\n\n### 实现\n\n## 2026 年趋势\n\n## 3 种方法"
+);
+assert.equal(
+  normalizeBodyHeadingLevels("## 1.  一、业务背景：\n\n### 1.1.  提示词与 Skill 优化：从取得收益到提升放缓\n\n## 2.  二、认识 Jev："),
+  "## 业务背景：\n\n### 提示词与 Skill 优化：从取得收益到提升放缓\n\n## 认识 Jev："
+);
 assert.equal(
   normalizeBodyHeadingLevels("# 一级标题\n\n## 二级标题"),
   "## 一级标题\n\n### 二级标题",
@@ -72,7 +170,7 @@ assert.equal(
     "",
     "这里解释产品经理的职责。"
   ].join("\n");
-  const candidates = collectFormattingCandidates(article);
+  const candidates = collectHeadingCandidates(article);
   const heading = candidates.find((candidate) => candidate.type === "possible-heading");
   assert.ok(heading);
   const formatted = applyFormattingDecisions(article, candidates, [
@@ -114,7 +212,7 @@ assert.equal(
     "",
     "正文保持不变。"
   ].join("\n");
-  const candidates = collectFormattingCandidates(article);
+  const candidates = collectHeadingCandidates(article);
   assert.equal(applyFormattingDecisions(article, candidates, []), article);
   assert.ok(article.startsWith("## 1. "));
 }
@@ -130,7 +228,7 @@ assert.equal(
     "",
     "配置结束。"
   ].join("\n");
-  const candidates = collectFormattingCandidates(article);
+  const { possibleCode: candidates } = collectCodeCandidates(article);
   const code = candidates.find((candidate) => candidate.type === "possible-code");
   assert.ok(code);
   const formatted = applyFormattingDecisions(article, candidates, [
@@ -148,7 +246,7 @@ assert.equal(
     "> [!question]- Quiz",
     "> [[Quiz/测试题]]"
   ].join("\n");
-  const candidates = collectFormattingCandidates(article);
+  const candidates = collectHeadingCandidates(article);
   assert.equal(applyFormattingDecisions(article, candidates, []), article);
 }
 
@@ -156,6 +254,18 @@ assert.equal(
   stripSequentialLineNumbers("1type: Metric\n2title: Revenue\n3description: 收入"),
   "type: Metric\ntitle: Revenue\ndescription: 收入"
 );
+{
+  const numberedData = "```text\n1 apple\n2 banana\n3 carrot\n```";
+  const dataCandidates = collectCodeCandidates(numberedData).fencedCode;
+  assert.equal(dataCandidates.length, 1);
+  assert.equal(applyFormattingDecisions(numberedData, dataCandidates, [{ id: dataCandidates[0].id, action: "keep" }]), numberedData);
+
+  const numberedClip = "```yaml\n1type: Metric\n2title: Revenue\n3description: 收入\n```";
+  const clipCandidates = collectCodeCandidates(numberedClip).fencedCode;
+  assert.equal(clipCandidates.length, 1);
+  assert.equal(applyFormattingDecisions(numberedClip, clipCandidates, [{ id: clipCandidates[0].id, action: "strip-line-numbers" }]),
+    "```yaml\ntype: Metric\ntitle: Revenue\ndescription: 收入\n```");
+}
 assert.equal(
   stripSequentialLineNumbers("1company-knowledge/\n2├── index.md\n3└── log.md"),
   "company-knowledge/\n├── index.md\n└── log.md"
@@ -285,8 +395,8 @@ assert.equal(
     "",
     `正文段落 ${index}，用于构成长文章。`
   ].join("\n")).join("\n\n");
-  const candidates = collectFormattingCandidates(longArticle);
-  assert.equal(candidates.filter((candidate) => candidate.type === "fenced-code").length, 80);
+  const { fencedCode: candidates } = collectCodeCandidates(longArticle);
+  assert.equal(candidates.length, 80);
   assert.ok(candidates.some((candidate) => candidate.content.includes("value79")), "late candidates must not be truncated");
 }
 
@@ -311,10 +421,118 @@ assert.equal(
 
 {
   const article = "English paragraph.\n\n中文译文。\n<!-- knowflow-translation -->";
+  const { possibleCode, fencedCode } = collectCodeCandidates(article);
   assert.ok(
-    collectFormattingCandidates(article).every((candidate) => !candidate.content.includes("knowflow-translation")),
+    [...collectHeadingCandidates(article), ...possibleCode, ...fencedCode]
+      .every((candidate) => !candidate.content.includes("knowflow-translation")),
     "managed translation markers must never become formatting candidates"
   );
+}
+
+{
+  const instructions = ["保持房间的光线不变。", "", "【下一轮】", "只把参考图中的猫改成白色。"].join("\n");
+  const article = [
+    "### 2.1.  提示词节选", "", instructions, "", "第一行左边是模型 A", "![[效果图.png]]", "",
+    "**提示词**", "", "画一张手冲咖啡步骤图。", "", "## 生成结果", "",
+    "提示词", "", "![[只有结果图.png]]", "", "这段正文只是讨论提示词。"
+  ].join("\n");
+  const result = formatPromptBlocks(article);
+  assert.equal(result.wrapped, 2);
+  assert.equal(result.skipped, 1);
+  assert.ok(result.content.includes("```text\n" + instructions + "\n```\n\n第一行左边是模型 A\n![[效果图.png]]"));
+  assert.ok(result.content.includes("```text\n画一张手冲咖啡步骤图。\n```\n\n## 生成结果"));
+  assert.ok(result.content.includes("提示词\n\n![[只有结果图.png]]"));
+  assert.equal(collectCodeCandidates(result.content).fencedCode.length, 0, "prompt fences stay out of programming-code repair");
+  const again = formatPromptBlocks(result.content);
+  assert.equal(again.wrapped, 0);
+  assert.equal(again.existing, 2);
+  assert.equal(again.content, result.content, "the same prompts are already covered on the next run");
+}
+
+{
+  const prompt = "输出包含 &#x20; 的字面示例。";
+  const oldNote = ["### 提示词", "&#x20;", "```text", "~~~text", prompt, "~~~", "```", "", "## 生成结果"].join("\n");
+  const result = formatPromptBlocks(oldNote);
+  assert.equal(result.content, ["### 提示词", "", "```text", prompt, "```", "", "## 生成结果"].join("\n"));
+  assert.deepEqual(result.bodies, [prompt]);
+  assert.equal(formatPromptBlocks(result.content).content, result.content);
+
+  const inner = ["保留下面的示例", "```js", "const x = 1;", "```"].join("\n");
+  const oldTilde = ["提示词", "", "~~~text", inner, "~~~"].join("\n");
+  const migrated = formatPromptBlocks(oldTilde);
+  assert.equal(migrated.content, ["提示词", "", "````text", inner, "````"].join("\n"));
+  assert.equal(collectCodeCandidates(migrated.content).fencedCode.length, 0);
+}
+
+{
+  const nested = [
+    "~~~markdown", "```", "", "内层示例", "", "# 示例标题", "```", "~~~", "",
+    "%%", "", "私有批注", "", "%%", "", "这是正文标题", ""
+  ].join("\n");
+  assert.deepEqual(collectHeadingCandidates(nested).map(({ content }) => content), ["这是正文标题"]);
+  assert.equal(collectCodeCandidates(nested).fencedCode.length, 0);
+  assert.equal(normalizeBodyHeadingLevels(nested), nested);
+
+  const quoted = String.raw`run "literal \\  --flag" --next`;
+  const comment = String.raw`run --flag # example \  --safe`;
+  assert.equal(restoreClippedShellContinuations(quoted, "sh"), quoted);
+  assert.equal(restoreClippedShellContinuations(comment, "sh"), comment);
+}
+
+{
+  const source = [
+    "### 12.9.  五条可以搬去别处的设计思想",
+    "",
+    "这套东西虽然是给 Agent 记忆写的，但有五条能直接搬到别的系统里。",
+    "",
+    "1",
+    "",
+    "**只追加的真相源。** 任何派生数据都可能错，只有原始事件不会骗人。",
+    "",
+    "2",
+    "",
+    "**派生层可重建。** wiki、索引、摘要都能从日志重跑一遍。",
+    "",
+    "```",
+    "1",
+    "",
+    "**代码里的序号保留。**",
+    "",
+    "2",
+    "",
+    "**不要收成列表。**",
+    "```"
+  ].join("\n");
+  assert.equal(restoreDetachedLists(source), [
+    "### 12.9.  五条可以搬去别处的设计思想",
+    "",
+    "这套东西虽然是给 Agent 记忆写的，但有五条能直接搬到别的系统里。",
+    "",
+    "1. **只追加的真相源。** 任何派生数据都可能错，只有原始事件不会骗人。",
+    "",
+    "2. **派生层可重建。** wiki、索引、摘要都能从日志重跑一遍。",
+    "",
+    "```",
+    "1",
+    "",
+    "**代码里的序号保留。**",
+    "",
+    "2",
+    "",
+    "**不要收成列表。**",
+    "```"
+  ].join("\n"));
+  assert.equal(restoreDetachedLists("1\n\n单独一项不收。"), "1\n\n单独一项不收。");
+}
+
+{
+  const raw = '{  "state": {"query": "活动支持哪些配置，有什么门槛？"},  "questions": { "business_route": { "type": "choice", "活动咨询": "解释规则" } } }';
+  const pretty = prettyJsonBlock(raw, "json");
+  assert.equal(pretty, JSON.stringify(JSON.parse(raw), null, 2));
+  assert.ok(pretty.includes("\n"));
+  assert.equal(prettyJsonBlock(pretty, "json"), pretty);
+  assert.equal(prettyJsonBlock("{bad", "json"), "{bad");
+  assert.equal(prettyJsonBlock(raw, "text"), raw);
 }
 
 await rm(tempDir, { recursive: true, force: true });

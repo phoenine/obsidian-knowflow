@@ -1,3 +1,6 @@
+import { englishArticleSkipReason, translationProse } from "./translation-language";
+import { protectedLineIndices, protectedRanges } from "./protected-markdown";
+
 export interface TranslationCandidate {
   id: string;
   startLine: number;
@@ -15,25 +18,45 @@ const TRANSLATION_BATCH_CHARS = 12000;
 const TRANSLATION_MARKER = "<!-- knowflow-translation -->";
 
 export function collectTranslationCandidates(content: string): TranslationCandidate[] {
+  return planEnglishTranslation(content).candidates;
+}
+
+export function planEnglishTranslation(content: string): { candidates: TranslationCandidate[]; skipReason?: string } {
+  const skipReason = englishArticleSkipReason(content);
+  if (skipReason) return { candidates: [], skipReason };
+  const candidates = collectParagraphCandidates(content);
+  return { candidates, skipReason: candidates.length === 0 ? "无可翻译正文" : undefined };
+}
+
+export function collectParagraphCandidates(content: string): TranslationCandidate[] {
   const lines = content.split("\n");
   const candidates: TranslationCandidate[] = [];
-  let inFence = false;
-  let inMath = false;
-  let index = 0;
+  const protectedLines = protectedLineIndices(protectedRanges(lines));
+  let inComment = false;
+  const frontmatterEnd = lines[0] === "---" ? lines.indexOf("---", 1) : -1;
+  let index = frontmatterEnd >= 0 ? frontmatterEnd + 1 : 0;
+  let inKnowledgeMap = false;
 
   while (index < lines.length) {
-    if (/^\s*(?:```|~~~)/.test(lines[index])) {
-      inFence = !inFence;
+    if (protectedLines.has(index)) {
       index += 1;
       continue;
     }
-    if (/^\s*\$\$\s*$/.test(lines[index])) {
-      inMath = !inMath;
+    if (inComment || (lines[index].includes("<!--") && !lines[index].includes(TRANSLATION_MARKER))) {
+      const commentStart: number = inComment ? 0 : lines[index].indexOf("<!--") + 4;
+      inComment = lines[index].indexOf("-->", commentStart) < 0;
       index += 1;
       continue;
     }
-    if (inFence || inMath || !isPlainParagraphLine(lines[index])) {
-      const listItem = inFence || inMath ? null : getListItemContent(lines[index]);
+    if (/^##\s/.test(lines[index])) {
+      inKnowledgeMap = /^## (?:Knowledge Map|知识骨架)\s*$/i.test(lines[index]);
+    }
+    if (inKnowledgeMap) {
+      index += 1;
+      continue;
+    }
+    if (!isPlainParagraphLine(lines[index])) {
+      const listItem = getListItemContent(lines[index]);
       if (listItem && isTranslatableEnglish(listItem) && !lines[index].includes(TRANSLATION_MARKER)) {
         candidates.push({
           id: `translation-${candidates.length + 1}`,
@@ -52,7 +75,7 @@ export function collectTranslationCandidates(content: string): TranslationCandid
     }
 
     const startLine = index;
-    while (index + 1 < lines.length && isPlainParagraphLine(lines[index + 1])) index += 1;
+    while (index + 1 < lines.length && !protectedLines.has(index + 1) && isPlainParagraphLine(lines[index + 1])) index += 1;
     const endLine = index;
     const source = lines.slice(startLine, endLine + 1).join("\n");
     const paragraph = source.trim();
@@ -115,6 +138,7 @@ export function applyTranslationDecisions(
 function isPlainParagraphLine(line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed) return false;
+  if (/^(?: {4}|\t)/.test(line) || (line.includes("<!--") && !line.includes(TRANSLATION_MARKER))) return false;
   return !/^(?:#{1,6}\s|>|[-*+]\s|\d+[.)]\s|\||!\[|\[\[|<|---+$|\$\$)/.test(trimmed);
 }
 
@@ -124,14 +148,9 @@ function getListItemContent(line: string): string | null {
 }
 
 function isTranslatableEnglish(value: string): boolean {
-  const latin = value.match(/[A-Za-z]/g)?.length ?? 0;
-  const cjk = value.match(/[\u3400-\u9fff]/g)?.length ?? 0;
-  return latin >= 20 && cjk === 0 && !isMostlyUrl(value);
-}
-
-function isMostlyUrl(value: string): boolean {
-  const withoutUrls = value.replace(/https?:\/\/\S+/g, "").replace(/\s+/g, "");
-  return withoutUrls.length < 20;
+  const prose = translationProse(value);
+  const latin = prose.match(/[A-Za-z]/g)?.length ?? 0;
+  return latin >= 20 && !/[\u3400-\u9fff]/.test(prose);
 }
 
 function hasManagedTranslationAfter(lines: string[], endLine: number): boolean {

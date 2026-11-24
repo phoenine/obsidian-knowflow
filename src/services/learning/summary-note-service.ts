@@ -1,5 +1,4 @@
-import { TFile } from "obsidian";
-import type { App } from "obsidian";
+import type { App, TFile } from "obsidian";
 import { applySummaryFrontmatter, type SummaryFrontmatterData } from "../clipping/frontmatter-rules";
 import { NoteOperationCoordinator } from "../core/note-operation-coordinator";
 import { parseSummaryCallout, upsertSummaryCallout, type SummaryText } from "./summary-notes";
@@ -17,24 +16,26 @@ export class SummaryNoteService {
     private noteOperations: NoteOperationCoordinator
   ) {}
 
-  /**
-   * `meta` is omitted only by the one-off legacy-text migration in
-   * main.ts, which has summary/reason text to relocate but not the
-   * structured fields to backfill into frontmatter.
-   */
-  async applySummary(file: TFile, text: SummaryText, meta?: SummaryFrontmatterData): Promise<void> {
-    await this.noteOperations.runExclusive(file.path, async () => {
-      const content = await this.app.vault.read(file);
-      const withFrontmatter = meta ? applySummaryFrontmatter(content, meta) : content;
-      const next = upsertSummaryCallout(withFrontmatter, text);
-      if (next !== content) {
-        await this.app.vault.modify(file, next);
+  /** Applies only the metadata fields supplied alongside the summary. */
+  async applySummary(
+    file: TFile,
+    text: SummaryText,
+    meta?: Partial<SummaryFrontmatterData>,
+    path = file.path
+  ): Promise<void> {
+    await this.noteOperations.runExclusive(path, async () => {
+      if (file.path !== path || this.app.vault.getAbstractFileByPath(path) !== file) {
+        throw new Error("文章已移动或删除，请重新生成摘要。");
       }
+      await this.app.vault.process(file, (current) => {
+        const withFrontmatter = meta ? applySummaryFrontmatter(current, meta) : current;
+        return upsertSummaryCallout(withFrontmatter, text);
+      });
     });
   }
 
   async loadSummaryText(file: TFile): Promise<SummaryText | null> {
-    const content = await this.app.vault.read(file);
+    const content = await this.app.vault.cachedRead(file);
     return parseSummaryCallout(content);
   }
 }

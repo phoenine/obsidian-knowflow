@@ -30,6 +30,8 @@ Note -> Knowledge Point -> Learning -> Memory
 
 KnowFlow 作为独立 Obsidian 插件设计，不依赖既有 Hermes、Codex skills 或其他外部项目运行。
 
+执行时兼容 Vault 中已有的同名 `skills/<名称>/SKILL.md`。摘要、剪藏整理、翻译、知识骨架、知识点、Quiz、文章问答、时效检查和关联分析从具名 Skill 入口执行。插件负责工具调用、结构化结果验证与 Vault 写入。
+
 旧有 note-taking skills 中已经验证有效的文章清洗规则、学习材料格式、Quiz 格式和复习流程，可作为 KnowFlow 的需求来源和行为参考，但插件实现应内聚在自身代码库、配置和本地数据中。
 
 ### 1.4 目标用户
@@ -274,9 +276,9 @@ tags:
 - `分类`：目标 `Articles/<分类>/` 目录名
 - `tags`：主题标签，使用 YAML 列表
 - `网址`：来源 URL
-- `学习日期`：date 类型属性；Clipping Pipeline 整理阶段默认置空，进入学习流程时再写入日期
+- `学习日期`：date 类型属性，整理时保留现有值，缺失时使用配置模板的值。
 - `学习状态`：使用模板中的 YAML 列表格式，例如 `- 未学习`
-- `状态`：保留模板布尔字段；模板默认可为 `false`，Clipping Pipeline 整理完成后必须写为 `true`
+- `状态`：保留现有布尔值，缺失时使用配置模板的值。卡片的整理状态由插件另行记录。
 
 数据库字段映射：
 
@@ -348,7 +350,8 @@ KnowFlow 右侧边栏根据当前打开 Note 的文件路径自动切换工作�
 - 已有 Summary 时直接读取，不重复生成
 - Summary 卡片展示在 `Clipping Pipeline` 上方
 - Summary 同时给出阅读价值、推荐动作和分类建议
-- Summary 与 Frontmatter `简要描述` 必须分离：`简要描述` 是 1 到 2 句文章概括；侧边栏 AI Summary 必须使用结构化 Markdown，包含核心观点列表和章节梳理列表，不能与 `简要描述` 写成同一段话
+- Frontmatter `简要描述` 用 1 到 2 句概括文章。侧边栏 AI Summary 优先使用核心观点和章节梳理生成结构化 Markdown。
+- 摘要以本次读取的完整文章快照为输入。清理派生区块、缩短图片说明后，单次预算不足时在本地按章抽样，然后一次发给模型。卡片流式展示 `summary` 字段的 Markdown 正文，完成后渲染并保存。模型没有返回摘要内容时，使用相同输入重试一次。写入通过 Obsidian 的原子处理接口把摘要和可用的摘要属性合并到最新笔记，保留其余正文。
 - 侧边栏 AI Summary 若以 Markdown 返回，必须做轻量 Markdown 渲染，至少正确展示标题、粗体、有序列表和无序列表，而不是按纯文本显示 Markdown 符号
 - Summary、阅读价值、推荐动作和分类建议必须调用用户配置的 `Summary model`，基于文章语义判断；不得使用标题关键词、文章长度或首段截取等本地伪 AI 规则替代
 - 当 `Summary model` 未配置、禁用或调用失败时，显示失败状态和重试入口，不写入 Summary、阅读价值、推荐动作或分类建议
@@ -433,7 +436,7 @@ Clipping Pipeline    整理中
 
 `整理当前文章` 执行过程中按钮必须禁用并显示运行态；整理结束后允许再次点击，用于二次整理同一篇未完全整理好的文章。
 
-V0.1 中，正文整理采用“本地确定性规则 + Summary model 格式整理”的组合：
+正文整理由 `clipping-update` Skill 调度，结合本地规则和 Pipeline model 的结构判断。程序先保护明确标记的可复制提示词，使用 `text` 围栏保留正文、段落和改图轮次，图注与结果图留在围栏外。侧栏报告发现、新增围栏、已有围栏和待确认的数量。
 
 - 清理 `\xa0`、多余空行、尾随空格、非代码区 tab、剪藏残留高亮 `==...==`
 - 非代码区 `•` 转标准列表项 `-`，并规范列表缩进
@@ -452,7 +455,7 @@ V0.1 中，正文整理采用“本地确定性规则 + Summary model 格式整�
 
 LLM 正文格式整理必须遵守从既有 note-taking skills 迁移来的规则：不改写作者原意、不补充文章外知识、不重写图片路径、不凭空恢复缺失公式，只修复 Markdown 结构、代码块、标题层级和剪藏噪音。
 
-KnowFlow 不能在 Obsidian 插件运行时直接调用 Codex/Hermes skills。旧 skills 是规则来源，必须迁移为插件内置 prompt、pipeline 规则和校验器。需要语义判断的摘要、阅读价值、推荐动作、建议目录和 tags 统一由 `Summary model` 生成。
+剪藏整理复用内置 `obsidian-markdown` 和 `obsidian-render-integrity` 的约束。Vault 的 `skills/clipping-update/SKILL.md` 可提供补充规则，也兼容旧的 `skills/clipping-repair/SKILL.md` 和 `skills/clipping-repair.md`。写入前检查已确认的提示词仍受围栏保护，以及 Markdown 围栏是否配对。摘要、阅读价值、推荐动作、建议目录和 tags 统一由 `Summary model` 生成。
 
 处理完成后状态切换为 `已整理`；失败时状态切换为 `失败`，并在卡片内展示失败原因和重试入口。
 
@@ -689,6 +692,11 @@ mindmap
 - 关联 Vault 中已有笔记
 
 解释结果默认进入侧边栏，不自动写入正文。用户可选择插入为 callout。
+
+#### 文章时效与关联
+
+- Clipping 与 Article Detail 的对话可调用 `article-freshness` Skill 搜索公开资料并返回有来源的修订。只检查时保留原文；用户可按编号应用修订，明确要求直接更新时遵循确认写入设置。更新绑定对话文章并检查快照，保留来源、原值和新值。核心用途已被淘汰时在对话中给出删除建议。
+- Relevant Notes 通过语义索引和具体标题术语筛选候选，共同标签参与排序，最多展示 5 篇。用户可打开原文或加入对话。
 
 ### 5.6 Feature 6：数据库化 Quiz
 
@@ -1441,7 +1449,7 @@ knowflow/
 
 ### 7.3 AI Pipeline 机制
 
-插件内部能力模块化，但不使用 `skills` 命名，避免和外部 Agent Skill 系统混淆。统一使用 `pipelines` 表达插件内部处理流水线。
+Skill 是现有 AI 功能的执行入口，Pipeline 负责多步骤处理。内置规则由插件提供，文件、网络和执行权限由插件管理。下列早期目录示意保留作设计背景。
 
 ```text
 src/ai/pipelines/
@@ -1505,7 +1513,7 @@ Content
   根据当前上下文展示 Clipping Pipeline、Task Overview 或 Article Detail
 
 Composer
-  仅在需要大模型对话的页面显示 AI 输入框、上下文 chip、模型选择、发送按钮
+  在文章页面默认显示「与文章对话」，展开后显示 AI 输入框、上下文 chip、模型和发送按钮
 ```
 
 ### 8.3 上下文路由
@@ -1584,6 +1592,8 @@ Article Detail 指标读取规则：
 Article Detail 中 `AI Summary`、`Knowledge Map` 和 `Quiz` 卡片标题前都应显示 icon，保持和 Clipping 页面卡片抬头一致。
 
 AI Composer 仅在 `Clipping` 和 `Article Detail` 页面保留。`Task Overview` 是文件夹级学习仪表盘，不提供 LLM Chat 输入框。
+
+点击「与文章对话」会展开输入区并聚焦输入框。收起时保留会话、草稿和附加上下文。如果收起时回复仍在生成，底栏会显示处理进度和完成状态。
 
 ### 8.4 Header
 

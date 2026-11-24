@@ -1,4 +1,5 @@
 import { prepareArticleForAi } from "../clipping/managed-content";
+import { splitArticleSections } from "./article-sections";
 
 export type QuizMarkerKind = "bold" | "highlight" | "underline" | "italic";
 export type QuizFocusType = "concept" | "principle" | "comparison" | "application" | "pitfall";
@@ -20,7 +21,7 @@ const BATCH_CHARS = 16000;
 
 export function prepareQuizSections(content: string): QuizSourceSection[] {
   const body = prepareArticleForAi(content);
-  const logicalSections = splitByH2(body)
+  const logicalSections = splitArticleSections(body)
     .filter((section) => !/^(?:Knowledge Map|知识骨架)$/i.test(section.title.trim()));
   const chunks = logicalSections.flatMap((section) => splitLargeSection(section));
   return chunks.map((section, index) => ({
@@ -80,31 +81,6 @@ export function getQuizFocusTargets(count: number): Record<QuizFocusType, number
     remaining -= 1;
   }
   return targets;
-}
-
-function splitByH2(content: string): Array<{ title: string; content: string }> {
-  const sections: Array<{ title: string; content: string }> = [];
-  let title = "导语";
-  let lines: string[] = [];
-  let inFence = false;
-  const flush = (): void => {
-    const body = lines.join("\n").trim();
-    if (body) sections.push({ title, content: body });
-    lines = [];
-  };
-
-  for (const line of content.split("\n")) {
-    if (/^\s*```/.test(line)) inFence = !inFence;
-    const heading = !inFence ? /^##\s+(.+?)\s*$/.exec(line) : null;
-    if (heading) {
-      flush();
-      title = heading[1].trim();
-      continue;
-    }
-    lines.push(line);
-  }
-  flush();
-  return sections;
 }
 
 function splitLargeSection(section: { title: string; content: string }): Array<{ title: string; content: string }> {

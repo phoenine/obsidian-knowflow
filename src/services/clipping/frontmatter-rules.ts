@@ -26,62 +26,97 @@ const KNOWFLOW_FIELD_ORDER = [
 export function applyArticleFrontmatter(content: string, originalContent: string, templateContent: string, data: FrontmatterUpdateData): string {
   const body = stripFrontmatter(content).trim();
   const original = splitFrontmatter(originalContent);
-  const template = splitFrontmatter(templateContent);
-  const frontmatter = original.frontmatter ?? template.frontmatter ?? "";
-  const templateKeys = extractTopLevelKeys(template.frontmatter ?? "");
-  const existingKeys = new Set(extractTopLevelKeys(frontmatter));
-  const fields = new Map<string, string | string[]>();
-
-  fields.set("创建日期", normalizeCreationDate(getFieldValue(frontmatter, "创建日期"), data.today));
-  const author = getFieldValue(frontmatter, "文章作者");
-  if (author !== undefined) fields.set("文章作者", normalizeAuthor(author));
-  // 简要描述/阅读价值/分类/tags are deliberately NOT set here — they're owned
-  // by applySummaryFrontmatter below, called the moment a summary is
-  // generated. Re-running the pipeline just leaves whatever's already
-  // there (or the template's blank placeholder, via the missing-keys pass
-  // further down) instead of overwriting it with stale/default values.
-  fields.set("学习日期", normalizeLearningDate(getFieldValue(frontmatter, "学习日期")));
-  fields.set("学习状态", normalizeLearningStatus(getFieldBlock(frontmatter, "学习状态")));
-  fields.set("状态", "true");
-
-  let nextFrontmatter = frontmatter;
-  for (const [key, value] of fields) {
-    nextFrontmatter = upsertFrontmatterField(nextFrontmatter, key, value, false);
-  }
-
-  for (const key of orderedMissingKeys(templateKeys)) {
-    if (!existingKeys.has(key) && !fields.has(key)) {
-      const value = getFieldBlock(template.frontmatter ?? "", key);
-      nextFrontmatter = upsertFrontmatterField(nextFrontmatter, key, value ?? "", true);
-    }
-  }
-
-  for (const key of KNOWFLOW_FIELD_ORDER) {
-    if (!hasTopLevelKey(nextFrontmatter, key) && !fields.has(key)) {
-      nextFrontmatter = upsertFrontmatterField(nextFrontmatter, key, "", true);
-    }
+  const template = splitFrontmatter(templateContent).frontmatter;
+  let nextFrontmatter = original.frontmatter ?? "";
+  nextFrontmatter = nextFrontmatter
+    .replace(/^创建日期:[ \t]*["']?<%[^\n]*%>["']?[ \t]*$/m, `创建日期: ${data.today}`)
+    .replace(/^学习日期:[ \t]*["']?<%[^\n]*%>["']?[ \t]*$/m, "学习日期:")
+    .replace(/^阅读价值:[ \t]*["']?0["']?[ \t]*$/m, "阅读价值:");
+  // Quote bare author handles produced by some clippers so the value stays valid YAML.
+  nextFrontmatter = normalizeAuthorField(nextFrontmatter);
+  const defaults: Record<string, string | string[]> = {
+    创建日期: data.today,
+    学习状态: ["", "  - 未学习"],
+    状态: "true"
+  };
+  const keys = template === null ? KNOWFLOW_FIELD_ORDER : extractTopLevelKeys(template);
+  for (const key of keys) {
+    const templateValue = template === null ? undefined : getFieldBlock(template, key);
+    const value = (key === "创建日期" || key === "学习日期") && typeof templateValue === "string"
+      && /^["']?<%.*%>["']?$/.test(templateValue.trim())
+      ? key === "创建日期" ? data.today : ""
+      : templateValue ?? defaults[key] ?? "";
+    nextFrontmatter = upsertFrontmatterField(nextFrontmatter, key, value, true);
   }
 
   return `---\n${nextFrontmatter.trim()}\n---\n\n${body}\n`;
 }
 
 /**
- * Called the moment an AI summary is generated — before "整理"
- * (ClippingPipeline.process()) ever runs — so frontmatter becomes the
- * source of truth for these four fields immediately. Deliberately narrow:
- * it only
- * touches 简要描述/阅读价值/分类/tags, leaving 创建日期/学习日期/学习状态/状态/
- * 文章作者 and the body completely alone — that's applyArticleFrontmatter's
- * job instead.
+ * Writes only the supplied note properties. Other frontmatter fields and the
+ * body stay untouched. Callers decide whether an existing value may be replaced.
  */
-export function applySummaryFrontmatter(content: string, data: SummaryFrontmatterData): string {
+export function applySummaryFrontmatter(content: string, data: Partial<SummaryFrontmatterData>): string {
+  const { description, readingValue, category, tags } = data;
+  if (description === undefined && readingValue === undefined && category === undefined && tags === undefined) return content;
   const { frontmatter, body } = splitFrontmatter(content);
   let next = frontmatter ?? "";
-  next = upsertFrontmatterField(next, "简要描述", quoteYamlString(data.description.replace(/\n/g, " ").slice(0, 180)), false);
-  next = upsertFrontmatterField(next, "阅读价值", data.readingValue > 0 ? String(data.readingValue) : "", false);
-  next = upsertFrontmatterField(next, "分类", data.category, false);
-  next = upsertFrontmatterField(next, "tags", formatTagsList(data.tags), false);
+  if (description !== undefined) {
+    const text = description.replace(/\n/g, " ").trim().slice(0, 180);
+    next = upsertFrontmatterField(next, "简要描述", text ? quoteYamlString(text) : "", false);
+  }
+  if (readingValue !== undefined) next = upsertFrontmatterField(next, "阅读价值", readingValue > 0 ? String(readingValue) : "", false);
+  if (category !== undefined) next = upsertFrontmatterField(next, "分类", category, false);
+  if (tags !== undefined) next = upsertFrontmatterField(next, "tags", formatTagsList(tags), false);
   return `---\n${next.trim()}\n---\n${body}`;
+}
+
+export function hasEmptyNoteProperties(frontmatter: string | null): boolean {
+  return isEmptyDescription(frontmatter) || isEmptyReadingValue(frontmatter)
+    || isEmptyCategory(frontmatter) || isEmptyTags(frontmatter);
+}
+
+/**
+ * Fills 简要描述、阅读价值、分类 and tags.
+ * During 整理, `replaceExisting` writes the new values over the old ones.
+ * A missing 简要描述 is cleared. The other three stay when this pass has no new value.
+ */
+export function fillEmptyNoteProperties(
+  content: string,
+  proposal: Partial<SummaryFrontmatterData> | undefined,
+  options?: { replaceExisting?: boolean }
+): { content: string; filled: string[]; clearedDescription: boolean } {
+  const frontmatter = splitFrontmatter(content).frontmatter;
+  const data: Partial<SummaryFrontmatterData> = {};
+  const filled: string[] = [];
+  let clearedDescription = false;
+  const replace = options?.replaceExisting === true;
+  if (replace) {
+    if (proposal?.description) {
+      data.description = proposal.description;
+      filled.push("简要描述");
+    } else if (!isEmptyDescription(frontmatter)) {
+      data.description = "";
+      clearedDescription = true;
+    }
+  } else if (proposal?.description && isEmptyDescription(frontmatter)) {
+    data.description = proposal.description;
+    filled.push("简要描述");
+  }
+  if (!proposal) return { content: filled.length || clearedDescription ? applySummaryFrontmatter(content, data) : content, filled, clearedDescription };
+  if (proposal.readingValue && (replace || isEmptyReadingValue(frontmatter))) {
+    data.readingValue = proposal.readingValue;
+    filled.push("阅读价值");
+  }
+  if (proposal.category && (replace || isEmptyCategory(frontmatter))) {
+    data.category = proposal.category;
+    filled.push("分类");
+  }
+  if (proposal.tags?.length && (replace || isEmptyTags(frontmatter))) {
+    data.tags = proposal.tags;
+    filled.push("标签");
+  }
+  return { content: filled.length || clearedDescription ? applySummaryFrontmatter(content, data) : content, filled, clearedDescription };
 }
 
 export function updateFrontmatterCategory(content: string, category: string): string {
@@ -101,16 +136,14 @@ export function applyLearningCompletionFrontmatter(content: string, learningDate
 
 export function splitFrontmatter(content: string): { frontmatter: string | null; body: string } {
   const normalized = content.replace(/\r\n/g, "\n");
-  // The `\n?` before the closing fence (rather than a required `\n`) matters
-  // for genuinely empty frontmatter blocks like "---\n---\n": there is only
-  // one newline between the two fences, already consumed by the opening
-  // match, so a mandatory extra `\n` before the close would never match and
-  // the whole block would be silently treated as body text instead.
-  const match = /^---\n([\s\S]*?)\n?---\n?/.exec(normalized);
-  if (!match) return { frontmatter: null, body: normalized };
+  const open = /^(?:\uFEFF)?---[ \t]*\n/.exec(normalized);
+  if (!open) return { frontmatter: null, body: normalized };
+  const rest = normalized.slice(open[0].length);
+  const close = /^---[ \t]*(?:\n|$)/m.exec(rest);
+  if (!close) return { frontmatter: null, body: normalized };
   return {
-    frontmatter: match[1],
-    body: normalized.slice(match[0].length)
+    frontmatter: rest.slice(0, close.index).replace(/\n$/, ""),
+    body: rest.slice(close.index + close[0].length)
   };
 }
 
@@ -144,18 +177,6 @@ function extractTopLevelKeys(frontmatter: string): string[] {
     .filter((key): key is string => Boolean(key));
 }
 
-function orderedMissingKeys(templateKeys: string[]): string[] {
-  const ordered = [...templateKeys].sort((a, b) => {
-    const left = KNOWFLOW_FIELD_ORDER.indexOf(a);
-    const right = KNOWFLOW_FIELD_ORDER.indexOf(b);
-    if (left === -1 && right === -1) return 0;
-    if (left === -1) return 1;
-    if (right === -1) return -1;
-    return left - right;
-  });
-  return Array.from(new Set(ordered));
-}
-
 function upsertFrontmatterField(frontmatter: string, key: string, value: string | string[], appendOnly: boolean): string {
   const lines = frontmatter ? frontmatter.split("\n") : [];
   const range = findFieldRange(lines, key);
@@ -181,14 +202,44 @@ function findFieldRange(lines: string[], key: string): { start: number; end: num
   return { start, end };
 }
 
-function hasTopLevelKey(frontmatter: string, key: string): boolean {
-  return findFieldRange(frontmatter.split("\n"), key) !== null;
+function isEmptyDescription(frontmatter: string | null): boolean {
+  return isBlankScalar(frontmatter, "简要描述");
 }
 
-function getFieldValue(frontmatter: string, key: string): string | undefined {
-  const block = getFieldBlock(frontmatter, key);
-  if (Array.isArray(block)) return block.join("\n");
-  return block;
+function isEmptyReadingValue(frontmatter: string | null): boolean {
+  const value = scalarValue(frontmatter, "阅读价值");
+  return !value || value === "0";
+}
+
+function isEmptyCategory(frontmatter: string | null): boolean {
+  return isBlankScalar(frontmatter, "分类");
+}
+
+function isEmptyTags(frontmatter: string | null): boolean {
+  const tags = tagTokens(frontmatter);
+  return tags.length === 0 || tags.every((tag) => tag.toLowerCase() === "clippings");
+}
+
+function isBlankScalar(frontmatter: string | null, key: string): boolean {
+  const value = scalarValue(frontmatter, key);
+  return !value || /^<%.*%>$/.test(value);
+}
+
+function scalarValue(frontmatter: string | null, key: string): string {
+  if (!frontmatter) return "";
+  const value = getFieldBlock(frontmatter, key);
+  const text = Array.isArray(value) ? value.join("\n") : value ?? "";
+  return text.trim().replace(/^["']|["']$/g, "");
+}
+
+function tagTokens(frontmatter: string | null): string[] {
+  if (!frontmatter) return [];
+  const value = getFieldBlock(frontmatter, "tags");
+  if (value === undefined) return [];
+  const raw = Array.isArray(value) ? value.join("\n") : value;
+  return raw.split(/[\n,\[\]]+/)
+    .map((item) => item.replace(/^\s*-\s*/, "").trim().replace(/^#+/, "").replace(/^["']|["']$/g, ""))
+    .filter(Boolean);
 }
 
 function getFieldBlock(frontmatter: string, key: string): string | string[] | undefined {
@@ -209,25 +260,6 @@ function formatFrontmatterField(key: string, value: string | string[]): string[]
   return [value.trim() ? `${key}: ${value}` : `${key}:`];
 }
 
-function normalizeCreationDate(value: string | undefined, today: string): string {
-  const trimmed = value?.trim() ?? "";
-  if (!trimmed || trimmed.includes("<%")) return today;
-  return trimmed;
-}
-
-function normalizeAuthor(value: string): string {
-  const trimmed = value.trim();
-  const scalar = (
-    (trimmed.startsWith("\"") && trimmed.endsWith("\""))
-    || (trimmed.startsWith("'") && trimmed.endsWith("'"))
-  )
-    ? trimmed.slice(1, -1).trim()
-    : trimmed;
-  const wikilink = /^\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|([^\]]+))?\]\]$/.exec(scalar);
-  const author = wikilink ? (wikilink[2] ?? wikilink[1]).trim() : scalar;
-  return author ? quoteYamlString(author) : "";
-}
-
 /**
  * Replaces the frontmatter `tags` list with the AI's topic tags every time
  * the pipeline runs, fully overriding the "clippings" placeholder the
@@ -244,24 +276,22 @@ function normalizeObsidianTag(value: string): string {
   return value.trim().replace(/^#+/, "").replace(/\s+/g, "-");
 }
 
-function normalizeLearningStatus(value: string | string[] | undefined): string[] {
-  if (Array.isArray(value)) {
-    const [, ...rest] = value;
-    if (rest.some((line) => line.trim())) return ["", ...rest];
-  }
-  const text = typeof value === "string" ? value.trim() : "";
-  if (text) return ["", `  - ${text.replace(/^-\s*/, "")}`];
-  return ["", "  - 未学习"];
-}
-
-function normalizeLearningDate(value: string | undefined): string {
-  const trimmed = value?.trim() ?? "";
-  if (!trimmed || trimmed.includes("<%")) return "";
-  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : "";
-}
-
 function quoteYamlString(value: string): string {
   return JSON.stringify(value);
+}
+
+function normalizeAuthorField(frontmatter: string): string {
+  return frontmatter.replace(/^文章作者:[ \t]*(.*)$/m, (_line, raw: string) => {
+    let value = raw.trim();
+    if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    const link = /^\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]$/.exec(value.trim());
+    if (link) value = (link[2] || link[1]).trim();
+    if (!value) return "文章作者:";
+    if (value.startsWith("@") || /[:#&*!|>%@`'"\\[\]]/.test(value)) return `文章作者: ${quoteYamlString(value)}`;
+    return `文章作者: ${value}`;
+  });
 }
 
 function escapeRegExp(value: string): string {

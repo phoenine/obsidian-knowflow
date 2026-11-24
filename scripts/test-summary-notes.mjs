@@ -13,7 +13,7 @@ await esbuild.build({
   outdir: tempDir,
   platform: "node"
 });
-const { buildSummaryCallout, upsertSummaryCallout, parseSummaryCallout, findSummaryCalloutEndIndex } = await import(
+const { alignSummaryOutline, buildSummaryCallout, upsertSummaryCallout, parseSummaryCallout, findSummaryCalloutEndIndex } = await import(
   pathToFileURL(join(tempDir, "summary-notes.js")).href
 );
 
@@ -108,6 +108,14 @@ const text = {
   assert.equal((refreshed.match(/> \[!summary\][+-]? AI 摘要$/gm) ?? []).length, 1, "managed AI summary must not duplicate");
 }
 
+{
+  const example = "````markdown\n> [!summary]- AI 摘要\n> 这是代码示例。\n````";
+  assert.equal(parseSummaryCallout(example), null);
+  const updated = upsertSummaryCallout(example, text);
+  assert.ok(updated.endsWith(example));
+  assert.deepEqual(parseSummaryCallout(updated), text);
+}
+
 // findSummaryCalloutEndIndex must point right after the callout's last
 // quoted line, so other note-writing code (mermaid-service.ts) can splice
 // content in immediately after the summary regardless of what follows it.
@@ -118,6 +126,28 @@ const text = {
   assert.ok(endIndex !== null);
   assert.equal(withSummary.slice(0, endIndex).trimEnd().endsWith(text.reason), true, "end index must land right after the callout's content");
   assert.ok(withSummary.slice(endIndex).includes("## 正文标题"), "everything after the callout must still be there");
+}
+
+{
+  const outline = [
+    "## 章节梳理",
+    "9. 对比：向量库/Mem0/Letta/Anthropic 方案适用性。",
+    "10. 选型：过期性/推理需求/团队能力混合架构建议。",
+    "11-12. 场景与问答：客服/研发等五类场景及面试核心问题。",
+    "    13-15. 资产与检查：格式契约、代码实现及十条上线清单。"
+  ].join("\n");
+  const aligned = alignSummaryOutline(outline);
+  assert.equal(aligned, [
+    "## 章节梳理",
+    "9. 对比：向量库/Mem0/Letta/Anthropic 方案适用性。",
+    "10. 选型：过期性/推理需求/团队能力混合架构建议。",
+    "11. 场景与问答（11–12）：客服/研发等五类场景及面试核心问题。",
+    "12. 资产与检查（13–15）：格式契约、代码实现及十条上线清单。"
+  ].join("\n"));
+  assert.equal(alignSummaryOutline(aligned), aligned);
+  const parsed = parseSummaryCallout(buildSummaryCallout({ summary: outline, reason: "适合工程师。" }));
+  assert.equal(parsed.summary, aligned);
+  assert.equal(alignSummaryOutline("```\n11-12. 保留代码里的序号。\n```"), "```\n11-12. 保留代码里的序号。\n```");
 }
 
 await rm(tempDir, { recursive: true, force: true });

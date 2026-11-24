@@ -12,6 +12,9 @@ import { KnowledgeStore } from "./services/core/store";
 import { SummaryNoteService } from "./services/learning/summary-note-service";
 import { DailyReviewService } from "./services/learning/daily-review-service";
 import { SemanticIndexService } from "./services/search/semantic-index-service";
+import { ArticleFreshness } from "./services/learning/article-freshness";
+import { SkillStore } from "./services/core/skill-store";
+import { SkillRunner } from "./services/core/skill-runner";
 import { isMarkdownInFolder } from "./services/search/semantic-search";
 import { DEFAULT_SETTINGS, KnowFlowSettingTab } from "./settings";
 import { KNOWFLOW_VIEW_TYPE, type AiModelConfig, type KnowFlowSettings } from "./types";
@@ -30,6 +33,7 @@ export default class KnowFlowPlugin extends Plugin {
   summaryNotes: SummaryNoteService;
   dailyReview: DailyReviewService;
   semanticIndex: SemanticIndexService;
+  freshness: ArticleFreshness;
   private noteOperations: NoteOperationCoordinator;
   private dataManager: PluginDataManager;
   private semanticRefreshTimers = new Map<string, number>();
@@ -48,13 +52,15 @@ export default class KnowFlowPlugin extends Plugin {
       }
     });
     await this.store.load();
-    this.ai = new AiService(this.settings);
     this.chatNotes = new ChatNoteService(this.app, this.settings.chatConversationFolder);
     this.router = new PathRouter(this.app, this.settings);
     this.noteOperations = new NoteOperationCoordinator();
+    const skillRunner = new SkillRunner(new SkillStore(this.app.vault), this.app.vault);
+    this.ai = new AiService(this.settings, skillRunner);
+    this.freshness = new ArticleFreshness(this.app.vault, skillRunner, this.noteOperations);
     this.mermaid = new MermaidService(this.app, this.ai, this.noteOperations);
     this.learningNotes = new ArticleLearningService(this.app, this.noteOperations);
-    this.pipeline = new ClippingPipeline(this.app, this.settings, this.store, this.ai, this.noteOperations);
+    this.pipeline = new ClippingPipeline(this.app, this.settings, this.store, this.ai, this.noteOperations, skillRunner);
     this.quizNotes = new QuizNoteService(this.app, this.settings, this.noteOperations);
     this.dailyReview = new DailyReviewService(this.app, this.store, this.quizNotes, this.settings);
     this.summaryNotes = new SummaryNoteService(this.app, this.noteOperations);
@@ -190,11 +196,19 @@ export default class KnowFlowPlugin extends Plugin {
   }
 
   private scheduleSemanticRefresh(file: TFile): void {
-    if (!this.semanticIndex.isReady() || !this.isArticlePath(file)) return;
+    if (!this.app.workspace.layoutReady) return;
+    const indexed = this.semanticIndex.hasCompatibleIndex() && this.isArticlePath(file);
+    if (!indexed && !this.app.workspace.getLeavesOfType(KNOWFLOW_VIEW_TYPE).some(({ view }) =>
+      view instanceof KnowFlowSidebarView && view.tracksRelatedNote(file)
+    )) return;
     const previous = this.semanticRefreshTimers.get(file.path);
     if (previous !== undefined) window.clearTimeout(previous);
     const timer = window.setTimeout(() => {
       this.semanticRefreshTimers.delete(file.path);
+      if (!this.semanticIndex.hasCompatibleIndex() || !this.isArticlePath(file)) {
+        this.refreshView();
+        return;
+      }
       void this.semanticIndex.refreshFile(file)
         .then(() => this.refreshView())
         .catch((error) => console.error("KnowFlow: semantic refresh failed", error));
@@ -284,6 +298,9 @@ function normalizeSettings(savedSettings: unknown): KnowFlowSettings {
     )
   };
   delete (settings as typeof settings & { dailyReviewLimit?: unknown }).dailyReviewLimit;
+  delete (settings as typeof settings & { autoLinkRelatedArticles?: unknown }).autoLinkRelatedArticles;
+  delete (settings as typeof settings & { autoReviewRelatedArticles?: unknown }).autoReviewRelatedArticles;
+  delete (settings as typeof settings & { autoAnalyzeRelatedArticles?: unknown }).autoAnalyzeRelatedArticles;
   return settings;
 }
 

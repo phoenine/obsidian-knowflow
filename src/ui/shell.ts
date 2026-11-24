@@ -43,7 +43,11 @@ export function renderShell(root: HTMLElement, title: string, status: string, on
   });
 }
 
-export function renderBrandShell(root: HTMLElement, subtitle: string): HTMLElement {
+export function renderBrandShell(
+  root: HTMLElement,
+  subtitle: string,
+  renderActions?: (actions: HTMLElement) => void
+): HTMLElement {
   const header = root.createDiv({ cls: "kf-header kf-clipping-header" });
   setStyles(header, {
     alignItems: "center",
@@ -51,7 +55,9 @@ export function renderBrandShell(root: HTMLElement, subtitle: string): HTMLEleme
     borderBottom: "1px solid color-mix(in srgb, var(--interactive-accent) 18%, var(--background-modifier-border))",
     display: "flex",
     justifyContent: "space-between",
-    padding: "16px 18px 16px 13px"
+    padding: "8px 18px 8px 13px",
+    position: "relative",
+    zIndex: "5"
   });
 
   const brand = header.createDiv();
@@ -71,6 +77,17 @@ export function renderBrandShell(root: HTMLElement, subtitle: string): HTMLEleme
   const copy = brand.createDiv();
   text(copy, "KnowFlow", "kf-brand-title");
   text(copy, subtitle, "kf-muted");
+  if (renderActions) {
+    const actions = header.createDiv({ cls: "kf-header-actions" });
+    setStyles(actions, {
+      alignItems: "center",
+      display: "flex",
+      flex: "0 0 auto",
+      gap: "6px",
+      position: "relative"
+    });
+    renderActions(actions);
+  }
 
   return setStyles(root.createDiv({ cls: "kf-content" }), {
     display: "flex",

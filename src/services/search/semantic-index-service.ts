@@ -2,7 +2,11 @@ import { normalizePath, TFile } from "obsidian";
 import type { App, DataAdapter } from "obsidian";
 import type { AiModelConfig, KnowFlowSettings, RelatedNote, SemanticIndexStats } from "../../types";
 import { EmbeddingTransport } from "../ai/embedding-transport";
-import { chunkArticle, isMarkdownInFolder, normalizeEmbedding, searchSemanticChunks, type SemanticChunk } from "./semantic-search";
+import { rankRelevantNotes, type SemanticNoteMatch } from "./relevant-notes";
+import {
+  chunkArticle, chunkArticleSummary, isMarkdownInFolder, normalizeEmbedding,
+  pickArticlePassage, searchSemanticChunks, SUMMARY_INDEX_SOURCE, type SemanticChunk
+} from "./semantic-search";
 
 interface PersistedShardRecord {
   id: string;
@@ -116,15 +120,18 @@ export class SemanticIndexService {
 
   updateSettings(settings: KnowFlowSettings): void { this.settings = settings; }
   isBuilding(): boolean { return this.building; }
+  hasCompatibleIndex(): boolean { return Boolean(this.data.generation) && this.isCompatible(); }
   isReady(): boolean {
     return this.isCompatible() && this.data.shards.some((record) => record.chunks > 0 && !this.unhealthyShards.has(record.id));
   }
 
   getStats(): SemanticIndexStats {
     const unavailableFiles = Array.from(this.unhealthyShards.values()).reduce((total, count) => total + count, 0);
+    const chunks = this.data.shards.reduce((total, shard) => total + shard.chunks, 0);
     return {
-      files: this.data.shards.reduce((total, shard) => total + shard.articles, 0),
-      chunks: this.data.shards.reduce((total, shard) => total + shard.chunks, 0),
+      files: this.data.modelKey.includes(`|source:${SUMMARY_INDEX_SOURCE}|`)
+        ? chunks : this.data.shards.reduce((total, shard) => total + shard.articles, 0),
+      chunks,
       model: this.data.modelKey ? this.data.modelKey.split("|").slice(-1)[0] ?? "" : "",
       updatedAt: this.data.updatedAt,
       compatible: this.isCompatible(),
@@ -206,13 +213,18 @@ export class SemanticIndexService {
   private async refreshFileNow(file: TFile): Promise<void> {
     if (this.building || !this.data.generation || !this.isCompatible()) return;
     if (!this.isArticle(file)) return this.removePathNow(file.path);
-    const shardId = shardIdForPath(file.path);
+    const { path } = file;
+    const { mtime } = file.stat;
+    const shardId = shardIdForPath(path);
     const loaded = await this.loadActiveShard(shardId);
-    const chunks = await this.embedFile(file);
+    const previous = loaded.articles.find((article) => article.path === path);
+    const chunks = await this.embedFile(file, previous?.chunks);
+    if (chunks.length === 0 && !previous?.chunks.length) return;
     this.assertDimension(chunks);
-    if (!(this.app.vault.getAbstractFileByPath(file.path) instanceof TFile)) return this.removePathNow(file.path);
-    const articles = loaded.articles.filter((article) => article.path !== file.path);
-    articles.push({ path: file.path, title: file.basename, mtime: file.stat.mtime, chunks });
+    if (file.path !== path || file.stat.mtime !== mtime) return;
+    if (this.app.vault.getAbstractFileByPath(path) !== file) return this.removePathNow(path);
+    const articles = loaded.articles.filter((article) => article.path !== path);
+    articles.push({ path, title: file.basename, mtime, chunks });
     await this.replaceShards(new Map([[shardId, { previous: loaded.record, articles }]]));
   }
 
@@ -293,23 +305,23 @@ export class SemanticIndexService {
   }
 
   async findRelated(file: TFile, limit = 5): Promise<RelatedNote[]> {
-    if (!this.isReady()) return [];
-    await this.ensureChunksLoaded();
-    const indexedSource = this.chunks.filter((chunk) => chunk.path === file.path && chunk.mtime === file.stat.mtime);
-    const sourceChunks = indexedSource.length > 0 ? indexedSource : await this.embedFile(file);
-    this.assertDimension(sourceChunks);
-    const hits = searchSemanticChunks(this.chunks, sourceChunks.map((chunk) => chunk.embedding), Math.max(40, limit * 12), file.path);
-    const bestByPath = new Map<string, { chunk: SemanticChunk; score: number }>();
-    for (const hit of hits) {
-      if (!(this.app.vault.getAbstractFileByPath(hit.chunk.path) instanceof TFile)) continue;
-      const current = bestByPath.get(hit.chunk.path);
-      if (!current || hit.score > current.score) bestByPath.set(hit.chunk.path, hit);
+    if (limit <= 0) return [];
+    let matches: SemanticNoteMatch[] = [];
+    if (this.isReady()) {
+      try {
+        await this.ensureChunksLoaded();
+        const indexedSource = this.chunks.filter((chunk) => chunk.path === file.path);
+        const sourceChunks = indexedSource.length > 0 && indexedSource[0].mtime === file.stat.mtime
+          ? indexedSource : await this.embedFile(file, indexedSource);
+        this.assertDimension(sourceChunks);
+        matches = searchSemanticChunks(
+          this.chunks, sourceChunks.map((chunk) => chunk.embedding), Math.max(40, limit * 12), file.path
+        ).map(({ chunk, score }) => ({ path: chunk.path, similarity: score }));
+      } catch {
+        matches = [];
+      }
     }
-    return Array.from(bestByPath.values())
-      .map((hit) => ({ ...hit, score: Math.min(1, hit.score + this.relationshipBoost(file, hit.chunk.path)) }))
-      .sort((left, right) => right.score - left.score)
-      .slice(0, limit)
-      .map(({ chunk, score }) => ({ path: chunk.path, title: chunk.title, excerpt: excerptFromChunk(chunk), score, reasons: this.relationshipReasons(file, chunk.path) }));
+    return rankRelevantNotes(this.app, file, matches, this.settings, limit);
   }
 
   async searchContext(query: string, excludedPath?: string, limit = 5): Promise<string> {
@@ -318,25 +330,29 @@ export class SemanticIndexService {
     const [raw] = await this.transport.embed(this.settings.embeddingModel, [query.trim()]);
     const embedding = normalizeEmbedding(raw, this.settings.embeddingDimensions);
     this.assertDimension([{ embedding }]);
-    const hits = searchSemanticChunks(this.chunks, [embedding], Math.max(limit * 4, limit), excludedPath);
-    const selected: typeof hits = [];
-    const perPath = new Map<string, number>();
+    const hits = searchSemanticChunks(this.chunks, [embedding], limit * 2, excludedPath);
+    const passages: string[] = [];
     for (const hit of hits) {
-      const count = perPath.get(hit.chunk.path) ?? 0;
-      if (count >= 2) continue;
-      selected.push(hit);
-      perPath.set(hit.chunk.path, count + 1);
-      if (selected.length >= limit) break;
+      const file = this.app.vault.getAbstractFileByPath(hit.chunk.path);
+      if (!(file instanceof TFile)) continue;
+      const markdown = await this.app.vault.cachedRead(file);
+      const passage = pickArticlePassage(chunkArticle(file.path, file.basename, markdown, file.stat.mtime), query);
+      if (!passage) continue;
+      passages.push([
+        `[检索来源 ${passages.length + 1}: ${passage.path}${passage.heading ? ` > ${passage.heading}` : ""}]`,
+        excerptFromChunk(passage, 1200)
+      ].join("\n"));
+      if (passages.length >= limit) break;
     }
-    return selected.map((hit, index) => [
-      `[检索来源 ${index + 1}: ${hit.chunk.path}${hit.chunk.heading ? ` > ${hit.chunk.heading}` : ""}]`,
-      excerptFromChunk(hit.chunk, 1200)
-    ].join("\n")).join("\n\n");
+    return passages.join("\n\n");
   }
 
-  private async embedFile(file: TFile): Promise<SemanticChunk[]> {
+  private async embedFile(file: TFile, indexed: SemanticChunk[] = []): Promise<SemanticChunk[]> {
     const markdown = await this.app.vault.cachedRead(file);
-    const chunks = chunkArticle(file.path, file.basename, markdown, file.stat.mtime);
+    const chunks = chunkArticleSummary(file.path, file.basename, markdown, file.stat.mtime);
+    if (chunks.length === indexed.length && chunks.every((chunk, index) => chunk.content === indexed[index].content)) {
+      return chunks.map((chunk, index) => ({ ...chunk, embedding: indexed[index].embedding }));
+    }
     for (let start = 0; start < chunks.length; start += EMBEDDING_BATCH_SIZE) {
       const batch = chunks.slice(start, start + EMBEDDING_BATCH_SIZE);
       const vectors = await this.transport.embed(this.settings.embeddingModel, batch.map((chunk) => chunk.content));
@@ -505,14 +521,17 @@ export class SemanticIndexService {
   private async replaceShards(replacements: Map<string, { previous?: PersistedShardRecord; articles: ShardArticle[] }>): Promise<void> {
     if (replacements.size === 0) return;
     const updates = new Map<string, ShardUpdate>();
+    let dimension = this.data.dimension;
     try {
       for (const [shardId, replacement] of replacements) {
+        const firstChunk = replacement.articles.find((article) => article.chunks.length)?.chunks[0];
+        dimension = mergeDimension(dimension, firstChunk?.embedding.length ?? 0);
         const next = replacement.articles.length > 0
-          ? await this.writeShard(this.data.generation, shardId, this.data.modelKey, replacement.articles, this.data.dimension)
+          ? await this.writeShard(this.data.generation, shardId, this.data.modelKey, replacement.articles, dimension)
           : undefined;
         updates.set(shardId, { previous: replacement.previous, next });
       }
-      await this.commitShardUpdates(updates);
+      await this.commitShardUpdates(updates, dimension);
     } catch (error) {
       await Promise.allSettled(Array.from(updates.values()).flatMap((update) =>
         update.next ? [this.removeShardFiles(this.data.generation, update.next)] : []
@@ -521,11 +540,12 @@ export class SemanticIndexService {
     }
   }
 
-  private async commitShardUpdates(updates: Map<string, ShardUpdate>): Promise<void> {
+  private async commitShardUpdates(updates: Map<string, ShardUpdate>, dimension: number): Promise<void> {
     const nextRecords = this.data.shards.filter((record) => !updates.has(record.id));
     for (const update of updates.values()) if (update.next) nextRecords.push(update.next);
     const next: PersistedSemanticIndexV3 = {
       ...this.data,
+      dimension,
       updatedAt: new Date().toISOString(),
       shards: nextRecords.sort((left, right) => left.id.localeCompare(right.id))
     };
@@ -596,7 +616,9 @@ export class SemanticIndexService {
   private generationPath(generation: string): string { return normalizePath(`${this.storageRoot}/${generation}`); }
   private getArticleFiles(): TFile[] { return this.app.vault.getMarkdownFiles().filter((file) => this.isArticle(file)); }
   private isArticle(file: TFile): boolean { return isMarkdownInFolder(file, this.settings.articlesFolder, this.settings.semanticIndexExcludeFolders); }
-  private markUnhealthy(record: PersistedShardRecord): void { this.unhealthyShards.set(record.id, record.articles); }
+  private markUnhealthy(record: PersistedShardRecord): void {
+    this.unhealthyShards.set(record.id, this.data.modelKey.includes(`|source:${SUMMARY_INDEX_SOURCE}|`) ? record.chunks : record.articles);
+  }
   private resetLoadedChunks(): void { this.chunks = []; this.chunksLoaded = false; this.loadPromise = null; }
 
   private assertArticleDimension(article: ShardArticle, dimension: number): void {
@@ -609,30 +631,6 @@ export class SemanticIndexService {
       throw new Error("Embedding dimensions no longer match the saved index. Rebuild the semantic index.");
     }
     if (chunks.some((chunk) => chunk.embedding.length !== dimension)) throw new Error("Embedding endpoint returned inconsistent dimensions.");
-  }
-
-  private relationshipReasons(source: TFile, targetPath: string): string[] {
-    const reasons: string[] = ["语义相似"];
-    const sourceMeta = this.app.metadataCache.getFileCache(source)?.frontmatter;
-    const target = this.app.vault.getAbstractFileByPath(targetPath);
-    const targetMeta = target instanceof TFile ? this.app.metadataCache.getFileCache(target)?.frontmatter : undefined;
-    const sharedTags = intersect(readTags(sourceMeta?.tags), readTags(targetMeta?.tags));
-    if (sharedTags.length > 0) reasons.push(`共同标签：${sharedTags.slice(0, 2).join("、")}`);
-    const sourceCategory = scalar(sourceMeta?.["分类"]);
-    const targetCategory = scalar(targetMeta?.["分类"]);
-    if (sourceCategory && sourceCategory === targetCategory) reasons.push(`同属：${sourceCategory}`);
-    if (targetPath in (this.app.metadataCache.resolvedLinks[source.path] ?? {})) reasons.push("当前文章引用");
-    if (source.path in (this.app.metadataCache.resolvedLinks[targetPath] ?? {})) reasons.push("引用当前文章");
-    return reasons;
-  }
-
-  private relationshipBoost(source: TFile, targetPath: string): number {
-    return this.relationshipReasons(source, targetPath).reduce((total, reason) => {
-      if (reason.startsWith("共同标签")) return total + 0.04;
-      if (reason.startsWith("同属")) return total + 0.02;
-      if (reason.includes("引用")) return total + 0.05;
-      return total;
-    }, 0);
   }
 
   private isCompatible(): boolean { return this.settings.embeddingModel.runtime !== "disabled" && this.data.modelKey === currentModelKey(this.settings); }
@@ -654,7 +652,7 @@ export class SemanticIndexService {
 function currentModelKey(settings: KnowFlowSettings): string {
   const scope = settings.articlesFolder.trim().replace(/^\/+|\/+$/g, "");
   const excluded = settings.semanticIndexExcludeFolders.map((folder) => folder.trim()).filter(Boolean).sort().join(",");
-  return `${scope}|exclude:${excluded}|dims:${settings.embeddingDimensions}|shards:${SHARD_COUNT}|${modelKey(settings.embeddingModel)}`;
+  return `${scope}|exclude:${excluded}|dims:${settings.embeddingDimensions}|shards:${SHARD_COUNT}|source:${SUMMARY_INDEX_SOURCE}|${modelKey(settings.embeddingModel)}`;
 }
 
 function modelKey(config: AiModelConfig): string { return `${config.runtime}|${config.apiBaseUrl.trim().replace(/\/+$/g, "")}|${config.model.trim()}`; }
@@ -737,15 +735,4 @@ async function removeDirectoryIfExists(adapter: DataAdapter, path: string): Prom
 function excerptFromChunk(chunk: SemanticChunk, maxChars = 240): string {
   const body = chunk.content.replace(/^标题：.*\n小节：.*\n\n/, "").replace(/\s+/g, " ").trim();
   return body.length > maxChars ? `${body.slice(0, maxChars).trimEnd()}…` : body;
-}
-function readTags(value: unknown): string[] {
-  if (Array.isArray(value)) return value.map(String).map(normalizeTag).filter(Boolean);
-  if (typeof value === "string") return value.split(/[,\s]+/).map(normalizeTag).filter(Boolean);
-  return [];
-}
-function normalizeTag(value: string): string { return value.trim().replace(/^#/, "").toLocaleLowerCase(); }
-function intersect(left: string[], right: string[]): string[] { const rightSet = new Set(right); return Array.from(new Set(left.filter((item) => rightSet.has(item)))); }
-function scalar(value: unknown): string {
-  if (Array.isArray(value)) return value.length > 0 ? String(value[0]).trim() : "";
-  return typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
 }
