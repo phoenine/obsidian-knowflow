@@ -72,7 +72,7 @@ KnowFlow 可以处理当前打开的 Markdown 剪藏，并尽量以小范围修�
 
 - **内置 Skills**。规则存于项目的 [skills 目录](skills/README.md)，构建时随插件打包。`clipping-update` 通读笔记，按 Obsidian Markdown 恢复剪藏丢失的章节、段落、列表、对比内容和可复制示例。Agent 返回基于原文位置的结构编辑，插件负责应用并保存。执行时兼容 Vault 中现有的同名 `skills/<名称>/SKILL.md`，也兼容旧版 `clipping-repair` 规则文件。
 - **生成文章摘要**。每次读取当前笔记一次，短文使用清理后的全文，长文在本地按章抽取片段，一次发给模型。卡片流式展示摘要正文，完成后按核心观点和章节梳理渲染，并按阅读评分显示推荐动作。模型没有返回摘要内容时，使用相同输入重试一次。保存时把摘要和可用的摘要属性合并到最新笔记，保留生成期间的正文编辑。
-- **文章时效检查**。打开文章后，在 KnowFlow 对话中输入「检查当前文章是否过时」。Agent 通过 [DeepSeek Search](https://api-docs.deepseek.com/guides/search/) 查找公开资料，用 Summary model 核查，返回带来源的编号修订或删除建议。回复「应用第 2 条」或「应用全部」可将对应修订写入当前对话绑定的文章。直接发送「检查并更新这篇文章」时，开启 `Confirm before write` 会先等待确认。DeepSeek Search 可复用已配置的官方 API Key，也可在 `Settings → AI Models → DeepSeek Search → Configure` 设置独立密钥。搜索及必要的网页抓取按接口请求计费。单次检查覆盖正文前 24,000 个字符，最多提出五项修订。
+- **文章时效检查**。打开文章后，在 KnowFlow 对话中输入「检查当前文章是否过时」。Agent 通过 [DeepSeek Search](https://api-docs.deepseek.com/guides/search/) 查找公开资料，用 Chat model 核查，返回带来源的编号修订或删除建议。回复「应用第 2 条」或「应用全部」可将对应修订写入当前对话绑定的文章。直接发送「检查并更新这篇文章」时，开启 `Confirm before write` 会先等待确认。DeepSeek Search 可复用已配置的官方 API Key，也可在 `Settings → AI Models → DeepSeek Search → Configure` 设置独立密钥。搜索及必要的网页抓取按接口请求计费。单次检查覆盖正文前 24,000 个字符，最多提出五项修订。
 - **相关文章**。Relevant Notes 先过滤弱语义匹配，再合并具体标题术语的匹配结果，最多展示五篇。共同标签只参与排序。每篇显示可点击的标题、加入 Chat 按钮和最多两行的「简要描述」。
 
 ### Task Overview

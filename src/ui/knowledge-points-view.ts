@@ -59,7 +59,19 @@ export function renderKnowledgePointsOverview(root: HTMLElement, props: Knowledg
     if (points.length === 0) {
       state(content, "尚未生成知识点");
       const generate = content.createEl("button", { text: "生成知识点" });
-      styleQuizButton(generate);
+      setStyles(generate, {
+        alignSelf: "center",
+        background: COLORS.accent,
+        border: "0",
+        borderRadius: "8px",
+        color: "#fff",
+        cursor: "pointer",
+        fontFamily: FONT,
+        fontSize: "14px",
+        fontWeight: "650",
+        minHeight: "36px",
+        padding: "0 18px"
+      });
       generate.addEventListener("click", props.onRefresh);
       return;
     }
@@ -119,24 +131,30 @@ function knowledgeShell(root: HTMLElement, props: KnowledgePointsOverviewProps):
     fontWeight: "650",
     lineHeight: "20px"
   });
-  const update = header.createEl("button", { attr: { "aria-label": "更新知识点" } });
-  setStyles(update, {
-    alignItems: "center",
-    background: "transparent",
-    border: "0",
-    color: COLORS.accent,
-    cursor: props.loading ? "default" : "pointer",
-    display: "flex",
-    fontFamily: FONT,
-    fontSize: "13px",
-    marginLeft: "auto",
-    opacity: props.loading ? "0.55" : "1",
-    padding: "6px 0"
-  });
-  update.createSpan({ text: props.loading ? "生成中…" : "更新" });
-  update.addEventListener("click", () => {
-    if (!props.loading) props.onRefresh();
-  });
+  const hasPoints = props.groups.some((group) => group.points.length > 0);
+  if (hasPoints) {
+    const update = bareIconButton(header, "更新知识点", "refresh-cw", () => {
+      if (!props.loading) props.onRefresh();
+    }, 16);
+    update.removeAttribute("title");
+    setStyles(update, {
+      color: COLORS.accent,
+      marginLeft: "auto",
+      opacity: props.loading ? "0.72" : "1"
+    });
+    if (props.loading) {
+      update.disabled = true;
+      const icon = update.querySelector("svg");
+      if (icon) {
+        icon.style.transformBox = "fill-box";
+        icon.style.transformOrigin = "center";
+        icon.animate(
+          [{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }],
+          { duration: 900, iterations: Infinity }
+        );
+      }
+    }
+  }
 
   return setStyles(root.createDiv({ cls: "kf-content kf-knowledge-content" }), {
     display: "flex",

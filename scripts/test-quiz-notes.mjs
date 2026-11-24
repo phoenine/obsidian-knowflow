@@ -13,7 +13,7 @@ await esbuild.build({
   outdir: tempDir,
   platform: "node"
 });
-const { appendQuizQuestion, buildQuizCallout, buildQuizNoteContent, computeKnowledgePointStatuses, parseQuizCallout, parseQuizEntries, parseQuizNote, computeQuizStats, applyQuizAnswer, setExamPassed, sanitizeQuizFileName, updateQuizSourcePath, upsertQuizCallout, upsertQuizQuestions } = await import(
+const { appendQuizQuestion, buildQuizCallout, buildQuizNoteContent, computeKnowledgePointStatuses, parseQuizCallout, parseQuizEntries, parseQuizNote, computeQuizStats, applyQuizAnswer, clearQuizAnswers, setExamPassed, sanitizeQuizFileName, updateQuizSourcePath, upsertQuizCallout, upsertQuizQuestions } = await import(
   pathToFileURL(join(tempDir, "quiz-notes.js")).href
 );
 
@@ -237,6 +237,16 @@ content = setExamPassed(content, true);
 assert.ok(content.includes("考试结果: true"));
 assert.ok(!content.includes("考试结果: false"));
 assert.ok(content.includes("分类:\n  - AI"), "unrelated frontmatter fields must survive setExamPassed");
+
+// Restarting a finished exam clears every previous choice before the new attempt.
+{
+  const restarted = clearQuizAnswers(content);
+  assert.equal(computeQuizStats(restarted).answered, 0);
+  assert.equal(computeQuizStats(restarted).accuracy, null);
+  assert.ok(restarted.includes("考试结果: false"));
+  assert.ok(!restarted.includes("✅") && !restarted.includes("❌"));
+  assert.ok(restarted.includes("第一题：Nano-vLLM 的 Scheduler 采用什么模式？"));
+}
 
 // A note with no quiz markers at all (e.g. the user's own note) must not crash.
 assert.deepEqual(parseQuizNote("# 普通笔记\n\n没有 quiz。", notePath), []);

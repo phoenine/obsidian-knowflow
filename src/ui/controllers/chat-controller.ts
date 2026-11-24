@@ -181,7 +181,7 @@ export class ChatController {
     progress("正在读取文章");
     const review = await this.plugin.freshness.check(
       file,
-      this.plugin.settings.summaryModel,
+      this.plugin.settings.chatModel,
       resolveDeepSeekSearchKey(this.plugin.settings, this.app.secretStorage),
       progress
     );

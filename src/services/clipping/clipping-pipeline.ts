@@ -146,7 +146,7 @@ export class ClippingPipeline {
       } else {
         await finishImagePlan();
         await report(translationStep);
-        const translations = await this.ai.translateEnglishParagraphs(title, translationPlan.candidates);
+        const translations = await this.ai.translateEnglishParagraphs(title, translationPlan.candidates, instructions);
         text = this.normalizeFinalBody(normalizeBodyHeadingLevels(
           applyTranslationDecisions(text, translationPlan.candidates, translations)
         ));

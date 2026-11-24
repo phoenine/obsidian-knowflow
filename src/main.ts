@@ -3,7 +3,6 @@ import { AiService } from "./services/ai/ai-service";
 import { ArticleLearningService } from "./services/learning/article-learning-service";
 import { ChatNoteService } from "./services/chat/chat-note-service";
 import { ClippingPipeline } from "./services/clipping/clipping-pipeline";
-import { MermaidService } from "./services/learning/mermaid-service";
 import { NoteOperationCoordinator } from "./services/core/note-operation-coordinator";
 import { PathRouter } from "./services/core/path-router";
 import { PluginDataManager } from "./services/core/plugin-data-manager";
@@ -27,7 +26,6 @@ export default class KnowFlowPlugin extends Plugin {
   ai: AiService;
   learningNotes: ArticleLearningService;
   chatNotes: ChatNoteService;
-  mermaid: MermaidService;
   pipeline: ClippingPipeline;
   quizNotes: QuizNoteService;
   summaryNotes: SummaryNoteService;
@@ -58,7 +56,6 @@ export default class KnowFlowPlugin extends Plugin {
     const skillRunner = new SkillRunner(new SkillStore(this.app.vault), this.app.vault);
     this.ai = new AiService(this.settings, skillRunner);
     this.freshness = new ArticleFreshness(this.app.vault, skillRunner, this.noteOperations);
-    this.mermaid = new MermaidService(this.app, this.ai, this.noteOperations);
     this.learningNotes = new ArticleLearningService(this.app, this.noteOperations);
     this.pipeline = new ClippingPipeline(this.app, this.settings, this.store, this.ai, this.noteOperations, skillRunner);
     this.quizNotes = new QuizNoteService(this.app, this.settings, this.noteOperations);
@@ -94,20 +91,6 @@ export default class KnowFlowPlugin extends Plugin {
           return;
         }
         await this.pipeline.process(file);
-        this.refreshView();
-      }
-    });
-
-    this.addCommand({
-      id: "generate-current-knowledge-map",
-      name: "Generate current article knowledge map",
-      callback: async () => {
-        const file = this.app.workspace.getActiveFile();
-        if (!file) {
-          new Notice("No active file");
-          return;
-        }
-        await this.mermaid.generateForFile(file);
         this.refreshView();
       }
     });

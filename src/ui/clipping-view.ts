@@ -17,22 +17,24 @@ export interface SummaryCardProps {
   onGenerateSummary: () => Promise<void>;
 }
 
-interface ClippingViewProps extends SummaryCardProps, RelevantNotesCardProps {
-  title: string;
+export interface ArticleMaintenanceProps {
   pipelineState: PipelineUiState | undefined;
   persistedPipeline: PipelineStatus;
   currentCategory: string | undefined;
-  readingValueLabel: string;
   suggestedCategoryLabel: string;
-  recommendedActionLabel: string;
   onRunPipeline: () => Promise<void>;
   onMoveCategory: (category: string) => Promise<void>;
 }
 
+interface ClippingViewProps extends SummaryCardProps, RelevantNotesCardProps, ArticleMaintenanceProps {
+  title: string;
+  readingValueLabel: string;
+  recommendedActionLabel: string;
+}
+
 export function renderClippingView(root: HTMLElement, props: ClippingViewProps): void {
   const content = renderBrandShell(root, "Clipping assistant", (actions) => {
-    renderOrganizeButton(actions, props);
-    renderMoveButton(actions, props);
+    renderArticleMaintenanceActions(actions, props);
   });
 
   const current = section(content, "kf-current");
@@ -163,7 +165,43 @@ function splitReasoningFocus(reasoning: string): { history: string; latest: stri
   };
 }
 
-function renderOrganizeButton(parent: HTMLElement, props: ClippingViewProps): void {
+export function renderArticleMaintenanceActions(parent: HTMLElement, props: ArticleMaintenanceProps): void {
+  renderOrganizeButton(parent, props);
+  renderMoveButton(parent, props);
+}
+
+export function renderKnowledgePointsButton(parent: HTMLElement, onOpen: () => void): void {
+  headerIconButton(parent, "知识点", "network", onOpen);
+}
+
+export function renderQuizButton(parent: HTMLElement, pending: boolean, hasAttempt: boolean, onOpen: () => void): void {
+  const label = pending ? "正在生成试题" : hasAttempt ? "查看考试成绩" : "考试";
+  const quiz = headerIconButton(parent, label, pending ? "loader-2" : "clipboard-check", () => {
+    if (!pending) onOpen();
+  });
+  if (pending) {
+    quiz.disabled = true;
+    setStyles(quiz, { color: "var(--interactive-accent)", cursor: "default", opacity: "1" });
+    const icon = quiz.querySelector("svg");
+    if (icon) {
+      icon.style.transformBox = "fill-box";
+      icon.style.transformOrigin = "center";
+      icon.animate(
+        [{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }],
+        { duration: 900, iterations: Infinity }
+      );
+    }
+    return;
+  }
+  if (!hasAttempt) return;
+  setStyles(quiz, {
+    backgroundColor: "var(--interactive-accent)",
+    borderColor: "var(--interactive-accent)",
+    color: "var(--text-on-accent)"
+  });
+}
+
+function renderOrganizeButton(parent: HTMLElement, props: ArticleMaintenanceProps): void {
   const running = props.pipelineState?.running === true;
   const error = running ? undefined : props.pipelineState?.error ?? (props.persistedPipeline.status === "failed" ? props.persistedPipeline.error : undefined);
   const processed = !running && !error && props.persistedPipeline.status === "processed";
@@ -194,7 +232,7 @@ function renderOrganizeButton(parent: HTMLElement, props: ClippingViewProps): vo
   }
 }
 
-function renderMoveButton(parent: HTMLElement, props: ClippingViewProps): void {
+function renderMoveButton(parent: HTMLElement, props: ArticleMaintenanceProps): void {
   const move = headerIconButton(parent, "移动到分类", "folder-input", () => {
     const existing = parent.querySelector<HTMLElement>(".kf-move-menu");
     if (existing) {

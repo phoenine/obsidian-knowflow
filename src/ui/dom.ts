@@ -178,14 +178,26 @@ export function button(parent: HTMLElement, label: string, onClick: () => void, 
   return el;
 }
 
-export function metric(parent: HTMLElement, label: string, value: string): HTMLElement {
+export function metric(parent: HTMLElement, label: string, value: string, onClick?: () => void, accent = false): HTMLElement {
   const el = setStyles(parent.createDiv({ cls: "kf-metric" }), {
     backgroundColor: "color-mix(in srgb, var(--interactive-accent) 5%, var(--background-secondary))",
     border: "1px solid color-mix(in srgb, var(--interactive-accent) 10%, transparent)",
     borderRadius: "7px",
+    cursor: onClick ? "pointer" : "",
     minWidth: "0",
     padding: "8px 9px"
   });
+  if (onClick) {
+    el.setAttribute("role", "button");
+    el.tabIndex = 0;
+    el.addEventListener("click", onClick);
+    el.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        onClick();
+      }
+    });
+  }
   setStyles(el.createDiv({ text: label, cls: "kf-metric-label" }), {
     color: "var(--text-muted)",
     fontSize: "10.5px",
@@ -195,7 +207,7 @@ export function metric(parent: HTMLElement, label: string, value: string): HTMLE
   });
   setStyles(el.createDiv({ text: value, cls: "kf-metric-value" }), {
     borderTop: "1px solid color-mix(in srgb, var(--interactive-accent) 12%, var(--background-modifier-border))",
-    color: "var(--text-normal)",
+    color: accent ? "var(--interactive-accent)" : "var(--text-normal)",
     fontSize: "13px",
     fontWeight: "600",
     lineHeight: "1.25",

@@ -59,8 +59,37 @@ export function parseSummaryCallout(content: string): SummaryText | null {
 const RANGE_ITEM = /^(\s*)(\d{1,3})\s*[-–—~～至到]\s*(\d{1,3})[.、．]\s*(.+)$/;
 const ORDERED_ITEM = /^\s*(\d+)[.、．]\s+\S/;
 
+const SUMMARY_METADATA = /^(?:title|value|tags|briefDescription|readingValue|category|reason|标题|简要描述|阅读价值|分类|标签)\s*[:：]\s*\S/i;
+
+/** Drops a leading metadata block only when the real summary outline follows it. */
+function stripSummaryMetadata(summary: string): string {
+  const lines = summary.split("\n");
+  let index = 0;
+  let removed = 0;
+  while (index < lines.length) {
+    const line = lines[index].trim();
+    if (!line) {
+      if (removed === 0) {
+        index += 1;
+        continue;
+      }
+      break;
+    }
+    if (!SUMMARY_METADATA.test(line)) break;
+    removed += 1;
+    index += 1;
+  }
+  if (removed < 2) return summary;
+  while (index < lines.length && !lines[index].trim()) index += 1;
+  const rest = lines.slice(index).join("\n").trim();
+  const first = rest.split("\n").find((line) => line.trim())?.trim() ?? "";
+  if (!/^#{1,6}\s+\S/.test(first)) return summary;
+  return rest;
+}
+
 /** Keep merged chapter ranges, but use a real ordered-list marker so they stay aligned. */
 export function alignSummaryOutline(summary: string): string {
+  summary = stripSummaryMetadata(summary);
   let lastNumber = 0;
   let inFence = false;
   return summary.split("\n").map((line) => {
@@ -99,10 +128,8 @@ function withChapterRange(body: string, start: number, end: number): string {
 }
 
 /**
- * Returns the character offset right after the summary callout block, so
- * other note-writing code (see mermaid-service.ts) can insert content
- * immediately following it instead of just appending to the end of the
- * file. Returns null if there's no managed summary callout yet.
+ * Returns the character offset right after the summary callout block.
+ * Returns null if there's no managed summary callout yet.
  */
 export function findSummaryCalloutEndIndex(content: string): number | null {
   const normalized = content.replace(/\r\n/g, "\n");

@@ -109,21 +109,23 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
     /无法解析为 YAML/);
 }
 
-// Language detection decides translation locally. A failed formatting batch
-// keeps the original fragment and still writes the rest of the note.
+// The skill decides which paragraphs to translate. Code only withholds
+// links, code, and managed sections. A failed formatting batch keeps the
+// original fragment and still writes the rest of the note.
 {
   const english = "Distributed systems are difficult because independent components can fail in many different ways.";
+  const french = "Voici un paragraphe français qui explique comment utiliser cette bibliothèque dans une application.";
   const link = "[esp32-iphone-agent](https://github.com/onehumanbeing/esp32-iphone-agent)";
   const previousWindow = globalThis.window;
   globalThis.window = { moment: () => ({ format: () => "2026-10-22" }) };
   try {
-    for (const { body, enabled, reason } of [
-      { body: `这篇中文文章介绍 ESP32 开发板，以及如何选择入门项目。\n\n- ${link}`, enabled: true, reason: "正文包含中文" },
-      { body: `${english}\n\n这一段是原文自带的中文说明。`, enabled: true, reason: "正文包含中文" },
-      { body: link, enabled: true, reason: "无可翻译正文" },
-      { body: "Voici un paragraphe français qui explique comment utiliser cette bibliothèque dans une application.", enabled: true, reason: "非英文或混合语言正文" },
-      { body: english, enabled: false, reason: "未开启英文翻译" },
-      { body: `> [!summary]- AI 摘要\n> 中文摘要不改变原文语言。\n\n${english}\n\n- ${link}`, enabled: true }
+    for (const { body, enabled, calls, status, info } of [
+      { body: `这篇中文文章介绍 ESP32 开发板，以及如何选择入门项目。\n\n- ${link}`, enabled: true, calls: 1, status: "skipped", info: "无可翻译正文" },
+      { body: `${english}\n\n这一段是原文自带的中文说明。`, enabled: true, calls: 1, status: "completed" },
+      { body: link, enabled: true, calls: 0, status: "skipped", info: "无可翻译正文" },
+      { body: french, enabled: true, calls: 1, status: "completed" },
+      { body: english, enabled: false, calls: 0, status: "skipped", info: "未开启英文翻译" },
+      { body: `> [!summary]- AI 摘要\n> 中文摘要不改变原文语言。\n\n${english}\n\n- ${link}`, enabled: true, calls: 1, status: "completed" }
     ]) {
       let translationCalls = 0;
       let written;
@@ -138,8 +140,11 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
       const ai = {
         translateEnglishParagraphs: async (_title, candidates) => {
           translationCalls += 1;
-          assert.equal(candidates.length, 1, "standalone project links must not be translated");
-          return candidates.map((candidate) => ({ id: candidate.id, translation: "分布式系统的独立组件可能以多种方式发生故障。" }));
+          assert.ok(candidates.every((candidate) => !candidate.content.includes("esp32-iphone-agent")));
+          assert.ok(candidates.every((candidate) => !candidate.content.includes("中文摘要")));
+          return candidates
+            .filter((candidate) => !/\p{Script=Han}/u.test(candidate.content))
+            .map((candidate) => ({ id: candidate.id, translation: "中文译文。" }));
         }
       };
       const pipeline = new ClippingPipeline(app, { translateEnglishClippings: enabled, templatePath: "" }, {
@@ -149,11 +154,57 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
       await pipeline.process({ path: "Clippings/Test.md", basename: "Test" }, (...event) => progress.push(event));
       assert.equal(success, true);
       assert.ok(written);
-      assert.equal(translationCalls, reason ? 0 : 1);
-      assert.ok(progress.some(([step, status, info]) => step === "英文翻译"
-        && (reason ? status === "skipped" && info === reason : status === "completed")));
+      assert.equal(translationCalls, calls);
+      assert.ok(progress.some(([step, stepStatus, stepInfo]) => step === "英文翻译"
+        && stepStatus === status && stepInfo === info));
       if (body.includes(link)) assert.ok(written.includes(link));
+      if (body.includes(french)) assert.ok(written.includes("（中文译文。）"));
     }
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+}
+
+{
+  const english = "A good harness makes lots of small decisions along the way before handing the answer back.";
+  const body = [
+    "An AI agent is a language model that works in a loop until the job is done.人工智能代理循环运行直到完成工作。",
+    "",
+    english,
+    "",
+    "```bash",
+    "echo 这段中文在代码块里",
+    "```"
+  ].join("\n");
+  const previousWindow = globalThis.window;
+  globalThis.window = { moment: () => ({ format: () => "2026-10-22" }) };
+  try {
+    let written = "";
+    const app = { vault: {
+      read: async () => body,
+      getAbstractFileByPath: () => null,
+      process: async (_file, transform) => { written = transform(body); },
+      adapter: { exists: async () => false }
+    } };
+    const ai = {
+      translateEnglishParagraphs: async (_title, candidates) => {
+        assert.ok(!candidates.some((candidate) => candidate.content.includes("代码块")));
+        assert.ok(candidates.some((candidate) => candidate.content === english));
+        assert.ok(candidates.some((candidate) => candidate.content.includes("人工智能")));
+        return candidates
+          .filter((candidate) => candidate.content === english)
+          .map((candidate) => ({ id: candidate.id, translation: "一个好的线束会沿途做出许多小决定。" }));
+      }
+    };
+    const pipeline = new ClippingPipeline(app, { translateEnglishClippings: true, templatePath: "" }, {
+      recordPipelineSuccess: async () => {},
+      setPipelineStatus: async (status) => { assert.fail(status.error); }
+    }, ai, { runExclusive: async (_path, operation) => operation() });
+    await pipeline.process({ path: "Clippings/Harness.md", basename: "Harness" });
+    assert.ok(written.includes(`${english}（一个好的线束会沿途做出许多小决定。）`));
+    assert.ok(written.includes("echo 这段中文在代码块里"));
+    assert.ok(!written.includes("人工智能代理循环运行直到完成工作。（"));
   } finally {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;

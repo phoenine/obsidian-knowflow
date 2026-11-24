@@ -117,8 +117,8 @@ const text = {
 }
 
 // findSummaryCalloutEndIndex must point right after the callout's last
-// quoted line, so other note-writing code (mermaid-service.ts) can splice
-// content in immediately after the summary regardless of what follows it.
+// quoted line, so other note-writing code can splice content in immediately
+// after the summary regardless of what follows it.
 {
   const note = "---\n分类: AI\n---\n\n## 正文标题\n\n这里是文章正文。\n";
   const withSummary = upsertSummaryCallout(note, text);
@@ -148,6 +148,19 @@ const text = {
   const parsed = parseSummaryCallout(buildSummaryCallout({ summary: outline, reason: "适合工程师。" }));
   assert.equal(parsed.summary, aligned);
   assert.equal(alignSummaryOutline("```\n11-12. 保留代码里的序号。\n```"), "```\n11-12. 保留代码里的序号。\n```");
+  const withMetadata = [
+    "title: AI 记忆的双刃剑",
+    "value: 警惕 AI 记忆带来的身份窄化与认知固化",
+    "tags: [AI, 心理效应，自我认知]",
+    "",
+    outline
+  ].join("\n");
+  assert.equal(alignSummaryOutline(withMetadata), aligned);
+  assert.equal(parseSummaryCallout(buildSummaryCallout({ summary: withMetadata, reason: "适合工程师。" })).summary, aligned);
+  const prose = "Value: low latency matters for this design.\n\n后面还有正文。";
+  assert.equal(alignSummaryOutline(prose), prose);
+  const singleLine = "Value: low latency matters.\n\n## 核心观点\n- 保持低延迟";
+  assert.equal(alignSummaryOutline(singleLine), singleLine);
 }
 
 await rm(tempDir, { recursive: true, force: true });

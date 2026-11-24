@@ -11,6 +11,7 @@ import { renderChatComposer, renderCollapsedChatComposer } from "./chat-composer
 import { renderChatHistoryPopover } from "./chat-history-view";
 import { renderClippingView, updateStreamingReasoning } from "./clipping-view";
 import { applyActionLayout, button, formatDate, iconButton, row, section, setStyles, text } from "./dom";
+import { renderQuizResultsView } from "./quiz-results-view";
 import { renderQuizTestView } from "./quiz-test-view";
 import { renderKnowledgePointsOverview } from "./knowledge-points-view";
 import { renderShell } from "./shell";
@@ -21,6 +22,10 @@ import { ChatController } from "./controllers/chat-controller";
 interface KnowledgePointViewState {
   filePath: string;
   selectedPointId: string | null;
+}
+
+interface QuizResultsState {
+  filePath: string;
 }
 
 type ComposerFocus = "input" | "toggle";
@@ -49,10 +54,17 @@ export class KnowFlowSidebarView extends ItemView {
   private summaryController: SummaryController;
   private quizController: QuizController;
   private quizSession: QuizSession | null = null;
+  private quizResults: QuizResultsState | null = null;
+  private quizOpenPath: string | null = null;
   private knowledgePointView: KnowledgePointViewState | null = null;
   private pipelineStates = new Map<string, PipelineUiState>();
   private renderedContextKey: string | null = null;
   private composerExpanded = false;
+  private composerPreference: "auto" | "open" | "closed" = "auto";
+  private composerHostBox = "";
+  private composerFitPending = false;
+  private composerFitting = false;
+  private composerResizeObserver: ResizeObserver | null = null;
   private composerDraft = "";
   private pendingComposerFocus: ComposerFocus | null = null;
   private collapsedChats = new Map<string, CollapsedChat>();
@@ -81,6 +93,7 @@ export class KnowFlowSidebarView extends ItemView {
         if (
           this.plugin.router.getContext().activeFile?.path === filePath
           || this.knowledgePointView?.filePath === filePath
+          || this.quizResults?.filePath === filePath
         ) this.render();
       }
     );
@@ -100,21 +113,30 @@ export class KnowFlowSidebarView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.render();
+    this.watchComposerHost();
+  }
+
+  async onClose(): Promise<void> {
+    this.composerResizeObserver?.disconnect();
+    this.composerResizeObserver = null;
+    await super.onClose();
   }
 
   render(composerFocus?: ComposerFocus, draft?: string): void {
     const root = this.containerEl.children[1] as HTMLElement;
     const nextContextKey = this.getRenderContextKey();
     const currentScroll = root.querySelector<HTMLElement>(".kf-content")?.scrollTop ?? 0;
-    const shouldRestoreScroll = this.renderedContextKey === nextContextKey;
+    const contextChanged = this.renderedContextKey !== nextContextKey;
+    const shouldRestoreScroll = !contextChanged;
     const activeElement = root.ownerDocument.activeElement;
     this.pendingComposerFocus = composerFocus ?? null;
     if (!composerFocus && shouldRestoreScroll) {
       if (root.querySelector(".kf-input") === activeElement) this.pendingComposerFocus = "input";
       if (root.querySelector(".kf-composer-expand") === activeElement) this.pendingComposerFocus = "toggle";
     }
-    if (!shouldRestoreScroll) {
+    if (contextChanged) {
       this.composerDraft = "";
+      this.composerPreference = "auto";
       this.composerExpanded = Boolean(this.chatController.activeThread);
     }
     if (composerFocus === "input") this.composerExpanded = true;
@@ -145,6 +167,12 @@ export class KnowFlowSidebarView extends ItemView {
       return;
     }
 
+    if (this.quizResults) {
+      this.renderQuizResults(root, this.quizResults);
+      this.restoreScroll(currentScroll, shouldRestoreScroll);
+      return;
+    }
+
     if (this.knowledgePointView) {
       this.renderKnowledgePoints(root, this.knowledgePointView);
       this.restoreScroll(currentScroll, shouldRestoreScroll);
@@ -152,9 +180,17 @@ export class KnowFlowSidebarView extends ItemView {
     }
 
     const context = this.plugin.router.getContext();
+    if (
+      this.composerPreference === "auto"
+      && context.activeFile
+      && this.summaryController.isPending(context.activeFile.path)
+    ) {
+      this.composerExpanded = false;
+    }
 
     if (context.mode === "clipping") {
       this.renderClipping(root, context);
+      this.finishAutoComposer(root, contextChanged);
       this.restoreScroll(currentScroll, shouldRestoreScroll);
       return;
     }
@@ -167,6 +203,7 @@ export class KnowFlowSidebarView extends ItemView {
 
     if (context.mode === "article-detail") {
       this.renderArticleDetail(root, context);
+      this.finishAutoComposer(root, contextChanged);
       this.restoreScroll(currentScroll, shouldRestoreScroll);
       return;
     }
@@ -431,6 +468,9 @@ export class KnowFlowSidebarView extends ItemView {
     const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
     const readingValue = this.getFrontmatterReadingValue(frontmatter) ?? (summary && summary.readingValue > 0 ? `${summary.readingValue}/5` : "--");
     const learningStatus = this.getFrontmatterLearningStatus(frontmatter) ?? (this.plugin.store.isLearned(file.path) ? "已学习" : "未学习");
+    const pipelineState = this.pipelineStates.get(file.path);
+    const persistedPipeline = this.plugin.store.getPipelineStatus(file.path);
+    const suggestedCategory = this.getFrontmatterCategory(frontmatter);
     const related = this.getRelatedNotesProps(file);
 
     renderArticleDetailView(root, {
@@ -444,16 +484,23 @@ export class KnowFlowSidebarView extends ItemView {
       streamingText,
       streamingReasoning,
       sourceLabel: "文章",
-      knowledgeMapPending: this.quizController.isKnowledgeMapPending(file.path),
-      quizPending: this.quizController.isQuizPending(file.path),
-      quiz,
+      pipelineState,
+      persistedPipeline,
+      currentCategory: this.categoryFolderName(file.path, `${this.plugin.settings.articlesFolder}/`) ?? undefined,
+      suggestedCategoryLabel: suggestedCategory ?? "--",
+      onRunPipeline: async () => {
+        await this.runPipeline(file);
+      },
+      onMoveCategory: async (category) => {
+        await this.moveToCategory(file, category);
+      },
+      quizPending: this.quizController.isQuizPending(file.path) || this.quizOpenPath === file.path,
+      hasAttempt: (quiz?.answered ?? 0) > 0,
       renderMarkdownSummary: (parent, markdown) => void this.renderMarkdownSummary(parent, markdown, file.path),
       onRefreshSummary: () => this.ensureSummary(file, true),
       onGenerateSummary: () => this.ensureSummary(file, true),
-      onGenerateKnowledgeMap: () => void this.quizController.generateKnowledgeMap(file),
       onShowKnowledgePoints: () => this.openKnowledgePoints(file),
-      onGenerateQuiz: () => void this.quizController.generateQuiz(file),
-      onStartQuiz: () => void this.startQuiz(file),
+      onOpenQuiz: () => void this.openQuiz(file),
       ...related
     });
 
@@ -529,6 +576,56 @@ export class KnowFlowSidebarView extends ItemView {
     });
   }
 
+
+  private renderQuizResults(root: HTMLElement, state: QuizResultsState): void {
+    const file = this.app.vault.getAbstractFileByPath(state.filePath);
+    if (!(file instanceof TFile)) {
+      this.quizResults = null;
+      this.renderEmpty(root);
+      return;
+    }
+    renderQuizResultsView(root, {
+      title: file.basename,
+      quiz: this.quizController.getQuizStats(file.path),
+      pending: this.quizController.isQuizPending(file.path),
+      onBack: () => {
+        this.quizResults = null;
+        this.render();
+      },
+      onRegenerate: () => void this.quizController.generateQuiz(file),
+      onRetake: () => void this.startQuiz(file)
+    });
+  }
+
+  private quizRequestStillCurrent(filePath: string): boolean {
+    const context = this.plugin.router.getContext();
+    return context.activeFile?.path === filePath
+      && !this.chatController.activeThread
+      && !this.knowledgePointView
+      && !this.quizSession;
+  }
+
+  private async openQuiz(file: TFile): Promise<void> {
+    if (this.quizOpenPath === file.path || this.quizController.isQuizPending(file.path)) return;
+    this.quizOpenPath = file.path;
+    try {
+      const loaded = await this.plugin.quizNotes.loadQuestions(file.path);
+      if (!loaded || loaded.questions.length === 0) {
+        this.render();
+        await this.quizController.generateQuiz(file);
+        const created = await this.plugin.quizNotes.loadQuestions(file.path);
+        if (!created || created.questions.length === 0) return;
+      }
+      if (!this.quizRequestStillCurrent(file.path)) return;
+      this.quizResults = { filePath: file.path };
+      this.render();
+    } finally {
+      if (this.quizOpenPath === file.path) {
+        this.quizOpenPath = null;
+        if (this.quizResults?.filePath !== file.path) this.render();
+      }
+    }
+  }
 
   private renderQuizTest(root: HTMLElement, session: QuizSession): void {
     const reviewQuestion = session.reviewDate
@@ -732,23 +829,107 @@ export class KnowFlowSidebarView extends ItemView {
       return;
     }
 
+    renderChatComposer(root, this.expandedComposerProps(label, file, this.pendingComposerFocus === "input", context));
+  }
+
+  private watchComposerHost(): void {
+    const host = this.containerEl.children[1] as HTMLElement | undefined;
+    if (!host || typeof ResizeObserver === "undefined") return;
+    this.composerResizeObserver?.disconnect();
+    this.composerResizeObserver = new ResizeObserver(() => {
+      if (this.composerFitting || host.clientHeight <= 0) return;
+      const box = `${host.clientWidth}x${host.clientHeight}`;
+      if (box === this.composerHostBox) return;
+      this.composerHostBox = box;
+      if (this.composerPreference !== "auto" || !this.articleComposerCanAutoFit()) return;
+      this.composerFitPending = true;
+      this.render();
+    });
+    this.composerResizeObserver.observe(host);
+  }
+
+  private articleComposerCanAutoFit(): boolean {
+    if (this.chatController.activeThread || this.quizSession || this.quizResults || this.knowledgePointView) return false;
+    const mode = this.plugin.router.getContext().mode;
+    return mode === "clipping" || mode === "article-detail";
+  }
+
+  private finishAutoComposer(root: HTMLElement, contextChanged: boolean): void {
+    if (this.composerFitting || (!contextChanged && !this.composerFitPending)) return;
+    this.composerFitPending = false;
+    if (this.composerPreference !== "auto" || !this.articleComposerCanAutoFit()) return;
+    const activePath = this.plugin.router.getContext().activeFile?.path;
+    if (activePath && this.relatedNoteLoads.has(activePath)) return;
+    if (activePath && this.summaryController.isPending(activePath)) return;
+    if (!root.querySelector(".kf-composer") || root.clientHeight <= 0) return;
+    const fits = this.cardsFitExpandedComposer(root);
+    this.composerHostBox = `${root.clientWidth}x${root.clientHeight}`;
+    if (fits === this.composerExpanded) return;
+    this.composerExpanded = fits;
+    this.composerFitting = true;
+    try {
+      this.render();
+    } finally {
+      this.composerFitting = false;
+    }
+  }
+
+  private cardsFitExpandedComposer(root: HTMLElement): boolean {
+    const content = root.querySelector<HTMLElement>(".kf-content");
+    const composer = root.querySelector<HTMLElement>(".kf-composer");
+    if (!content || !composer) return false;
+    const flex = content.style.flex;
+    const minHeight = content.style.minHeight;
+    const height = content.style.height;
+    content.style.flex = "0 0 auto";
+    content.style.minHeight = "0";
+    content.style.height = "auto";
+    const cardsHeight = content.scrollHeight;
+    content.style.flex = flex;
+    content.style.minHeight = minHeight;
+    content.style.height = height;
+    const headerHeight = root.querySelector<HTMLElement>(".kf-header")?.offsetHeight ?? 0;
+    const composerHeight = this.composerExpanded ? composer.offsetHeight : this.measureExpandedComposer(root);
+    if (composerHeight <= 0) return false;
+    return headerHeight + cardsHeight + composerHeight <= root.clientHeight + 1;
+  }
+
+  private measureExpandedComposer(root: HTMLElement): number {
+    const context = this.plugin.router.getContext();
+    const file = context.activeFile;
+    const probe = root.createDiv();
+    setStyles(probe, {
+      left: "0",
+      pointerEvents: "none",
+      position: "absolute",
+      visibility: "hidden",
+      width: `${root.clientWidth}px`
+    });
+    try {
+      renderChatComposer(probe, this.expandedComposerProps(file?.basename ?? "", file, false, context));
+      return probe.querySelector<HTMLElement>(".kf-composer")?.offsetHeight ?? 0;
+    } finally {
+      probe.remove();
+    }
+  }
+
+  private expandedComposerProps(label: string, file: TFile | null, focusDraft: boolean, context: ViewContext) {
     const usage = this.chatController.getUsage();
-    const sending = this.chatController.isSending();
-    renderChatComposer(root, {
+    return {
       contextLabel: label,
       modelName: this.plugin.settings.chatModel.model,
       draft: this.composerDraft,
-      focusDraft: this.pendingComposerFocus === "input",
+      focusDraft,
       tokenCount: usage.totalTokens,
       tokenEstimated: usage.estimated,
-      sending,
+      sending: this.chatController.isSending(),
       vaultSearchEnabled: this.vaultSearchEnabled,
       vaultSearchAvailable: this.plugin.semanticIndex.isReady(),
       additionalContextPaths: Array.from(this.chatContextPaths),
-      onDraftChange: (value) => {
+      onDraftChange: (value: string) => {
         this.composerDraft = value;
       },
-      onSubmit: (question) => void this.submitChat(question, context, file),
+      onSubmit: (question: string) => void this.submitChat(question, context, file),
       onSaveNote: () => void this.chatController.saveActiveThread(),
       onOpenHistory: () => void this.openChatHistory(),
       onToggleVaultSearch: () => {
@@ -759,12 +940,12 @@ export class KnowFlowSidebarView extends ItemView {
         this.vaultSearchEnabled = !this.vaultSearchEnabled;
         this.render();
       },
-      onRemoveContext: (path) => {
+      onRemoveContext: (path: string) => {
         this.chatContextPaths.delete(path);
         this.render();
       },
       onCollapse: () => this.collapseComposer(file)
-    });
+    };
   }
 
   private openComposer(attachPath?: string, draft?: string): void {
@@ -776,6 +957,7 @@ export class KnowFlowSidebarView extends ItemView {
       this.chatContextPaths = new Set(collapsed.contextPaths);
     }
     if (attachPath) this.chatContextPaths.add(attachPath);
+    this.composerPreference = "open";
     this.render("input", draft ?? collapsed?.draft);
   }
 
@@ -784,7 +966,7 @@ export class KnowFlowSidebarView extends ItemView {
     const context = this.plugin.router.getContext();
     const returnToArticle = thread && file && file.path === context.activeFile?.path
       && (context.mode === "clipping" || context.mode === "article-detail")
-      && !this.quizSession && !this.knowledgePointView;
+      && !this.quizSession && !this.quizResults && !this.knowledgePointView;
     if (returnToArticle) {
       this.chatController.activeThread = null;
       this.streamingAnswerEl = null;
@@ -797,6 +979,7 @@ export class KnowFlowSidebarView extends ItemView {
       pendingReply: thread?.messages.find((message) => message.status === "pending" || message.status === "streaming")
     });
     this.composerExpanded = false;
+    this.composerPreference = "closed";
     this.chatContextPaths.clear();
     this.render("toggle");
   }
@@ -894,7 +1077,10 @@ export class KnowFlowSidebarView extends ItemView {
       this.relatedNoteErrors.set(path, error instanceof Error ? error.message : String(error));
     } finally {
       this.relatedNoteLoads.delete(path);
-      if (this.plugin.router.getContext().activeFile?.path === file.path) this.render();
+      if (this.plugin.router.getContext().activeFile?.path === file.path) {
+        if (this.composerPreference === "auto") this.composerFitPending = true;
+        this.render();
+      }
     }
   }
 
@@ -1013,17 +1199,22 @@ export class KnowFlowSidebarView extends ItemView {
   }
 
   private async startQuiz(file: TFile): Promise<void> {
-    const loaded = await this.plugin.quizNotes.loadQuestions(file.path);
-    if (!loaded || loaded.questions.length === 0) {
+    const loaded = await this.plugin.quizNotes.loadReviewQuestions(file.path);
+    if (!loaded || loaded.entries.length === 0) {
       new Notice("请先生成试题。");
       return;
+    }
+    const firstUnanswered = loaded.entries.findIndex((entry) => entry.answerState.selectedKey === null);
+    if (firstUnanswered < 0) {
+      await this.plugin.quizNotes.clearAnswers(file.path);
+      this.quizController.invalidate(file.path);
     }
     this.quizSession = {
       filePath: file.path,
       quizPath: loaded.quizPath,
       title: file.basename,
-      questions: loaded.questions,
-      index: 0,
+      questions: loaded.entries.map((entry) => entry.question),
+      index: firstUnanswered >= 0 ? firstUnanswered : 0,
       selectedKey: null,
       submitted: false
     };
@@ -1252,6 +1443,7 @@ export class KnowFlowSidebarView extends ItemView {
     if (this.chatController.activeThread) return `chat:${this.chatController.activeThread.id}`;
     if (this.quizSession?.reviewDate) return `review:${this.quizSession.reviewDate}`;
     if (this.quizSession) return `quiz:${this.quizSession.filePath}`;
+    if (this.quizResults) return `quiz-results:${this.quizResults.filePath}`;
     if (this.knowledgePointView) {
       return `knowledge:${this.knowledgePointView.filePath}`;
     }

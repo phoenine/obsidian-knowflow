@@ -68,8 +68,12 @@ const mixedLanguageArticle = [
   "This bilingual paragraph already has a translation. 这段内容已经有中文翻译。"
 ].join("\n");
 const mixedCandidates = collectTranslationCandidates(mixedLanguageArticle);
-assert.equal(mixedCandidates.length, 0, "mixed-language articles must skip translation entirely");
-assert.match(planEnglishTranslation(mixedLanguageArticle).skipReason, /包含中文/);
+assert.deepEqual(mixedCandidates.map((candidate) => candidate.content), [
+  "这是一段已经存在的中文内容，不需要重复处理。",
+  "This untouched English paragraph should still be selected for translation.",
+  "This bilingual paragraph already has a translation. 这段内容已经有中文翻译。"
+], "language is judged per paragraph, not by dropping the article");
+assert.equal(planEnglishTranslation(mixedLanguageArticle).skipReason, undefined);
 
 const libraryMetadata = [
   "**Radix UI** — Star 19,375｜ `@radix-ui/react-*` ｜MIT",
@@ -112,15 +116,27 @@ const unmanagedAdjacentChinese = [
   "",
   "这只是相邻的普通中文段落，不应依靠语言比例猜测它是译文。"
 ].join("\n");
-assert.equal(
-  collectTranslationCandidates(unmanagedAdjacentChinese).length,
-  0,
-  "original Chinese prose must make the whole article ineligible"
-);
+assert.equal(collectTranslationCandidates(unmanagedAdjacentChinese).length, 2, "Chinese and English paragraphs are both sent to the skill");
+const inlineTranslation = [
+  "An AI agent is a language model that works in a loop until the job is done.人工智能代理循环运行直到完成工作。",
+  "",
+  "A good harness makes lots of small decisions along the way before handing the answer back.",
+  "",
+  "```bash",
+  "echo 这段中文在代码块里，不能送给判断",
+  "```"
+].join("\n");
+const inlineCandidates = collectTranslationCandidates(inlineTranslation);
+assert.deepEqual(inlineCandidates.map((candidate) => candidate.content), [
+  "An AI agent is a language model that works in a loop until the job is done.人工智能代理循环运行直到完成工作。",
+  "A good harness makes lots of small decisions along the way before handing the answer back."
+]);
+assert.ok(!inlineCandidates.some((candidate) => candidate.content.includes("代码块")));
 
 const projectLink = "[esp32-iphone-agent](https://github.com/onehumanbeing/esp32-iphone-agent)";
 const chineseArticle = `这篇文章介绍 ESP32 开发板如何入门，以及如何选择开源项目。\n\n- ${projectLink}`;
-assert.deepEqual(planEnglishTranslation(chineseArticle), { candidates: [], skipReason: "正文包含中文" });
+assert.equal(planEnglishTranslation(chineseArticle).skipReason, undefined);
+assert.equal(collectTranslationCandidates(chineseArticle).length, 1);
 for (const content of [
   projectLink,
   `- ${projectLink}`,
@@ -143,8 +159,8 @@ assert.equal(collectTranslationCandidates(decoratedEnglish).length, 2, "generate
 assert.equal(collectTranslationCandidates(`${english}\n\n<!--\nThis hidden comment must never be translated by the plugin.\n-->\n\n    This indented code must also stay unchanged.`).length, 2);
 assert.equal(collectTranslationCandidates(`${english}\n\n## Knowledge Map\n\nThis generated English explanation must not become a translation candidate.`).length, 2);
 assert.equal(collectTranslationCandidates(`---\ndescription: This English metadata does not belong to the article.\n---\n\n${english}`).length, 2);
-assert.equal(collectTranslationCandidates(`${english}\n\n> [!note] 原文备注\n> 这段中文是原作者写的正文备注。`).length, 0);
-assert.equal(collectTranslationCandidates(`${english}\n\n    - 这是原文中的嵌套中文列表，不能忽略。`).length, 0);
+assert.equal(collectTranslationCandidates(`${english}\n\n> [!note] 原文备注\n> 这段中文是原作者写的正文备注。`).length, 2, "callouts stay out of the translation candidates");
+assert.equal(collectTranslationCandidates(`${english}\n\n    - 这是原文中的嵌套中文列表，不能忽略。`).length, 3);
 const partiallyTranslated = applyTranslationDecisions(english, candidates, [validTranslation(candidates[0].id)]);
 assert.deepEqual(collectTranslationCandidates(partiallyTranslated).map((candidate) => candidate.content), [candidates[1].content]);
 assert.equal(collectTranslationCandidates(`${managedLegacyTranslation}\n\n${candidates[1].content}`).length, 1);
@@ -155,13 +171,14 @@ for (const foreign of [
   "Dieser Artikel beschreibt die Verwendung dieser Bibliothek für zuverlässige Anwendungen.",
   "これは英語ではなく日本語で書かれた説明文です。"
 ]) {
-  assert.equal(collectTranslationCandidates(foreign).length, 0, "Latin letters do not imply English");
-  assert.equal(collectTranslationCandidates(`${candidates[0].content}\n\n${foreign}`).length, 0, "one foreign paragraph must block the whole article");
+  assert.equal(collectTranslationCandidates(foreign).length, 1, "non-Chinese paragraphs are translation candidates");
+  assert.equal(collectTranslationCandidates(`${candidates[0].content}\n\n${foreign}`).length, 2, "a foreign paragraph does not cancel the English paragraph");
 }
-assert.match(planEnglishTranslation("Hello world").skipReason, /无法确定/);
-assert.equal(collectTranslationCandidates(`${english}\n\nBonjour tout le monde.`).length, 0, "uncertain short paragraphs must not be silently accepted");
+assert.equal(collectTranslationCandidates("Hello world").length, 1);
+assert.equal(collectTranslationCandidates(`${english}\n\nHowever, some failure modes will remain:`).length, 3);
+assert.equal(collectTranslationCandidates(`${english}\n\nBonjour tout le monde.`).length, 3);
 const longMixedParagraph = `${candidates[0].content.repeat(35)} ${"Voici un paragraphe français qui explique comment utiliser cette bibliothèque dans une application. ".repeat(35)}`;
-assert.equal(collectTranslationCandidates(longMixedParagraph).length, 0, "language detection must inspect past the first 2048 characters");
+assert.equal(collectTranslationCandidates(longMixedParagraph).length, 1);
 
 function validTranslation(id) {
   return { id, translation: "完整的中文译文。" };
@@ -230,6 +247,14 @@ const translateResponse = (payload) => new RepairAi({ requestJson: async () => p
 assert.deepEqual(await translateResponse(validResponse), validResponse.translations);
 assert.deepEqual(await translateResponse({ translations: [...validResponse.translations].reverse() }), [...validResponse.translations].reverse());
 await assert.rejects(translateResponse({ translations: validResponse.translations.slice(0, 1) }), /translation-2.*未返回/);
+assert.deepEqual(
+  await translateResponse({ translations: [
+    validResponse.translations[0],
+    { id: candidates[1].id, action: "skip" }
+  ] }),
+  [validResponse.translations[0]],
+  "a skipped paragraph is acknowledged without a translation"
+);
 for (const [translation, reason] of [
   ["Unchanged English prose.", /不含中文/],
   ["中文译文\n第二行", /换行/],

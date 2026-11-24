@@ -189,7 +189,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
   private displayAiModels(containerEl: HTMLElement): void {
     const ai = this.createGroup(containerEl, "AI 模型", "", true);
     this.createModelEntry(ai, "Summary model", "AI Summary: generates article summary, reading value and classification.", "summaryModel");
-    this.createModelEntry(ai, "Knowledge Map model", "Generates Mermaid maps and structured knowledge points for an article.", "knowledgeMapModel");
+    this.createModelEntry(ai, "Knowledge Map model", "Generates structured knowledge points for an article.", "knowledgeMapModel");
     this.createModelEntry(ai, "Pipeline model", "Clipping Pipeline: heading detection, code block recognition and language classification.", "pipelineModel");
     this.createModelEntry(ai, "Chat model", "Used by the sidebar chat composer.", "chatModel");
     this.createModelEntry(ai, "Quiz model", "Generates Markdown quiz questions, including targeted knowledge-point questions.", "quizModel");
@@ -220,8 +220,8 @@ export class KnowFlowSettingTab extends PluginSettingTab {
       );
 
     new Setting(pipeline)
-      .setName("Translate English clippings")
-      .setDesc("Translate prose only when the original article is clearly English throughout. Chinese, mixed-language and uncertain articles are skipped. Code, standalone links, metadata and generated content are excluded; translations are appended inline.")
+      .setName("Translate non-Chinese prose")
+      .setDesc("While organizing, the skill decides each paragraph. Non-Chinese prose is translated; Chinese paragraphs are skipped. Code, formulas, standalone links, metadata and generated content stay out.")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.translateEnglishClippings)

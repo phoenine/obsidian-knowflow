@@ -1,4 +1,4 @@
-import { englishArticleSkipReason, translationProse } from "./translation-language";
+import { translationProse } from "./translation-language";
 import { protectedLineIndices, protectedRanges } from "./protected-markdown";
 
 export interface TranslationCandidate {
@@ -22,8 +22,6 @@ export function collectTranslationCandidates(content: string): TranslationCandid
 }
 
 export function planEnglishTranslation(content: string): { candidates: TranslationCandidate[]; skipReason?: string } {
-  const skipReason = englishArticleSkipReason(content);
-  if (skipReason) return { candidates: [], skipReason };
   const candidates = collectParagraphCandidates(content);
   return { candidates, skipReason: candidates.length === 0 ? "无可翻译正文" : undefined };
 }
@@ -57,7 +55,7 @@ export function collectParagraphCandidates(content: string): TranslationCandidat
     }
     if (!isPlainParagraphLine(lines[index])) {
       const listItem = getListItemContent(lines[index]);
-      if (listItem && isTranslatableEnglish(listItem) && !lines[index].includes(TRANSLATION_MARKER)) {
+      if (listItem && isTranslatableProse(listItem) && !lines[index].includes(TRANSLATION_MARKER)) {
         candidates.push({
           id: `translation-${candidates.length + 1}`,
           startLine: index,
@@ -79,7 +77,7 @@ export function collectParagraphCandidates(content: string): TranslationCandidat
     const endLine = index;
     const source = lines.slice(startLine, endLine + 1).join("\n");
     const paragraph = source.trim();
-    if (isTranslatableEnglish(paragraph) && !source.includes(TRANSLATION_MARKER) && !hasManagedTranslationAfter(lines, endLine)) {
+    if (isTranslatableProse(paragraph) && !source.includes(TRANSLATION_MARKER) && !hasManagedTranslationAfter(lines, endLine)) {
       candidates.push({
         id: `translation-${candidates.length + 1}`,
         startLine,
@@ -147,10 +145,8 @@ function getListItemContent(line: string): string | null {
   return match?.[1]?.trim() || null;
 }
 
-function isTranslatableEnglish(value: string): boolean {
-  const prose = translationProse(value);
-  const latin = prose.match(/[A-Za-z]/g)?.length ?? 0;
-  return latin >= 20 && !/[\u3400-\u9fff]/.test(prose);
+function isTranslatableProse(value: string): boolean {
+  return /\p{L}/u.test(translationProse(value));
 }
 
 function hasManagedTranslationAfter(lines: string[], endLine: number): boolean {

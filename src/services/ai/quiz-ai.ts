@@ -88,11 +88,7 @@ export class QuizAi {
     const payload = await this.transport.requestJson<KnowledgePointQuizResponse>(config, [
       {
         role: "system",
-        content: [
-          "你是 KnowFlow 的针对性出题器。只根据给定知识点及其原文依据生成一道中文单选题。",
-          "题目必须检验理解而不是字面记忆；提供 A/B/C/D 四个选项、唯一答案和解析。",
-          "不得引入原文依据之外的事实。只输出严格 JSON。"
-        ].join("\n")
+        content: "按 Skill 出题。只输出严格 JSON，不要输出 Markdown。"
       },
       {
         role: "user",
@@ -131,17 +127,7 @@ function buildQuizBatchMessages(
   return [
     {
       role: "system",
-      content: [
-        "你是 KnowFlow 的学习测验出题器。逐章判断知识价值，只为有明确学习价值的章节出题；背景、宣传、重复内容和无可检验知识的章节必须返回 value=0、questions=[]。",
-        "必须只根据提供的文章章节出题，不得引入文章外事实。",
-        "优先从标记内容取材：bold 最高，highlight 和 underline 为高，italic 为中；标记不足时再从同章节正文补充。",
-        "标记只是价值信号，不代表一定值得出题，仍需根据语义判断。",
-        "focusType 只能是 concept、principle、comparison、application、pitfall。",
-        "只生成单选题；每题必须有题干、A/B/C/D 四个选项、唯一答案和中文解析。",
-        "sourceQuote 必须逐字引用对应章节中的原始依据，用于验证题目没有编造。",
-        "错误选项要有迷惑性，但不能明显荒谬或包含文章未涉及的事实。",
-        "输出严格 JSON，不要输出 Markdown。"
-      ].join("\n")
+      content: "按 Skill 出题。只输出严格 JSON，不要输出 Markdown。"
     },
     {
       role: "user",

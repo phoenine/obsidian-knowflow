@@ -3,7 +3,7 @@ import type { App } from "obsidian";
 import type { KnowledgePoint, KnowledgePointGroup, KnowledgePointStatus, KnowFlowSettings, QuizQuestion, QuizStats } from "../../types";
 import { mergeKnowledgePointGroups, parseKnowledgePoints, upsertKnowledgePoints } from "./knowledge-points";
 import { NoteOperationCoordinator } from "../core/note-operation-coordinator";
-import { appendQuizQuestion, applyQuizAnswer, buildQuizNoteContent, computeKnowledgePointStatuses, computeQuizStats, parseQuizCallout, parseQuizEntries, parseQuizNote, sanitizeQuizFileName, setExamPassed, updateQuizSourcePath, upsertQuizCallout, upsertQuizQuestions } from "./quiz-notes";
+import { appendQuizQuestion, applyQuizAnswer, buildQuizNoteContent, clearQuizAnswers, computeKnowledgePointStatuses, computeQuizStats, parseQuizCallout, parseQuizEntries, parseQuizNote, sanitizeQuizFileName, setExamPassed, updateQuizSourcePath, upsertQuizCallout, upsertQuizQuestions } from "./quiz-notes";
 import type { ParsedQuizQuestion } from "./quiz-notes";
 
 /**
@@ -200,6 +200,18 @@ export class QuizNoteService {
     const prefix = `${newFolder}/`;
     const files = this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(prefix));
     await Promise.all(files.map((file) => this.updateSourcePath(file.path)));
+  }
+
+  async clearAnswers(notePath: string): Promise<void> {
+    const quizPath = await this.resolveQuizPath(notePath);
+    if (!quizPath) return;
+    await this.noteOperations.runExclusive(notePath, async () => {
+      const file = this.app.vault.getAbstractFileByPath(quizPath);
+      if (!(file instanceof TFile)) return;
+      const content = await this.app.vault.read(file);
+      const cleared = clearQuizAnswers(content);
+      if (cleared !== content) await this.app.vault.modify(file, cleared);
+    });
   }
 
   /** `displayIndex` is 1-based, matching the question's position in the session. Returns whether the answer was correct. */

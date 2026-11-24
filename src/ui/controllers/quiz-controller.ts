@@ -9,7 +9,6 @@ export interface CachedKnowledgePoints {
 }
 
 export class QuizController {
-  private pendingKnowledgeMaps = new Set<string>();
   private pendingKnowledgePoints = new Set<string>();
   private pendingKnowledgePointQuizzes = new Set<string>();
   private pendingQuizzes = new Set<string>();
@@ -23,10 +22,6 @@ export class QuizController {
     private getCategory: (file: TFile) => string,
     private onStateChange: (filePath: string) => void
   ) {}
-
-  isKnowledgeMapPending(filePath: string): boolean {
-    return this.pendingKnowledgeMaps.has(filePath);
-  }
 
   isQuizPending(filePath: string): boolean {
     return this.pendingQuizzes.has(filePath);
@@ -43,25 +38,11 @@ export class QuizController {
     return null;
   }
 
-  getQuizStats(path: string): QuizStats {
+  getQuizStats(path: string): QuizStats | null {
     const cached = this.quizStatsCache.get(path);
     if (cached) return cached;
     void this.refreshQuizStats(path);
-    return { total: 0, answered: 0, accuracy: null, wrong: 0 };
-  }
-
-  async generateKnowledgeMap(file: TFile): Promise<void> {
-    if (this.pendingKnowledgeMaps.has(file.path)) return;
-    this.pendingKnowledgeMaps.add(file.path);
-    this.onStateChange(file.path);
-    try {
-      await this.plugin.mermaid.generateForFile(file);
-    } catch (error) {
-      new Notice(`KnowFlow Mermaid failed: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      this.pendingKnowledgeMaps.delete(file.path);
-      this.onStateChange(file.path);
-    }
+    return null;
   }
 
   async generateQuiz(file: TFile): Promise<void> {

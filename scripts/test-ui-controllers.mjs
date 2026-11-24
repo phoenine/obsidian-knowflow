@@ -128,8 +128,9 @@ const { SummaryController } = await import(pathToFileURL(join(tempDir, "summary-
       quizModel: model, embeddingModel: model, confirmBeforeWrite: true
     },
     freshness: {
-      check: async (target) => {
+      check: async (target, model) => {
         assert.equal(target, file);
+        assert.equal(model, plugin.settings.chatModel);
         return review;
       },
       apply: async (target, snapshot, selected) => {

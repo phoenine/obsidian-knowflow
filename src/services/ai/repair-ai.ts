@@ -25,10 +25,9 @@ export class RepairAi {
           {
             role: "system",
             content: [
-              "你是专业的英译中编辑。把每个英文段落准确、自然地翻译成简体中文。",
-              "每个输入 id 必须返回且只能返回一次；不得合并、拆分或遗漏段落。",
-              "只输出严格 JSON，不要输出 Markdown 围栏。"
-            ].filter(Boolean).join("\n")
+              "按 Skill 判断整段。整段是外文才翻译成简体中文；整段是中文就 action 为 skip，不要因为里面有 ChatGPT 这类英文术语而翻译。",
+              "每个输入 id 必须返回且只能返回一次。只输出严格 JSON，不要输出 Markdown。"
+            ].join("\n")
           },
           {
             role: "user",
@@ -36,7 +35,10 @@ export class RepairAi {
               title,
               paragraphs: batch.map((candidate) => ({ id: candidate.id, text: candidate.content })),
               requiredJsonShape: {
-                translations: [{ id: "translation-1", translation: "对应的简体中文翻译" }]
+                translations: [
+                  { id: "translation-1", translation: "对应的简体中文翻译" },
+                  { id: "translation-2", action: "skip" }
+                ]
               }
             })
           }
@@ -65,23 +67,25 @@ function normalizeTranslationResponse(
   const errors: string[] = [];
   const normalized: TranslationDecision[] = [];
   for (const [index, item] of value.translations.entries()) {
-    if (!item || typeof item !== "object" || typeof item.id !== "string") {
+    const record = item && typeof item === "object" ? item as { id?: unknown; action?: unknown; translation?: unknown } : null;
+    if (!record || typeof record.id !== "string") {
       errors.push(`第 ${index + 1} 项缺少有效 id`);
       continue;
     }
-    const candidate = byId.get(item.id);
+    const candidate = byId.get(record.id);
     if (!candidate) {
-      errors.push(`未知 id：${item.id.slice(0, 80)}`);
+      errors.push(`未知 id：${record.id.slice(0, 80)}`);
       continue;
     }
-    if (seen.has(item.id)) {
+    if (seen.has(record.id)) {
       errors.push(describeTranslationCandidate(candidate, "重复返回"));
       continue;
     }
-    seen.add(item.id);
-    const reason = invalidTranslationReason(item.translation);
+    seen.add(record.id);
+    if (record.action === "skip") continue;
+    const reason = invalidTranslationReason(record.translation);
     if (reason) errors.push(describeTranslationCandidate(candidate, reason));
-    else normalized.push({ id: item.id, translation: (item.translation as string).trim() });
+    else normalized.push({ id: record.id, translation: (record.translation as string).trim() });
   }
   for (const candidate of candidates) {
     if (!seen.has(candidate.id)) errors.push(describeTranslationCandidate(candidate, "未返回译文"));

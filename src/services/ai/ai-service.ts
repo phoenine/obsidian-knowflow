@@ -56,31 +56,29 @@ export class AiService {
       retrievedContext?: string;
     }
   ): Promise<ChatUsage> {
-    return this.skills.run("article-chat", async (instructions) => {
-      const transport = new AiTransport(instructions);
-      const messages = buildChatRequestMessages(contextLabel, articleContent, history, handlers.retrievedContext);
-      let emitted = false;
-      try {
-        return await transport.requestTextStream(this.settings.chatModel, messages, {
-          onContent: (delta) => {
-            emitted = true;
-            handlers.onContent(delta);
-          },
-          onReasoning: (delta) => {
-            emitted = true;
-            handlers.onReasoning(delta);
-          },
-          onUsage: handlers.onUsage
-        });
-      } catch (error) {
-        if (emitted) throw error;
-        const answer = await transport.requestText(this.settings.chatModel, messages);
-        handlers.onContent(answer);
-        const usage = estimateChatUsage(messages, answer);
-        handlers.onUsage(usage);
-        return usage;
-      }
-    });
+    const transport = new AiTransport();
+    const messages = buildChatRequestMessages(contextLabel, articleContent, history, handlers.retrievedContext);
+    let emitted = false;
+    try {
+      return await transport.requestTextStream(this.settings.chatModel, messages, {
+        onContent: (delta) => {
+          emitted = true;
+          handlers.onContent(delta);
+        },
+        onReasoning: (delta) => {
+          emitted = true;
+          handlers.onReasoning(delta);
+        },
+        onUsage: handlers.onUsage
+      });
+    } catch (error) {
+      if (emitted) throw error;
+      const answer = await transport.requestText(this.settings.chatModel, messages);
+      handlers.onContent(answer);
+      const usage = estimateChatUsage(messages, answer);
+      handlers.onUsage(usage);
+      return usage;
+    }
   }
 
   async isFreshnessRequest(question: string): Promise<boolean> {
@@ -128,12 +126,6 @@ export class AiService {
     );
   }
 
-  async generateKnowledgeMap(title: string, content: string): Promise<string> {
-    return this.skills.run("knowledge-map", (instructions) =>
-      new KnowledgeAi(new AiTransport(instructions)).generateKnowledgeMap(this.settings.knowledgeMapModel, title, content)
-    );
-  }
-
   confirmFormatting(candidates: FormattingCandidate[], instructions: string): Promise<FormattingDecision[]> {
     return requestFormattingDecisions(this.settings.pipelineModel, candidates, instructions);
   }
@@ -142,10 +134,14 @@ export class AiService {
     return requestNoteProperties(this.settings.pipelineModel, title, content, categories);
   }
 
-  async translateEnglishParagraphs(title: string, candidates: TranslationCandidate[]): Promise<TranslationDecision[]> {
-    return this.skills.run("article-translation", (instructions) =>
-      new RepairAi(new AiTransport([instructions, translationFormatRules.trim()].join("\n\n")))
-        .translateEnglishParagraphs(this.settings.pipelineModel, title, candidates)
-    );
+  async translateEnglishParagraphs(
+    title: string,
+    candidates: TranslationCandidate[],
+    instructions?: string
+  ): Promise<TranslationDecision[]> {
+    const translate = (skill: string) => new RepairAi(new AiTransport([skill, translationFormatRules.trim()].join("\n\n")))
+      .translateEnglishParagraphs(this.settings.pipelineModel, title, candidates);
+    if (instructions?.trim()) return translate(instructions);
+    return this.skills.run("article-translation", translate);
   }
 }

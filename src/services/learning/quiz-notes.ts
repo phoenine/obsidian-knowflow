@@ -201,6 +201,27 @@ export function applyQuizAnswer(content: string, displayIndex: number, selectedK
   return content.slice(0, range.start) + patched + content.slice(range.end);
 }
 
+/** Clears every recorded choice so a new attempt does not inherit the previous round. */
+export function clearQuizAnswers(content: string): string {
+  const bodyStart = content.indexOf(QUIZ_BLOCK_START);
+  const bodyEnd = content.indexOf(QUIZ_BLOCK_END);
+  if (bodyStart < 0 || bodyEnd <= bodyStart) return content;
+  const offset = bodyStart + QUIZ_BLOCK_START.length;
+  const body = content.slice(offset, bodyEnd);
+  let clearedBody = body;
+  const ranges = findQuestionBlocks(body);
+  for (let index = ranges.length - 1; index >= 0; index -= 1) {
+    const range = ranges[index];
+    const block = clearedBody.slice(range.start, range.end);
+    const patched = block.replace(
+      /^- \[[ x]\] ([A-Z])\.\s+(.*?)(?:\s+[✅❌]\s+\S+)?$/gm,
+      (_match, key: string, text: string) => `- [ ] ${key}. ${text.trim()}`
+    );
+    clearedBody = clearedBody.slice(0, range.start) + patched + clearedBody.slice(range.end);
+  }
+  return setExamPassed(content.slice(0, offset) + clearedBody + content.slice(bodyEnd), false);
+}
+
 /** Patches the "考试结果" frontmatter flag in place without touching any other field. */
 export function setExamPassed(content: string, passed: boolean): string {
   if (/^考试结果:\s*\S+/m.test(content)) {
