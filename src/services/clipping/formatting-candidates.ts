@@ -509,6 +509,41 @@ export function normalizeOrphanBoldTriplet(content: string): string {
   );
 }
 
+const PUNCTUATION = /[\p{P}\p{S}]/u;
+
+/**
+ * CommonMark only closes `**` when it is right-flanking: a closing run preceded
+ * by punctuation must be followed by whitespace or punctuation (and mirrored for
+ * opening). Clippings often contain `**标题：**正文`, which therefore never
+ * renders as bold. This is also what Obsidian's bold hotkey produces when text is
+ * typed right after the selection, so it is a common source of broken bold.
+ *
+ * Fix: insert one space on the side that is broken, keeping the bold span and
+ * its punctuation intact:
+ *   **标题：**正文     → **标题：** 正文
+ *   文字**“引号”**后面 → 文字 **“引号”** 后面
+ */
+export function repairBoldFlankingLine(line: string): string {
+  if (!line.includes("**")) return line;
+  // Leave inline code verbatim; spans never cross a code span.
+  return line.split(/(`+[^`]*`+)/).map((part, index) => index % 2 === 1 ? part : repairBoldFlankingText(part)).join("");
+}
+
+function repairBoldFlankingText(text: string): string {
+  return text.replace(/\*\*([^*\n]+?)\*\*/g, (match: string, inner: string, offset: number) => {
+    const before = text[offset - 1];
+    const after = text[offset + match.length];
+    if (before === "*" || after === "*") return match;
+    if (/^\s|\s$/.test(inner)) return match;
+    const needsOpenFix = before !== undefined && !/\s/.test(before) && !PUNCTUATION.test(before) && PUNCTUATION.test(inner[0]);
+    const needsCloseFix = after !== undefined && !/\s/.test(after) && !PUNCTUATION.test(after) && PUNCTUATION.test(inner[inner.length - 1]);
+    if (!needsOpenFix && !needsCloseFix) return match;
+    const opening = needsOpenFix ? " " : "";
+    const closing = needsCloseFix ? " " : "";
+    return `${opening}**${inner}**${closing}`;
+  });
+}
+
 /**
  * Treat the article title as the implicit H1: anchor the first body heading at
  * H2, preserve relative depth, and close downward level gaps. Fenced code is

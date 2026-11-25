@@ -29,6 +29,7 @@ const {
   hasSameNonWhitespaceContent,
   needsCodeReformat,
   normalizeBodyHeadingLevels,
+  repairBoldFlankingLine,
   preferTextLanguage,
   restoreClippedShellContinuations,
   stripSequentialLineNumbers,
@@ -123,6 +124,24 @@ const { escapeLiteralHtmlTags } = await import(pathToFileURL(join(tempDir, "lite
   assert.equal(candidates.length, 1);
   assert.equal(applyFormattingDecisions(source, candidates, [{ id: candidates[0].id, action: "wrap-code", throughLine: 5 }]),
     ["```python", "def build_injection(root):", "", "    return root", "```", "", "下一段正文。"].join("\n"));
+}
+
+{
+  const repair = repairBoldFlankingLine;
+  assert.equal(repair("- **创意构思：**Claude Opus 5.5"), "- **创意构思：** Claude Opus 5.5");
+  assert.equal(repair("**五、构建体系：**一个产品的几条片子"), "**五、构建体系：** 一个产品的几条片子");
+  assert.equal(repair("**以 Knockin' 为例：**这是一款"), "**以 Knockin' 为例：** 这是一款");
+  assert.equal(repair("**（这个）看看效果**试试"), "**（这个）看看效果**试试", "valid span (punctuation inside, text after) stays untouched");
+  assert.equal(repair("**（这个）看看效果**"), "**（这个）看看效果**", "valid span at line end stays untouched");
+  assert.equal(repair("测试 **（这个）看看效果：** 试试"), "测试 **（这个）看看效果：** 试试", "space before opening and after closing keeps a valid span untouched");
+  assert.equal(repair("文字**“引号”**后面"), "文字 **“引号”** 后面");
+  assert.equal(repair("**结尾。**\n"), "**结尾。**\n");
+  assert.equal(repair("- **隐喻**：**用一个画面代替概念。**《名片》讲"), "- **隐喻**：**用一个画面代替概念。**《名片》讲", "already valid spans stay untouched");
+  assert.equal(repair("**休闲鞋**后面直接接文字"), "**休闲鞋**后面直接接文字");
+  assert.equal(repair("**标题：** 正文"), "**标题：** 正文");
+  assert.equal(repair("`**a：**b` 和 **c：**d"), "`**a：**b` 和 **c：** d", "inline code is preserved");
+  assert.equal(repair("***粗斜：***字"), "***粗斜：***字");
+  assert.equal(repair("**：**字"), "**：** 字");
 }
 
 assert.equal(

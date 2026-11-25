@@ -13,6 +13,7 @@ import {
   collectHeadingCandidates,
   normalizeBodyHeadingLevels,
   normalizeOrphanBoldTriplet,
+  repairBoldFlankingLine,
   trimCodeFenceBody,
   type FormattingCandidate,
   type FormattingDecision
@@ -311,6 +312,7 @@ export class ClippingPipeline {
           .replace(/[ \t]+$/g, "");
         // Clean trailing ** from heading lines (orphan bold artifact)
         next = next.replace(/^(#{1,6}\s+.*?)\s*\*\*\s*$/g, "$1");
+        next = repairBoldFlankingLine(next);
         next = next.replace(/^(\s*)(\d+)[、)]\s+/g, "$1$2. ");
         next = next.replace(/^(\s*)([一二三四五六七八九十]+)[、.]\s+/g, (_match, indent, number) =>
           `${indent}${chineseToArabic(number)}. `);
