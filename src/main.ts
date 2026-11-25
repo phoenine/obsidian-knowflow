@@ -6,6 +6,7 @@ import { ClippingPipeline } from "./services/clipping/clipping-pipeline";
 import { NoteOperationCoordinator } from "./services/core/note-operation-coordinator";
 import { PathRouter } from "./services/core/path-router";
 import { PluginDataManager } from "./services/core/plugin-data-manager";
+import { loadModelCredentials, withoutPlaintextModelKeys } from "./services/core/model-credentials";
 import { QuizNoteService } from "./services/learning/quiz-note-service";
 import { KnowledgeStore } from "./services/core/store";
 import { SummaryNoteService } from "./services/learning/summary-note-service";
@@ -77,7 +78,7 @@ export default class KnowFlowPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "open-knowflow-sidebar",
+      id: "open-sidebar",
       name: t("commandOpen"),
       callback: () => void this.activateView()
     });
@@ -97,7 +98,7 @@ export default class KnowFlowPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "refresh-knowflow",
+      id: "refresh-sidebar",
       name: t("commandRefresh"),
       callback: () => this.refreshView()
     });
@@ -212,12 +213,14 @@ export default class KnowFlowPlugin extends Plugin {
     const root = await this.dataManager.read();
     const savedSettings = "settings" in root ? (root as { settings?: Partial<KnowFlowSettings> }).settings : root;
     this.settings = normalizeSettings(savedSettings);
+    loadModelCredentials(this.settings, this.app.secretStorage);
+    if (withoutPlaintextModelKeys(root) !== root) await this.persistSettings();
     setAppLanguage(this.settings.language);
   }
 
   async saveSettings(): Promise<void> {
     setAppLanguage(this.settings.language);
-    await this.dataManager.update((root) => ({ ...root, settings: this.settings }));
+    await this.persistSettings();
     this.router?.updateSettings(this.settings);
     this.ai?.updateSettings(this.settings);
     this.pipeline?.updateSettings(this.settings);
@@ -226,6 +229,10 @@ export default class KnowFlowPlugin extends Plugin {
     this.semanticIndex?.updateSettings(this.settings);
     this.chatNotes?.updateFolder(this.settings.chatConversationFolder);
     this.refreshView();
+  }
+
+  private async persistSettings(): Promise<void> {
+    await this.dataManager.update((root) => withoutPlaintextModelKeys({ ...root, settings: this.settings }));
   }
 
   async activateView(): Promise<void> {
@@ -281,6 +288,7 @@ function normalizeSettings(savedSettings: unknown): KnowFlowSettings {
     ),
     language: (saved.language === "en" ? "en" : "zh") as KnowFlowSettings["language"]
   };
+  delete (settings as typeof settings & { apiKey?: unknown }).apiKey;
   delete (settings as typeof settings & { knowledgeMapModel?: unknown }).knowledgeMapModel;
   delete (settings as typeof settings & { knowledgePointsModel?: unknown }).knowledgePointsModel;
   delete (settings as typeof settings & { pipelineModel?: unknown }).pipelineModel;

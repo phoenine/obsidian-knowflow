@@ -1,9 +1,9 @@
 {
   "id": "knowflow",
   "name": "KnowFlow",
-  "version": "1.0.0",
-  "minAppVersion": "1.7.0",
-  "description": "AI-driven Obsidian learning assistant for clipping cleanup and article study.",
+  "version": "1.1.0",
+  "minAppVersion": "1.11.5",
+  "description": "Organize web clippings and study articles with AI summaries, quizzes, and daily review.",
   "author": "phoenine",
   "authorUrl": "",
   "isDesktopOnly": false

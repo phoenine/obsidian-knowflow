@@ -2,11 +2,11 @@ import { App, Modal, Notice, PluginSettingTab, Setting, TextComponent, normalize
 import type KnowFlowPlugin from "./main";
 import { withTimeout } from "./services/ai/ai-transport";
 import { EmbeddingTransport } from "./services/ai/embedding-transport";
+import { MODEL_SECRET_IDS, type ModelConfigKey } from "./services/core/model-credentials";
 import type { AiModelConfig, AiRuntime, KnowFlowSettings } from "./types";
 import { DEEPSEEK_SEARCH_SECRET_ID, resolveDeepSeekSearchKey } from "./services/search/public-evidence";
 import { setAppLanguage, t } from "./i18n";
 
-type ModelConfigKey = "summaryModel" | "taskModel" | "chatModel" | "embeddingModel";
 type SettingsTabKey = "basic" | "ai-models" | "data";
 
 const DEFAULT_MODEL_CONFIG: AiModelConfig = {
@@ -634,7 +634,9 @@ class ModelConfigModal extends Modal {
           .setPlaceholder("sk-...")
           .setValue(config.apiKey)
           .onChange(async (value) => {
-            config.apiKey = value.trim();
+            const apiKey = value.trim();
+            this.app.secretStorage.setSecret(MODEL_SECRET_IDS[this.key], apiKey);
+            config.apiKey = apiKey;
             await this.plugin.saveSettings();
           });
       });

@@ -12,9 +12,15 @@ It is built around a complete learning loop, not a one-off summary:
 Clipping → Organize → Summary → Knowledge points → Quiz → Learning status → Daily review
 ```
 
+## Screenshots
+
+| Article study | Study overview |
+| --- | --- |
+| ![AI summary and article chat in the KnowFlow sidebar](docs/screenshots/article-study.png) | ![Today's tasks and weekly learning trend in the KnowFlow sidebar](docs/screenshots/task-overview.png) |
+
 ## Current status
 
-The project is in active development. The plugin manifest is `1.0.0`. The core learning flow works, but KnowFlow is not yet published to Obsidian Community Plugins.
+KnowFlow requires Obsidian 1.11.5 or later. Installation files are available on [GitHub Releases](https://github.com/phoenine/obsidian-knowflow/releases).
 
 Available now:
 
@@ -129,8 +135,18 @@ Each model has its own Runtime, Base URL, API Key, and Model ID.
 
 Relevant Notes and Vault Search share a local semantic index. Configure the Embedding model under `AI Models`, then set `Excluded folders` under `Data` and build the index. The index covers only the articles folder (default `Articles/`) and excludes `assets` folders at any depth. It uses a small manifest and 128 stable hash shards. Chunk metadata and Float32 vectors are stored separately. A shard can resume after an interruption, and a damaged shard stays isolated. Each article indexes only an existing AI summary. Articles without a summary get no vector. Vault Search reads source passages after a hit. An older full-text index must be rebuilt after upgrading. With a Cloud runtime, AI summaries are sent to the configured embedding service while the index is built. See [Relevant Notes and Vault Search](docs/relevant-notes-and-vault-search.md).
 
-> [!WARNING]
-> API keys are currently stored in plain text in the vault’s `.obsidian/plugins/knowflow/data.json`. If the vault syncs through Git or a cloud drive, exclude that file or use a configuration without keys.
+### Network access, data, and costs
+
+- **Model services.** Organizing, translation, summaries, knowledge points, and quizzes send article text or relevant excerpts to your configured model endpoint. Chat sends your question, conversation history, the current article, and any attached note context. When you enable Vault Search, Chat can also send matching passages from other notes. Cloud requests go to your chosen provider. Ollama and LM Studio connect to the local device by default.
+- **Semantic search.** Building or updating the index sends article summaries to your configured embedding endpoint. Vault Search also sends the search query to that endpoint. The vector index stays in your vault.
+- **Public search and image repair.** With a usable DeepSeek Search key, freshness checks and Chat questions that need public evidence send search terms to DeepSeek Search. KnowFlow may also send result URLs to the service to fetch page content. When organizing a clipping requires checking or restoring images, KnowFlow contacts the original page and relevant image hosts directly.
+- **Accounts and costs.** KnowFlow is free and requires no KnowFlow account. Cloud model providers and DeepSeek Search require their own API keys and may require accounts and charge for usage. Local models typically need no API key.
+
+### Upgrading from 1.0.0
+
+On first load, KnowFlow moves configured model API keys to Obsidian's Keychain for the current vault and removes their plaintext values from the plugin settings file. When using another device, enter any missing keys in KnowFlow settings on that device.
+
+If you assigned hotkeys to Open sidebar or Refresh sidebar, reassign them in Obsidian's hotkey settings. For automations that reference command IDs, use `knowflow:open-sidebar` and `knowflow:refresh-sidebar`.
 
 ## How to use it
 
@@ -224,24 +240,24 @@ npm run release:check
 npm test
 ```
 
-Release `1.0.0`:
+To release `1.1.0`, for example:
 
 ```bash
-git tag 1.0.0
+git tag 1.1.0
 git push origin main
-git push origin 1.0.0
+git push origin 1.1.0
 ```
 
 The Release contains:
 
 ```text
-knowflow-1.0.0.zip
+knowflow-1.1.0.zip
 main.js
 manifest.json
 styles.css
 ```
 
-The tag must match `manifest.json` exactly. Use `1.0.0`, without a `v` prefix.
+The tag must match `manifest.json` exactly, for example `1.1.0`.
 
 ## Source layout
 

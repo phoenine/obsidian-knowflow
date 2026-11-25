@@ -12,9 +12,15 @@ KnowFlow 是一款 AI 驱动的 Obsidian 学习助手，用于把 Vault 中的�
 Clipping → 整理 → 总结 → 知识点 → Quiz → 学习状态 → 每日复习
 ```
 
+## 界面截图
+
+| 文章学习 | 学习总览 |
+| --- | --- |
+| ![KnowFlow 文章助手中的 AI 摘要和对话入口](docs/screenshots/article-study.png) | ![KnowFlow 学习总览中的今日任务和学习趋势](docs/screenshots/task-overview.png) |
+
 ## 当前状态
 
-项目处于活跃开发阶段。当前插件清单版本为 `1.0.0`，核心学习流程已经可以使用，但尚未发布到 Obsidian Community Plugins。
+KnowFlow 需要 Obsidian 1.11.5 或更高版本。安装文件见 [GitHub Releases](https://github.com/phoenine/obsidian-knowflow/releases)。
 
 已实现：
 
@@ -129,8 +135,18 @@ Vault/
 
 Relevant Notes 与 Vault Search 共用本地语义索引。先在 `AI Models` 配置 Embedding model，再到 `Data` 设置 `Excluded folders` 并建立索引；索引只覆盖 `Articles folder` 所配置的文章目录（默认 `Articles/`），默认排除任意层级的 `assets` 子目录。索引使用小型清单和 128 个稳定哈希分片，chunk 元数据与 Float32 二进制向量分开保存，并支持分片级中断续建和损坏隔离。每篇文章只索引已存在的 AI 摘要，无摘要的文章不生成向量。Vault Search 在命中后读取原文段落。已有全文索引在升级后需重建。使用 Cloud runtime 建索引时，AI 摘要会发送给所配置的 embedding 服务。详细设计见 [Relevant Notes 与 Vault Search](docs/relevant-notes-and-vault-search.md)。
 
-> [!WARNING]
-> 各模型的 API Key 当前以明文保存在 Vault 的 `.obsidian/plugins/knowflow/data.json`。如果 Vault 会通过 Git 或云盘同步，请排除该文件或使用不含密钥的配置。
+### 联网、数据与费用
+
+- **模型服务**。整理、翻译、摘要、知识点和 Quiz 生成会按功能将文章正文或相关片段发送到你配置的模型端点。Chat 会发送问题、对话历史、当前文章和附加的笔记上下文；启用 Vault Search 时，命中的笔记段落也会随请求发送。云端模型使用所选供应商的 API，Ollama 和 LM Studio 默认连接本机。
+- **语义搜索**。构建和更新索引时，文章的 AI 摘要会发送到配置的 Embedding 端点。使用 Vault Search 时，搜索内容也会发送到该端点。向量索引保存在 Vault 内。
+- **公开搜索与图片修复**。配置可用的 DeepSeek Search Key 后，文章时效检查和需要公开资料的 Chat 会把搜索词发送给 DeepSeek Search，必要时还会提交结果页 URL 以获取网页内容。整理需要检查或恢复图片时，KnowFlow 会直接访问剪藏原网页和相关图片地址。
+- **账号与费用**。KnowFlow 免费使用，无需 KnowFlow 账号。云端模型和 DeepSeek Search 需要相应供应商的 API Key，供应商可能要求开通账号并按用量计费。本机模型通常无需 API Key。
+
+### 从 1.0.0 升级
+
+首次加载会把已配置的模型 API Key 迁移到当前 Vault 的 Obsidian 密钥库，并清除插件设置文件中的相应明文。换设备后请在新设备的 KnowFlow 设置中补填缺失的密钥。
+
+如果为“打开侧边栏”或“刷新侧边栏”绑定过快捷键，请在 Obsidian 的快捷键设置中重新绑定。通过命令 ID 调用它们的自动化请改用 `knowflow:open-sidebar` 和 `knowflow:refresh-sidebar`。
 
 ## 使用方式
 
@@ -224,24 +240,24 @@ npm run release:check
 npm test
 ```
 
-发布 `1.0.0`：
+以 `1.1.0` 为例：
 
 ```bash
-git tag 1.0.0
+git tag 1.1.0
 git push origin main
-git push origin 1.0.0
+git push origin 1.1.0
 ```
 
 Release 将包含：
 
 ```text
-knowflow-1.0.0.zip
+knowflow-1.1.0.zip
 main.js
 manifest.json
 styles.css
 ```
 
-Tag 必须与 `manifest.json` 的版本完全一致，使用 `1.0.0`，不要添加 `v` 前缀。
+Tag 必须与 `manifest.json` 的版本完全一致，例如 `1.1.0`。
 
 ## 源码结构
 
