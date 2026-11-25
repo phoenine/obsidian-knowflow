@@ -156,7 +156,7 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
     const label = path.split("/").slice(-1)[0]?.replace(/\.md$/i, "") ?? path;
     const relatedChip = createContextChip(contextRow, label, "100%");
     const removeLabel = t("removeContext", { label });
-    const remove = relatedChip.createEl("button", { text: "×", attr: { "aria-label": removeLabel, title: removeLabel } });
+    const remove = relatedChip.createEl("button", { text: "×", attr: { "aria-label": removeLabel } });
     setStyles(remove, {
       background: "transparent",
       border: "0",
@@ -244,7 +244,6 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
   });
   const send = sendTools.createEl("button");
   send.setAttribute("aria-label", t("send"));
-  send.setAttribute("title", t("send"));
   setStyles(send, {
     alignItems: "center",
     backgroundColor: "transparent",

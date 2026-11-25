@@ -56,8 +56,8 @@ export function renderSummaryCard(content: HTMLElement, props: SummaryCardProps)
   const summary = section(content, "kf-summary");
   if (props.summaryPending) setStyles(summary, { minHeight: "400px" });
   let refreshButton!: HTMLButtonElement;
-  cardHeader(summary, "sparkles", "AI Summary", (header) => {
-    refreshButton = unborderedIconButton(header, "Refresh summary", "refresh-cw", () => {
+  cardHeader(summary, "sparkles", t("aiSummary"), (header) => {
+    refreshButton = unborderedIconButton(header, t("refreshSummary"), "refresh-cw", () => {
       if (!props.summaryPending) {
         void lockButton(refreshButton, props.onRefreshSummary);
       }
@@ -326,7 +326,7 @@ function headerIconButton(parent: HTMLElement, label: string, icon: string, onCl
 }
 
 function unborderedIconButton(parent: HTMLElement, label: string, icon: string, onClick: () => void): HTMLButtonElement {
-  const button = parent.createEl("button", { cls: "kf-icon-button", attr: { "aria-label": label, title: label } });
+  const button = parent.createEl("button", { cls: "kf-icon-button", attr: { "aria-label": label } });
   setStyles(button, {
     alignItems: "center",
     backgroundColor: "transparent",

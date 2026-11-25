@@ -20,7 +20,7 @@ export interface RelevantNotesCardProps {
 export function renderRelevantNotesCard(content: HTMLElement, props: RelevantNotesCardProps): void {
   const card = section(content, "kf-relevant-notes");
   const indexAction = props.indexReady ? t("rebuildSummaryIndex") : t("buildSummaryIndex");
-  cardHeader(card, "git-fork", "Relevant Notes", (header) => {
+  cardHeader(card, "git-fork", t("relevantNotes"), (header) => {
     const rebuild = iconButton(
       header,
       props.indexBuilding ? t("indexingAction", { action: indexAction }) : indexAction,
@@ -93,7 +93,7 @@ export function renderRelevantNotesCard(content: HTMLElement, props: RelevantNot
     });
     open.addEventListener("click", () => props.onOpen(note.path));
     const chatLabel = note.addedToChat ? t("addedToChat") : t("addToChat");
-    const add = titleRow.createEl("button", { attr: { "aria-label": chatLabel, title: chatLabel } });
+    const add = titleRow.createEl("button", { attr: { "aria-label": chatLabel } });
     setIcon(add, note.addedToChat ? "check" : "message-circle-plus");
     setStyles(add, {
       background: "transparent",

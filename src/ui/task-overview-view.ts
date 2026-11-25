@@ -5,7 +5,6 @@ import { iconButton, setStyles } from "./dom";
 import { renderBrandShell } from "./shell";
 
 interface TaskOverviewViewProps {
-  scopeLabel: string;
   stats: ArticleStats;
   categoryStats: Array<{ name: string; total: number; learned: number }>;
   tasks: DailyTask[];
@@ -89,7 +88,7 @@ export function renderTaskOverviewView(root: HTMLElement, props: TaskOverviewVie
     props.weeklyReviewCount,
     props.weeklyReviewAccuracy
   );
-  renderArticleStats(page, props.scopeLabel, props.stats, props.categoryStats);
+  renderArticleStats(page, props.stats, props.categoryStats);
 }
 
 interface TodayCardProps extends TaskOverviewViewProps {
@@ -329,8 +328,7 @@ function taskRow(parent: HTMLElement, task: DailyTask, props: TaskOverviewViewPr
   const status = item.createEl("button", {
     cls: "kf-task-status-button",
     attr: {
-      "aria-label": task.status === "pending" ? t("completeTask", { title: task.title }) : taskStatusLabel(task.status),
-      title: task.status === "pending" ? t("markComplete") : taskStatusLabel(task.status)
+      "aria-label": task.status === "pending" ? t("completeTask", { title: task.title }) : taskStatusLabel(task.status)
     }
   });
   setStyles(status, {
@@ -428,7 +426,6 @@ function renderLearningTrend(
   for (let index = 0; index < days.length; index += 1) {
     const column = chart.createDiv();
     const tooltip = t("trendTooltip", { read: readValues[index], review: reviewValues[index] });
-    column.setAttribute("aria-label", tooltip);
     column.setAttribute("title", tooltip);
     setStyles(column, {
       alignItems: "center",
@@ -442,7 +439,7 @@ function renderLearningTrend(
       fontWeight: "500",
       lineHeight: "16px"
     });
-    const stack = column.createDiv({ attr: { title: tooltip } });
+    const stack = column.createDiv();
     setStyles(stack, {
       alignItems: "stretch",
       display: "flex",
@@ -472,20 +469,14 @@ function renderLearningTrend(
   const stats = section.createDiv();
   setStyles(stats, {
     display: "grid",
-    gap: "14px 8px",
-    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
     padding: "18px 0 15px"
   });
   const streak = currentWeekStreak(readValues, today);
-  const trendItems: Array<[string, string]> = [
-    [t("streak"), t(streak === 1 ? "dayCountOne" : "dayCount", { count: streak })],
-    [t("weeklyReading"), t("articleCount", { count: weeklyLearned })],
-    [t("weeklyReview"), t("reviewCount", { count: weeklyReviewCount })],
-    [t("averageAccuracy"), weeklyReviewAccuracy === null ? "--" : `${weeklyReviewAccuracy}%`]
-  ];
-  for (const [index, [label, value]] of trendItems.entries()) {
-    trendMetric(stats, label, value, index % 2 === 1);
-  }
+  trendMetric(stats, t("streak"), t(streak === 1 ? "dayCountOne" : "dayCount", { count: streak }));
+  trendMetric(stats, t("weeklyReading"), t("articleCount", { count: weeklyLearned }), true);
+  trendMetric(stats, t("weeklyReview"), t("reviewCount", { count: weeklyReviewCount }), true);
+  trendMetric(stats, t("averageAccuracy"), weeklyReviewAccuracy === null ? "--" : `${weeklyReviewAccuracy}%`, true);
 }
 
 function trendSegmentHeight(value: number, maxValue: number): number {
@@ -505,7 +496,9 @@ function trendMetric(parent: HTMLElement, label: string, value: string, separate
     fontSize: METRIC_LABEL_FONT_SIZE,
     fontWeight: "500",
     lineHeight: METRIC_LABEL_LINE_HEIGHT,
-    overflowWrap: "anywhere"
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap"
   });
   setStyles(item.createDiv({ text: value }), {
     borderTop: `1px solid ${PALETTE.divider}`,
@@ -514,13 +507,13 @@ function trendMetric(parent: HTMLElement, label: string, value: string, separate
     fontWeight: "700",
     lineHeight: METRIC_VALUE_LINE_HEIGHT,
     marginTop: "5px",
-    paddingTop: "5px"
+    paddingTop: "5px",
+    whiteSpace: "nowrap"
   });
 }
 
 function renderArticleStats(
   parent: HTMLElement,
-  scopeLabel: string,
   stats: ArticleStats,
   categories: TaskOverviewViewProps["categoryStats"]
 ): void {
@@ -538,17 +531,6 @@ function renderArticleStats(
     minWidth: "0"
   });
   sectionHeading(header, "chart-pie", t("categoryStats"), 15);
-  setStyles(header.createDiv({ text: scopeLabel === t("allArticles") ? t("allShort") : scopeLabel }), {
-    flex: "0 1 auto",
-    fontSize: "11px",
-    fontWeight: "500",
-    lineHeight: "14px",
-    maxWidth: "46%",
-    overflow: "hidden",
-    textAlign: "right",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap"
-  });
 
   const metrics = section.createDiv();
   setStyles(metrics, {
@@ -584,7 +566,7 @@ function renderArticleStats(
       whiteSpace: "nowrap"
     });
     const learnedLabel = t("learnedOf", { total: category.total, learned: category.learned });
-    setStyles(item.createDiv({ text: learnedLabel, attr: { title: learnedLabel } }), {
+    setStyles(item.createDiv({ text: learnedLabel }), {
       fontSize: "11px",
       lineHeight: "14px",
       minWidth: "0",

@@ -295,7 +295,6 @@ export class KnowFlowSidebarView extends ItemView {
     const files = this.getArticleFiles(scope);
     const overview = this.summarizeArticles(scope, files);
     const { stats, categoryStats } = overview;
-    const scopeLabel = scope.replace(`${this.plugin.settings.articlesFolder}/`, "") || t("allArticles");
     const weeklyActivity = overview.weekly;
     const weeklyLearned = weeklyActivity.dailyLearned.reduce((sum, count) => sum + count, 0);
     const plan = this.getCurrentDailyTaskPlan(scope);
@@ -305,7 +304,6 @@ export class KnowFlowSidebarView extends ItemView {
     if (!review) void this.ensureDailyReview(false);
     const loading = this.dailyTaskPlanLoads.has(dailyTaskPlanKey(reviewDate, scope)) || this.dailyReviewLoads.has(reviewDate);
     renderTaskOverviewView(root, {
-      scopeLabel,
       stats,
       categoryStats,
       tasks: plan?.tasks ?? [],

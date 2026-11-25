@@ -134,7 +134,7 @@ export function text(parent: HTMLElement, content: string, className = ""): HTML
 }
 
 export function iconButton(parent: HTMLElement, label: string, icon: string, onClick: () => void): HTMLButtonElement {
-  const button = parent.createEl("button", { cls: "kf-icon-button", attr: { "aria-label": label, title: label } });
+  const button = parent.createEl("button", { cls: "kf-icon-button", attr: { "aria-label": label } });
   setStyles(button, {
     alignItems: "center",
     backgroundColor: "var(--background-primary)",

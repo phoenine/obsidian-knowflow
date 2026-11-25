@@ -91,7 +91,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
   }
 
   private displayBasic(containerEl: HTMLElement): void {
-    const vault = this.createGroup(containerEl, t("vaultPaths"), "", true);
+    const vault = this.createGroup(containerEl, t("vaultPaths"), "");
 
     new Setting(vault)
       .setName(t("clippingFolder"))
@@ -187,7 +187,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
   }
 
   private displayLearning(containerEl: HTMLElement): void {
-    const learning = this.createGroup(containerEl, t("learning"), "", true);
+    const learning = this.createGroup(containerEl, t("learning"), "");
 
     new Setting(learning)
       .setName(t("dailyNewLimit"))
@@ -313,6 +313,12 @@ export class KnowFlowSettingTab extends PluginSettingTab {
   private createGroup(containerEl: HTMLElement, title: string, subtitle: string, open = false): HTMLElement {
     const details = containerEl.createEl("details");
     details.open = open;
+    details.addEventListener("toggle", () => {
+      if (!details.open) return;
+      for (const sibling of Array.from(containerEl.children)) {
+        if (sibling instanceof HTMLDetailsElement && sibling !== details) sibling.open = false;
+      }
+    });
     Object.assign(details.style, {
       border: "1px solid var(--background-modifier-border)",
       borderRadius: "8px",

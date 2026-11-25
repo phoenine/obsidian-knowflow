@@ -1,5 +1,7 @@
 # KnowFlow
 
+中文 | [English](README.en.md)
+
 > Turn notes into knowledge.
 
 KnowFlow 是一款 AI 驱动的 Obsidian 学习助手，用于把 Vault 中的网页剪藏和文章转化为可整理、可学习、可测试、可复习的知识资产。

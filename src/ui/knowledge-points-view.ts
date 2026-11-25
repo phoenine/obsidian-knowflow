@@ -192,7 +192,6 @@ function renderGroup(
       rows.style.display = expanded ? "block" : "none";
       const label = `${expanded ? t("collapse") : t("expand")} ${group.title}`;
       toggle.setAttribute("aria-label", label);
-      toggle.setAttribute("title", label);
       setIcon(toggle, expanded ? "chevron-down" : "chevron-right");
       onToggle(expanded);
     },
@@ -443,7 +442,7 @@ function pointMarker(selected: boolean, status: KnowledgePointStatus | undefined
 }
 
 function bareIconButton(parent: HTMLElement, label: string, icon: string, onClick: () => void, size: number): HTMLButtonElement {
-  const button = parent.createEl("button", { attr: { "aria-label": label, title: label } });
+  const button = parent.createEl("button", { attr: { "aria-label": label } });
   setStyles(button, {
     alignItems: "center",
     background: "transparent",
