@@ -28,7 +28,7 @@ export interface KnowFlowSettings {
   chatConversationFolder: string;
   templatePath: string;
   summaryModel: AiModelConfig;
-  knowledgeMapModel: AiModelConfig;
+  knowledgePointsModel: AiModelConfig;
   pipelineModel: AiModelConfig;
   chatModel: AiModelConfig;
   quizModel: AiModelConfig;
@@ -183,14 +183,8 @@ export interface PipelineStatus {
 }
 
 export interface PipelineUiState {
-  completed: string[];
-  skipped: string[];
-  stepInfo: Record<string, string>;
-  currentStep: string | null;
-  error: string | null;
-  failedStep: string | null;
   running: boolean;
-  visible: boolean;
+  error: string | null;
 }
 
 export interface ChatUsage {

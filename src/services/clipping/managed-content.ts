@@ -38,7 +38,7 @@ function removeManagedCallouts(content: string): string {
   while (index < lines.length) {
     if (!protectedLines.has(index) && (/^> \[!(?:summary|question)\][+-]?\s+(?:AI 摘要|Quiz)\s*$/.test(lines[index])
       || lines[index] === LEGACY_RELATED_LINKS_TITLE
-      || /^> \[!note\]- KnowFlow 时效更新 · \d{4}-\d{2}-\d{2}$/.test(lines[index]))) {
+      || /^> \[!note\]-?\s*KnowFlow (?:时效更新|知识更新) · \d{4}-\d{2}-\d{2}$/.test(lines[index]))) {
       index += 1;
       while (index < lines.length && /^\s*>/.test(lines[index])) index += 1;
       continue;

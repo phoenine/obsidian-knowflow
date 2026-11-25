@@ -1,7 +1,7 @@
 import { setIcon } from "obsidian";
 import { iconButton, setStyles, text } from "./dom";
 
-export function renderShell(root: HTMLElement, title: string, status: string, onBack?: () => void): HTMLElement {
+export function renderShell(root: HTMLElement, title: string, status: string, onBack?: () => void, subtitle = ""): HTMLElement {
   const header = root.createDiv({ cls: "kf-header" });
   setStyles(header, {
     alignItems: "center",
@@ -15,24 +15,43 @@ export function renderShell(root: HTMLElement, title: string, status: string, on
   setStyles(left, {
     alignItems: "center",
     display: "flex",
+    flex: "1",
     gap: "10px",
-    minWidth: "0"
+    minWidth: "0",
+    overflow: "hidden"
   });
   if (onBack) {
     iconButton(left, "Back", "arrow-left", onBack);
   }
-  if (title) {
-    setStyles(left.createDiv({ text: title, cls: "kf-title" }), {
-      color: "var(--text-normal)",
-      fontSize: "20px",
-      fontWeight: "650"
+  if (title || subtitle) {
+    const copy = left.createDiv();
+    setStyles(copy, { display: "flex", flex: "1", flexDirection: "column", gap: "2px", minWidth: "0" });
+    if (title) {
+      setStyles(copy.createDiv({ text: title, cls: "kf-title" }), {
+        color: "var(--text-normal)",
+        fontSize: subtitle ? "15px" : "20px",
+        fontWeight: "650",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
+      });
+    }
+    if (subtitle) {
+      setStyles(copy.createDiv({ text: subtitle, cls: "kf-muted" }), {
+        fontSize: "12px",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
+      });
+    }
+  }
+  if (status) {
+    setStyles(header.createDiv({ text: status, cls: "kf-status" }), {
+      color: "var(--text-accent)",
+      fontSize: "12px",
+      fontWeight: "600"
     });
   }
-  setStyles(header.createDiv({ text: status, cls: "kf-status" }), {
-    color: "var(--text-accent)",
-    fontSize: "12px",
-    fontWeight: "600"
-  });
   return setStyles(root.createDiv({ cls: "kf-content" }), {
     display: "flex",
     flex: "1",

@@ -10,13 +10,39 @@ export class EmptyAiResponseError extends Error {}
 export class AiTransport {
   constructor(private skillInstructions = "") {}
 
-  async requestJson<T>(config: AiModelConfig, messages: ChatRequestMessage[]): Promise<T> {
-    const text = await this.requestText(config, messages, true);
+  async requestJson<T>(
+    config: AiModelConfig,
+    messages: ChatRequestMessage[],
+    handlers?: { onReasoning?: (delta: string) => void }
+  ): Promise<T> {
+    const text = handlers?.onReasoning
+      ? await this.requestJsonText(config, messages, handlers.onReasoning)
+      : await this.requestText(config, messages, true);
     try {
       return parseJsonResponse<T>(text);
     } catch (error) {
       throw new Error(`${error instanceof Error ? error.message : String(error)} Raw response: ${text.slice(0, 500)}`);
     }
+  }
+
+  private async requestJsonText(
+    config: AiModelConfig,
+    messages: ChatRequestMessage[],
+    onReasoning: (delta: string) => void
+  ): Promise<string> {
+    let text = "";
+    try {
+      await this.requestTextStream(config, messages, {
+        onContent: (delta) => { text += delta; },
+        onReasoning,
+        onUsage: () => {}
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (text || !/^AI stream failed:/.test(message)) throw error;
+      return this.requestText(config, messages, true);
+    }
+    return text.trim();
   }
 
   async requestText(config: AiModelConfig, messages: ChatRequestMessage[], json = false): Promise<string> {

@@ -2,6 +2,7 @@ import type { ChatMessage as StoredChatMessage, ChatUsage, GeneratedNoteSummary,
 import { AiTransport } from "./ai-transport";
 import { estimateChatUsage } from "../chat/chat-stream";
 import { buildChatRequestMessages } from "../chat/chat-context";
+import { findPublicEvidence } from "../search/public-evidence";
 import { requestFormattingDecisions } from "./formatting-ai";
 import type { FormattingCandidate, FormattingDecision } from "../clipping/formatting-candidates";
 import { KnowledgeAi } from "./knowledge-ai";
@@ -54,10 +55,13 @@ export class AiService {
       onReasoning: (delta: string) => void;
       onUsage: (usage: ChatUsage) => void;
       retrievedContext?: string;
+      externalContext?: string;
     }
   ): Promise<ChatUsage> {
     const transport = new AiTransport();
-    const messages = buildChatRequestMessages(contextLabel, articleContent, history, handlers.retrievedContext);
+    const messages = buildChatRequestMessages(
+      contextLabel, articleContent, history, handlers.retrievedContext, handlers.externalContext
+    );
     let emitted = false;
     try {
       return await transport.requestTextStream(this.settings.chatModel, messages, {
@@ -78,6 +82,45 @@ export class AiService {
       const usage = estimateChatUsage(messages, answer);
       handlers.onUsage(usage);
       return usage;
+    }
+  }
+
+  async externalContextForChat(
+    question: string,
+    articleExcerpt: string,
+    searchKey: string,
+    onSearch?: () => void
+  ): Promise<string> {
+    if (!searchKey.trim() || this.settings.chatModel.runtime === "disabled") return "";
+    let query = "";
+    try {
+      const plan = await new AiTransport().requestJson<{ search?: unknown; query?: unknown }>(this.settings.chatModel, [
+        {
+          role: "system",
+          content: [
+            "判断回答这个问题是否必须检索笔记以外的专业事实。",
+            "笔记已经能回答、常识、举例和类比，都返回 {\"search\":false}。",
+            "只有笔记缺少、且属于会变化的专业事实，例如模型规格、论文结论、接口、版本和数据时，返回 {\"search\":true,\"query\":\"不超过40字的检索词\"}。",
+            "只输出 JSON。"
+          ].join("\n")
+        },
+        { role: "user", content: JSON.stringify({ question: question.slice(0, 500), article: articleExcerpt.slice(0, 2000) }) }
+      ]);
+      if (plan?.search !== true || typeof plan.query !== "string") return "";
+      query = plan.query.replace(/\s+/g, " ").trim().slice(0, 80);
+    } catch {
+      return "";
+    }
+    if (!query) return "";
+    onSearch?.();
+    try {
+      const evidence = await findPublicEvidence([query], searchKey);
+      return evidence.slice(0, 3).map((item) => {
+        const excerpt = item.excerpts[0]?.replace(/\s+/g, " ").trim().slice(0, 500) ?? "";
+        return excerpt ? `[${item.title}](${item.url})\n${excerpt}` : "";
+      }).filter(Boolean).join("\n\n");
+    } catch {
+      return "";
     }
   }
 
@@ -116,7 +159,7 @@ export class AiService {
 
   async generateKnowledgePoints(title: string, content: string): Promise<KnowledgePointGroup[]> {
     return this.skills.run("knowledge-points", (instructions) =>
-      new KnowledgeAi(new AiTransport(instructions)).generateKnowledgePoints(this.settings.knowledgeMapModel, title, content)
+      new KnowledgeAi(new AiTransport(instructions)).generateKnowledgePoints(this.settings.knowledgePointsModel, title, content)
     );
   }
 

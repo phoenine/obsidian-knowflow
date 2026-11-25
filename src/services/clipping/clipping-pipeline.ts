@@ -20,11 +20,12 @@ import { applyArticleFrontmatter, fillEmptyNoteProperties, splitFrontmatter, upd
 import { NoteOperationCoordinator } from "../core/note-operation-coordinator";
 import { SkillStore } from "../core/skill-store";
 import { SkillRunner } from "../core/skill-runner";
-import { formatPromptBlocks, promptFenceStarts } from "../../../skills/clipping-update/scripts/prompt-blocks";
-import { restoreDetachedLists } from "../../../skills/clipping-update/scripts/detached-lists";
-import { repairTableDividers } from "../../../skills/clipping-update/scripts/reading-structure";
-import { prettyJsonBlock, removeClipperFenceSpacing } from "../../../skills/clipping-update/scripts/clipped-code";
-import { planImageRepairs, saveImageRepairs } from "../../../skills/clipping-update/scripts/repair-images";
+import { formatPromptBlocks, promptFenceStarts } from "./prompt-blocks";
+import { escapeLiteralHtmlTags } from "./literal-html";
+import { restoreDetachedLists } from "./detached-lists";
+import { repairTableDividers } from "./reading-structure";
+import { prettyJsonBlock, removeClipperFenceSpacing } from "./clipped-code";
+import { planImageRepairs, saveImageRepairs } from "./repair-images";
 import { inspectClippingOutput } from "./repair-validator";
 import { KnowledgeStore } from "../core/store";
 import {
@@ -104,12 +105,13 @@ export class ClippingPipeline {
       this.assertReadableBody(body);
       const translate = this.settings.translateEnglishClippings;
       const prompts = formatPromptBlocks(body);
-      let formatted = normalizeBodyHeadingLevels(repairTableDividers(this.organizeMarkdownStyle(restoreDetachedLists(prompts.content))));
+      const literalHtml = escapeLiteralHtmlTags(prompts.content);
+      let formatted = normalizeBodyHeadingLevels(repairTableDividers(this.organizeMarkdownStyle(restoreDetachedLists(literalHtml.content))));
       const autoWrapped = applyAutoCodeWraps(formatted);
       formatted = autoWrapped.content;
       const confirmation = await this.confirmCandidates(formatted, instructions);
       formatted = confirmation.content;
-      const formatChanges = prompts.wrapped + autoWrapped.applied + confirmation.changed;
+      const formatChanges = literalHtml.escaped + prompts.wrapped + autoWrapped.applied + confirmation.changed;
       await report(formatStep, "completed", formatChanges > 0 ? `修改了 ${formatChanges} 处` : undefined);
 
       await report(codeStep);
@@ -309,8 +311,8 @@ export class ClippingPipeline {
         // Clean trailing ** from heading lines (orphan bold artifact)
         next = next.replace(/^(#{1,6}\s+.*?)\s*\*\*\s*$/g, "$1");
         next = next.replace(/^(\s*)(\d+)[、)]\s+/g, "$1$2. ");
-        next = next.replace(/^(\s*)([一二三四五六七八九十]+)([、.])\s+/g, (_m, sp, num, sep) =>
-          `${sp}${chineseToArabic(num)}. `);
+        next = next.replace(/^(\s*)([一二三四五六七八九十]+)[、.]\s+/g, (_match, indent, number) =>
+          `${indent}${chineseToArabic(number)}. `);
         next = next.replace(/^\s+\|(\s*:?-{3,}:?\s*\|.*)$/g, "|$1");
         return next;
       }).join("\n");

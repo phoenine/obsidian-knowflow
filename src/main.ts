@@ -270,7 +270,7 @@ function normalizeSettings(savedSettings: unknown): KnowFlowSettings {
       DEFAULT_SETTINGS.embeddingDimensions
     ),
     summaryModel,
-    knowledgeMapModel: normalizeModelConfig(saved.knowledgeMapModel, summaryModel),
+    knowledgePointsModel: normalizeModelConfig(saved.knowledgePointsModel ?? saved.knowledgeMapModel, summaryModel),
     pipelineModel: normalizeModelConfig(saved.pipelineModel, DEFAULT_SETTINGS.pipelineModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
     chatModel: normalizeModelConfig(saved.chatModel, DEFAULT_SETTINGS.chatModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
     quizModel: normalizeModelConfig(saved.quizModel, DEFAULT_SETTINGS.quizModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
@@ -280,6 +280,7 @@ function normalizeSettings(savedSettings: unknown): KnowFlowSettings {
       DEFAULT_SETTINGS.semanticIndexExcludeFolders
     )
   };
+  delete (settings as typeof settings & { knowledgeMapModel?: unknown }).knowledgeMapModel;
   delete (settings as typeof settings & { dailyReviewLimit?: unknown }).dailyReviewLimit;
   delete (settings as typeof settings & { autoLinkRelatedArticles?: unknown }).autoLinkRelatedArticles;
   delete (settings as typeof settings & { autoReviewRelatedArticles?: unknown }).autoReviewRelatedArticles;

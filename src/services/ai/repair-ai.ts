@@ -1,6 +1,6 @@
 import type { AiModelConfig } from "../../types";
 import { AiTransport } from "./ai-transport";
-import { batchTranslationCandidates } from "../clipping/translation-candidates";
+import { batchTranslationCandidates, invalidTranslationReason } from "../clipping/translation-candidates";
 import type { TranslationCandidate, TranslationDecision } from "../clipping/translation-candidates";
 
 interface TranslationResponse {
@@ -99,15 +99,4 @@ function normalizeTranslationResponse(
 
 function describeTranslationCandidate(candidate: TranslationCandidate, reason: string): string {
   return `${candidate.id}：${reason}（原文：${candidate.content.replace(/\s+/g, " ").slice(0, 60)}）`;
-}
-
-function invalidTranslationReason(value: unknown): string | null {
-  if (typeof value !== "string") return "translation 必须为字符串";
-  if (!value.trim()) return "译文为空";
-  if (value.trim().length > 12000) return "译文过长（超过 12000 字符）";
-  if (!/[\u3400-\u9fff]/.test(value)) return "译文不含中文";
-  if (/[\r\n]/.test(value)) return "译文包含换行";
-  if (value.includes("<!-- knowflow-translation -->")) return "译文包含内部标记";
-  if (/```|~~~/.test(value)) return "译文包含代码围栏";
-  return null;
 }

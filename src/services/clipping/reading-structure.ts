@@ -1,4 +1,4 @@
-import { protectedLineIndices, protectedRanges } from "../../../src/services/clipping/protected-markdown";
+import { protectedLineIndices, protectedRanges } from "./protected-markdown";
 
 const TABLE_DIVIDER = /^\|\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|$/;
 

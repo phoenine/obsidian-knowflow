@@ -1,4 +1,4 @@
-import { protectedLineIndices, protectedRanges } from "../../../src/services/clipping/protected-markdown";
+import { protectedLineIndices, protectedRanges } from "./protected-markdown";
 
 const CLIPPED_MARKER = /^ {0,3}\.{3}(python|bash|sh|shell|yaml|yml|json|markdown|md|text|javascript|typescript|js|ts|sql|html|css)\s*$/i;
 

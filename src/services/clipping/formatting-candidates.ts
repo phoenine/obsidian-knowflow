@@ -32,9 +32,9 @@ export interface FormattingDecision {
 }
 
 import { assessUnfencedCode } from "./code-confidence";
-import { promptFenceStarts } from "../../../skills/clipping-update/scripts/prompt-blocks";
+import { promptFenceStarts } from "./prompt-blocks";
 import { protectedLineIndices, protectedRanges } from "./protected-markdown";
-import { clippedCodeRegions, restoreClippedFence } from "../../../skills/clipping-update/scripts/clipped-code";
+import { clippedCodeRegions, restoreClippedFence } from "./clipped-code";
 
 const FORMATTING_BATCH_CHARS = 16000;
 

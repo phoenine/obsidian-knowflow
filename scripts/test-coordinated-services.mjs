@@ -372,6 +372,17 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
     assert.match(written, /简要描述:\n/);
     assert.doesNotMatch(written, /已有描述/);
     assert.match(written, /阅读价值: 2/);
+
+    await new ClippingPipeline(keeping, { templatePath: "", translateEnglishClippings: false }, {
+      recordPipelineSuccess: async () => {},
+      setPipelineStatus: async (status) => { assert.fail(status.error); }
+    }, {
+      proposeNoteProperties: async () => { throw new Error("model down"); }
+    }, { runExclusive: async (_path, operation) => operation() }).process(
+      { path: "Clippings/Memory.md", basename: "Memory" }
+    );
+    assert.match(written, /简要描述: "已有描述"/);
+    assert.match(written, /阅读价值: 2/);
   } finally {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
@@ -502,6 +513,68 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
   assert.equal(questions.length, 1);
   assert.equal(questions[0].articlePath, source.path);
   assert.equal(questions[0].entries[0].question.question, "哪个选项正确？");
+}
+
+{
+  const quiz = { path: "Archives/Concurrent_Quiz.md", basename: "Concurrent_Quiz" };
+  let content = [
+    "---",
+    "考试结果: false",
+    "---",
+    "",
+    "<!-- study-quiz:start -->",
+    "",
+    "## 1. 第一题",
+    "",
+    "- [ ] A. 甲",
+    "- [ ] B. 乙",
+    "",
+    "```Answer fold",
+    "- 答案：A",
+    "- 解析：第一题。",
+    "```",
+    "",
+    "## 2. 第二题",
+    "",
+    "- [ ] A. 丙",
+    "- [ ] B. 丁",
+    "",
+    "```Answer fold",
+    "- 答案：B",
+    "- 解析：第二题。",
+    "```",
+    "",
+    "<!-- study-quiz:end -->",
+    ""
+  ].join("\n");
+  let tail = Promise.resolve();
+  const coordinator = {
+    runExclusive: (path, operation) => {
+      const run = tail.then(operation, operation);
+      tail = run.then(() => {}, () => {});
+      return run;
+    }
+  };
+  const app = {
+    vault: {
+      getAbstractFileByPath: () => quiz,
+      process: async (_file, transform) => {
+        const snapshot = content;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        content = transform(snapshot);
+        return content;
+      }
+    }
+  };
+  const service = new QuizNoteService(app, { archiveFolder: "Archives" }, coordinator);
+  const [first, second] = await Promise.all([
+    service.recordAnswer(quiz.path, 1, "A", "A", "第一题"),
+    service.recordAnswer(quiz.path, 2, "B", "B", "第二题")
+  ]);
+  assert.equal(first, true);
+  assert.equal(second, true);
+  assert.match(content, /- \[x\] A\. 甲 ✅/);
+  assert.match(content, /- \[x\] B\. 丁 ✅/);
 }
 
 {

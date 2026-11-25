@@ -1,6 +1,6 @@
 import { requestUrl, TFile, type App } from "obsidian";
-import { protectedLineIndices, protectedRanges } from "../../../src/services/clipping/protected-markdown";
-import { withTimeout } from "../../../src/services/ai/ai-transport";
+import { protectedLineIndices, protectedRanges } from "./protected-markdown";
+import { withTimeout } from "../ai/ai-transport";
 
 const EMBED = /!\[\[([^\]\n]+)\]\]|!\[((?:\\.|[^\]\\])*)\]\((<[^<>\n]+>(?:[ \t]+["'][^"']*["'])?|(?:\\.|[^()\\\n]|\([^()\n]*\))+?)\)/g;
 const LOCAL_IMAGE = /\.(?:png|jpe?g|gif|webp|avif|bmp|svg|ico|heic)$/i;

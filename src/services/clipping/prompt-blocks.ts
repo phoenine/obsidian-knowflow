@@ -1,6 +1,6 @@
-import { protectedLineIndices, protectedRanges } from "../../../src/services/clipping/protected-markdown";
+import { protectedLineIndices, protectedRanges } from "./protected-markdown";
 
-const PROMPT_LABEL = /^(?:提示词(?:节选)?|(?:生图|绘图|生成|编辑)提示词|(?:image )?prompt(?: excerpt)?)\s*[：:]?$/i;
+const PROMPT_LABEL = /^(?:提示词(?:节选|示例)?|(?:生图|绘图|生成|编辑)提示词|(?:image )?prompt(?: excerpt| example)?|.{1,40}(?:提示词(?:示例|节选)|prompt(?: example| excerpt)))$/i;
 const RESULT_LABEL = /^(?:点评|效果展示|生成效果|生成结果|结果对比|测试结果|模型表现|成图(?:展示|对比)?|参考图|results?(?: comparison)?)[：:]?$/i;
 const RESULT_CAPTION = /^(?:第[一二三四五六七八九十\d]+行|(?:上|下|左|右)图)\s*(?:左边|右边|从左|从右|依次|为|是|[:：])/;
 const ENCODED_SPACE_LINE = /^(?:[ \t]|&#x(?:20|a0);|&#(?:32|160);|&nbsp;)+$/i;
@@ -37,14 +37,17 @@ export function formatPromptBlocks(content: string): {
       continue;
     }
 
-    let end = start;
-    while (end < lines.length && !protectedLines.has(end) && !endsPrompt(lines[end])) end += 1;
-    while (end > start && !lines[end - 1].trim()) end -= 1;
-    if (start === end) {
+    const quoted = quotedPrompt(lines, start, protectedLines);
+    let end = quoted?.end ?? start;
+    if (!quoted) {
+      while (end < lines.length && !protectedLines.has(end) && !endsPrompt(lines[end])) end += 1;
+      while (end > start && !lines[end - 1].trim()) end -= 1;
+    }
+    const body = quoted?.body ?? lines.slice(start, end);
+    if (start === end || body.length === 0 || !body.some((line) => line.trim())) {
       skipped += 1;
       continue;
     }
-    const body = lines.slice(start, end);
     bodies.push(body.join("\n"));
     const replacement = textFence(body);
     if (start === label + 1) replacement.unshift("");
@@ -89,6 +92,32 @@ function labelText(line: string): string {
     .replace(/^\*\*(.*)\*\*$/, "$1")
     .replace(/^【(.*)】$/, "$1")
     .trim();
+}
+
+function quotedPrompt(
+  lines: string[], start: number, protectedLines: Set<number>
+): { end: number; body: string[] } | null {
+  if (protectedLines.has(start) || !/^ {0,3}>/.test(lines[start] ?? "")) return null;
+  let end = start;
+  while (end < lines.length && !protectedLines.has(end)) {
+    if (/^ {0,3}>/.test(lines[end])) {
+      end += 1;
+      continue;
+    }
+    if (!lines[end].trim()) {
+      let look = end + 1;
+      while (look < lines.length && !lines[look].trim()) look += 1;
+      if (look < lines.length && !protectedLines.has(look) && /^ {0,3}>/.test(lines[look])) {
+        end += 1;
+        continue;
+      }
+    }
+    break;
+  }
+  const body = lines.slice(start, end).map((line) => line.replace(/^ {0,3}>(?:[ \t])?/, ""));
+  while (body.length > 0 && !body[0].trim()) body.shift();
+  while (body.length > 0 && !body[body.length - 1].trim()) body.pop();
+  return { end, body };
 }
 
 function endsPrompt(line: string): boolean {

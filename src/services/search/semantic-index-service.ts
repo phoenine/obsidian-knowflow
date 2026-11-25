@@ -171,9 +171,21 @@ export class SemanticIndexService {
 
         const articles: ShardArticle[] = [];
         for (const file of shardFiles) {
+          const path = file.path;
+          const mtime = file.stat.mtime;
           const chunks = await this.embedFile(file);
+          if (file.path !== path || this.app.vault.getAbstractFileByPath(path) !== file) {
+            indexed += 1;
+            onProgress?.(indexed, files.length);
+            continue;
+          }
           dimension = mergeDimension(dimension, chunks[0]?.embedding.length ?? 0);
-          articles.push({ path: file.path, title: file.basename, mtime: file.stat.mtime, chunks });
+          articles.push({
+            path,
+            title: file.basename,
+            mtime,
+            chunks: chunks.map((chunk) => chunk.mtime === mtime ? chunk : { ...chunk, mtime })
+          });
           indexed += 1;
           onProgress?.(indexed, files.length);
         }
@@ -348,8 +360,9 @@ export class SemanticIndexService {
   }
 
   private async embedFile(file: TFile, indexed: SemanticChunk[] = []): Promise<SemanticChunk[]> {
+    const mtime = file.stat.mtime;
     const markdown = await this.app.vault.cachedRead(file);
-    const chunks = chunkArticleSummary(file.path, file.basename, markdown, file.stat.mtime);
+    const chunks = chunkArticleSummary(file.path, file.basename, markdown, mtime);
     if (chunks.length === indexed.length && chunks.every((chunk, index) => chunk.content === indexed[index].content)) {
       return chunks.map((chunk, index) => ({ ...chunk, embedding: indexed[index].embedding }));
     }

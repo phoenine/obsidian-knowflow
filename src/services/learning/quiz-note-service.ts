@@ -222,22 +222,24 @@ export class QuizNoteService {
     correctAnswerKey: string,
     expectedQuestion?: string
   ): Promise<boolean> {
-    const file = this.app.vault.getAbstractFileByPath(quizPath);
-    if (!(file instanceof TFile)) throw new Error(`Quiz note not found: ${quizPath}`);
-    const content = await this.app.vault.read(file);
-    if (expectedQuestion) {
-      const current = parseQuizEntries(content, "")[displayIndex - 1]?.question.question;
-      if (current !== expectedQuestion) throw new Error("题库内容已变化，请刷新今日复习后重试。");
-    }
-    const correct = selectedKey === correctAnswerKey;
-    const date = new Date().toISOString().slice(0, 10);
-    const patched = applyQuizAnswer(content, displayIndex, selectedKey, correct, date);
-    // "考试结果" mirrors the study-quiz convention: true once every question
-    // in the note has been answered and every answer is currently correct.
-    const stats = computeQuizStats(patched);
-    const passed = stats.total > 0 && stats.answered === stats.total && stats.wrong === 0;
-    await this.app.vault.modify(file, setExamPassed(patched, passed));
-    return correct;
+    return this.noteOperations.runExclusive(quizPath, async () => {
+      const file = this.app.vault.getAbstractFileByPath(quizPath);
+      if (!(file instanceof TFile)) throw new Error(`Quiz note not found: ${quizPath}`);
+      let correct = false;
+      await this.app.vault.process(file, (content) => {
+        if (expectedQuestion) {
+          const current = parseQuizEntries(content, "")[displayIndex - 1]?.question.question;
+          if (current !== expectedQuestion) throw new Error("题库内容已变化，请刷新今日复习后重试。");
+        }
+        correct = selectedKey === correctAnswerKey;
+        const date = new Date().toISOString().slice(0, 10);
+        const patched = applyQuizAnswer(content, displayIndex, selectedKey, correct, date);
+        const stats = computeQuizStats(patched);
+        const passed = stats.total > 0 && stats.answered === stats.total && stats.wrong === 0;
+        return setExamPassed(patched, passed);
+      });
+      return correct;
+    });
   }
 
   private async resolveNewQuizPath(title: string, date: Date): Promise<string> {

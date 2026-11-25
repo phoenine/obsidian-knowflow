@@ -113,10 +113,11 @@ const { SummaryController } = await import(pathToFileURL(join(tempDir, "summary-
   const file = { path: "Articles/Article.md", basename: "Article", extension: "md" };
   const source = { title: "发布说明", url: "https://example.com/release" };
   const review = {
-    path: file.path, sourcesFound: 1, checkedOn: "2026-11-23", truncated: false, risks: [],
-    corrections: [
-      { before: "版本 1", after: "版本 2", quote: "已更新至版本 2", source },
-      { before: "上限 10", after: "上限 20", quote: "上限提升至 20", source }
+    path: file.path, original: "", checkedOn: "2026-11-23", verdict: "局部内容需要更新",
+    coreConclusion: "核心结论仍有参考价值。", incomplete: [], held: [], unverified: [],
+    updates: [
+      { status: "已经失效", action: "修正", section: "一", before: "版本 1", after: "版本 2", reason: "版本已更新。", source: { ...source, date: "", quote: "已更新至版本 2" } },
+      { status: "已经失效", action: "修正", section: "一", before: "上限 10", after: "上限 20", reason: "上限已提高。", source: { ...source, date: "", quote: "上限提升至 20" } }
     ]
   };
   const model = { runtime: "disabled", apiBaseUrl: "", apiKey: "", model: "" };
@@ -124,7 +125,7 @@ const { SummaryController } = await import(pathToFileURL(join(tempDir, "summary-
   const app = { vault: { getAbstractFileByPath: (path) => path === file.path ? file : null } };
   const plugin = {
     settings: {
-      summaryModel: model, knowledgeMapModel: model, pipelineModel: model, chatModel: model,
+      summaryModel: model, knowledgePointsModel: model, pipelineModel: model, chatModel: model,
       quizModel: model, embeddingModel: model, confirmBeforeWrite: true
     },
     freshness: {
@@ -149,7 +150,10 @@ const { SummaryController } = await import(pathToFileURL(join(tempDir, "summary-
   };
   const checked = await ask("检查当前文章是否过时");
   assert.equal(checked.kind, "article-freshness");
-  assert.match(checked.content, /第 2 条/);
+  assert.match(checked.content, /\*\*2\*\* · \*\*修正\*\* · \*已经失效\*/);
+  assert.match(checked.content, /\n\n---\n\n/);
+  assert.match(checked.content, /\*\*原文\*\*\n> /);
+  assert.match(checked.content, /要不要按这些建议更新原文/);
   assert.deepEqual(writes, []);
   await ask("应用第 3 条");
   assert.deepEqual(writes, []);
@@ -162,6 +166,35 @@ const { SummaryController } = await import(pathToFileURL(join(tempDir, "summary-
   controller.activeThread = null;
   assert.match((await ask("应用全部")).content, /本对话没有可应用/);
   assert.deepEqual(writes, [[1], [0, 1]], "a new thread cannot apply an earlier review");
+  controller.activeThread = null;
+  await ask("检查当前文章是否过时");
+  const declined = await ask("不用");
+  assert.match(declined.content, /原文保持不变/);
+  assert.deepEqual(writes, [[1], [0, 1]]);
+  await ask("检查当前文章是否过时");
+  const accepted = await ask("更新");
+  assert.match(accepted.content, /已更新 2 项，写在对应章节里/);
+  assert.doesNotMatch(accepted.content, /原文/);
+  assert.deepEqual(writes.at(-1), [0, 1]);
+  controller.activeThread = null;
+  app.vault.read = async () => "正文";
+  await ask("检查当前文章是否过时");
+  plugin.ai = { answerStream: async () => ({ promptTokens: 0, completionTokens: 0, totalTokens: 0, estimated: false }) };
+  const casual = await ask("好");
+  assert.notEqual(casual.kind, "article-freshness");
+  assert.equal(writes.length, 3);
+  const late = await ask("更新");
+  assert.notEqual(late.kind, "article-freshness");
+  assert.equal(writes.length, 3, "a later 更新 must not apply a review that ordinary chat already left behind");
+  controller.activeThread = null;
+  plugin.freshness.check = async () => ({
+    ...review,
+    updates: [],
+    unverified: [{ section: "一", text: "版本 1", reason: "证据不足。" }]
+  });
+  const insufficient = await ask("检查当前文章是否过时");
+  assert.match(insufficient.content, /证据不足，原文先不改/);
+  assert.doesNotMatch(insufficient.content, /没有需要更新的内容/);
 }
 
 await rm(tempDir, { recursive: true, force: true });

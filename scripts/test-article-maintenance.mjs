@@ -114,7 +114,7 @@ globalThis.knowflowRequest = async ({ url, body, headers }) => {
   if (url === "https://api.deepseek.com/v1/tools/search") {
     assert.equal(headers.Authorization, "Bearer fixture");
     assert.deepEqual(JSON.parse(body), {
-      query: "Source latest official documentation release notes 2026", count: 4, need_content: true
+      query: "Source 默认版本", count: 4, need_content: true
     });
     requests.push("search");
     return { status: 200, json: { results: [{
@@ -123,32 +123,36 @@ globalThis.knowflowRequest = async ({ url, body, headers }) => {
   }
   const { messages } = JSON.parse(body);
   assert.ok(messages[0].content.includes("优先检查版本限制"));
-  if (messages[0].content.includes("最多三个")) {
-    requests.push("plan");
-    return toResponse({ topics: ["Source", "https://secret.example/", "不存在的词"] });
+  if (messages[0].content.includes("全文分析")) {
+    requests.push("analyze");
+    return toResponse({
+      purpose: "说明默认配置", coreConclusion: "默认配置可以沿用。", domains: ["Source"],
+      claims: [
+        { quote: "默认版本是 v1。", section: "导语", query: "Source 默认版本" },
+        { quote: "默认限制为 50。", section: "导语", query: "Source 默认版本" },
+        { quote: "并不存在的说法。", section: "导语", query: "无效" }
+      ],
+      discoveryQueries: []
+    });
   }
-  if (messages[0].content.includes("独立复核")) {
-    requests.push("confirm");
-    return toResponse({ accepted: [0, 1], obsolete: false });
-  }
-  requests.push("verify");
+  requests.push("judge");
   return toResponse({
-    risks: ["免费额度待核验"],
-    corrections: [
-      correction,
-      { before: "默认限制为 50", after: "默认限制为 75", sourceId: 1, quote: "版本升级后默认限制为 75" },
-      { before: "默认上限是 10", after: "默认上限是 12", sourceId: 1, quote: "版本升级后默认限制为 75" },
-      { before: "代码专用事实", after: "无关", sourceId: 1, quote: "当前默认版本是 v2" },
-      { before: "v10", after: "v19", sourceId: 3, quote: "当前默认版本是 v2" }
+    coreStillHolds: true,
+    items: [
+      { ...correction, quote: correction.before, section: "导语", status: "已经失效", action: "修正", reason: "版本已经升级。", evidenceQuote: correction.quote },
+      { quote: "默认限制为 50。", before: "默认限制为 50。", after: "默认限制为 75。", section: "导语", status: "已经失效", action: "修正", reason: "限制已经提高。", sourceId: 1, evidenceQuote: "版本升级后默认限制为 75" },
+      { quote: "默认上限是 10。", before: "默认上限是 10。", after: "默认上限是 12。", section: "导语", status: "已经失效", action: "修正", reason: "证据没有支持新上限。", sourceId: 1, evidenceQuote: "版本升级后默认限制为 75" },
+      { quote: "代码专用事实", before: "代码专用事实", after: "无关", section: "导语", status: "原文有误", action: "修正", reason: "代码不改。", sourceId: 1, evidenceQuote: "当前默认版本是 v2" },
+      { quote: "v10", before: "v10", after: "v19", section: "导语", status: "原文有误", action: "修正", reason: "不是独立说法。", sourceId: 3, evidenceQuote: "当前默认版本是 v2" }
     ]
   });
 };
 const freshness = new ArticleFreshness(vault, runner, ops);
 await assert.rejects(() => freshness.check(file, model, ""), /DeepSeek Search/);
 const review = await freshness.check(file, model, "fixture");
-assert.deepEqual(requests, ["plan", "search", "verify", "confirm"]);
-assert.deepEqual(review.corrections.map((item) => item.after), ["默认版本是 v2", "默认限制为 75"]);
-assert.deepEqual(review.risks, ["免费额度待核验"]);
+assert.deepEqual(requests, ["analyze", "search", "judge"]);
+assert.deepEqual(review.updates.map((item) => item.after), ["默认版本是 v2", "默认限制为 75。"]);
+assert.equal(review.verdict, "局部内容需要更新");
 assert.equal(writes, 0, "checking must leave the note untouched");
 contents.set(file, original + "\r\n人工补充");
 await assert.rejects(() => freshness.apply(file, review, new Set([0])), /重新检查/);
@@ -157,6 +161,8 @@ contents.set(file, original);
 await freshness.apply(file, review, new Set([0]));
 assert.ok(contents.get(file).startsWith("---\r\nrating: 3\r\n---\r\n"));
 assert.ok(contents.get(file).endsWith("已经手动链接到 [[Manual]]。"));
+assert.match(contents.get(file), /默认版本是 v2。\r\n\r\n> \[!note\] KnowFlow 知识更新 · 2026-11-23/);
+assert.doesNotMatch(contents.get(file), /---\r\n\r\n> \[!note\]/);
 assert.match(contents.get(file), /<https:\/\/example.com\/versions>/);
 assert.match(prepareArticleForAi(contents.get(file)), /默认版本是 v2/);
 assert.match(contents.get(file), /默认限制为 50/);
@@ -167,7 +173,7 @@ const withdrawal = "Retired Tool 的远程公开服务已永久停止，旧版�
 const searchSettings = {
   summaryModel: model,
   pipelineModel: { ...model, runtime: "openai-compatible", apiBaseUrl: "https://api.deepseek.com/v1/", apiKey: "official-key" },
-  chatModel: model, quizModel: model, knowledgeMapModel: model, embeddingModel: model
+  chatModel: model, quizModel: model, knowledgePointsModel: model, embeddingModel: model
 };
 const searchKey = resolveDeepSeekSearchKey(searchSettings);
 assert.equal(searchKey, "official-key");
@@ -185,7 +191,7 @@ globalThis.knowflowRequest = async ({ url, body, headers, method }) => {
     deepSeekCalls.push(new URL(url).pathname);
     if (url.endsWith("/search")) {
       assert.deepEqual(JSON.parse(body), {
-        query: "Retired Tool latest official documentation release notes 2026", count: 4, need_content: true
+        query: "Retired Tool 远程服务状态", count: 4, need_content: true
       });
       return { status: 200, json: { results: [{
         url: "https://example.com/sunset", title: "停止服务公告", date: "2026-11-20T12:00:00Z",
@@ -197,20 +203,37 @@ globalThis.knowflowRequest = async ({ url, body, headers, method }) => {
     return { status: 200, json: { title: "更新公告", content: withdrawal } };
   }
   const { messages } = JSON.parse(body);
-  if (messages[0].content.includes("最多三个")) return toResponse({ topics: ["Retired Tool"] });
-  if (messages[0].content.includes("独立复核")) return toResponse({ accepted: [], obsolete: true });
-  assert.deepEqual(JSON.parse(messages[1].content).sources[0].excerpts, [withdrawal]);
+  if (messages[0].content.includes("全文分析")) {
+    return toResponse({
+      purpose: "介绍如何连接服务", coreConclusion: "这项服务可以远程使用。", domains: ["Retired Tool"],
+      claims: [{ quote: "Retired Tool 提供远程公开服务。", section: "导语", query: "Retired Tool 远程服务状态" }],
+      discoveryQueries: []
+    });
+  }
+  const payload = JSON.parse(messages[1].content);
+  assert.deepEqual(payload.sources[0].excerpts, [withdrawal]);
   return toResponse({
-    risks: [], corrections: [],
-    recommendation: { reason: "教程依赖已永久停止的服务。", claim: "Retired Tool 提供远程公开服务", sourceId: 1, quote: withdrawal }
+    coreStillHolds: false,
+    items: [{
+      quote: "Retired Tool 提供远程公开服务。", before: "Retired Tool 提供远程公开服务。", after: "",
+      section: "导语", status: "已经失效", action: "删除", reason: "教程依赖已永久停止的服务。",
+      sourceId: 1, evidenceQuote: withdrawal
+    }]
   });
 };
 const previousWrites = writes;
 const outdated = await freshness.check(retired, model, searchKey);
-assert.equal(outdated.recommendation?.source.url, "https://example.com/sunset");
-assert.equal(outdated.recommendation?.source.date, "2026-11-20");
+assert.equal(outdated.updates[0]?.source.url, "https://example.com/sunset");
+assert.equal(outdated.updates[0]?.source.date, "2026-11-20");
+assert.equal(outdated.verdict, "核心结论需要重新审视");
 assert.deepEqual(deepSeekCalls, ["/v1/tools/search", "/v1/tools/fetch"]);
 assert.equal(writes, previousWrites, "obsolete-article advice never deletes or modifies the note");
+await freshness.apply(retired, outdated, new Set([0]));
+const retiredText = contents.get(retired);
+assert.match(retiredText, /此文介绍如何连接这项服务。/);
+assert.doesNotMatch(retiredText, /提供远程公开服务。此文/);
+assert.match(retiredText, /KnowFlow 知识更新/);
+assert.match(retiredText, /\*\*已删除\*\*/);
 
 globalThis.knowflowRequest = async ({ url }) => {
   assert.equal(url, "https://api.deepseek.com/v1/tools/search", "Search page content needs no Fetch request");

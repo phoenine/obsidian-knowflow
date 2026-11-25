@@ -1,4 +1,4 @@
-import { protectedLineIndices, protectedRanges } from "../../../src/services/clipping/protected-markdown";
+import { protectedLineIndices, protectedRanges } from "./protected-markdown";
 
 export function restoreDetachedLists(content: string): string {
   const lines = content.split("\n");

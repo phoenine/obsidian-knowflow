@@ -163,12 +163,17 @@ function appendInlineTranslation(line: string, translation: string): string {
 }
 
 function isValidTranslation(value: string): boolean {
-  if (typeof value !== "string") return false;
+  return invalidTranslationReason(value) === null;
+}
+
+export function invalidTranslationReason(value: unknown): string | null {
+  if (typeof value !== "string") return "translation 必须为字符串";
   const translation = value.trim();
-  return translation.length > 0
-    && translation.length <= 12000
-    && /[\u3400-\u9fff]/.test(translation)
-    && !/[\r\n]/.test(translation)
-    && !translation.includes(TRANSLATION_MARKER)
-    && !/```|~~~/.test(translation);
+  if (!translation) return "译文为空";
+  if (translation.length > 12000) return "译文过长（超过 12000 字符）";
+  if (!/[\u3400-\u9fff]/.test(translation)) return "译文不含中文";
+  if (/[\r\n]/.test(value)) return "译文包含换行";
+  if (translation.includes(TRANSLATION_MARKER)) return "译文包含内部标记";
+  if (/```|~~~/.test(translation)) return "译文包含代码围栏";
+  return null;
 }

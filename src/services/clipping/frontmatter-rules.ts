@@ -79,7 +79,8 @@ export function hasEmptyNoteProperties(frontmatter: string | null): boolean {
 /**
  * Fills 简要描述、阅读价值、分类 and tags.
  * During 整理, `replaceExisting` writes the new values over the old ones.
- * A missing 简要描述 is cleared. The other three stay when this pass has no new value.
+ * A completed pass with no 简要描述 clears that field. A missing proposal keeps it.
+ * The other three stay when this pass has no new value.
  */
 export function fillEmptyNoteProperties(
   content: string,
@@ -91,19 +92,19 @@ export function fillEmptyNoteProperties(
   const filled: string[] = [];
   let clearedDescription = false;
   const replace = options?.replaceExisting === true;
+  if (!proposal) return { content, filled, clearedDescription };
   if (replace) {
-    if (proposal?.description) {
+    if (proposal.description) {
       data.description = proposal.description;
       filled.push("简要描述");
     } else if (!isEmptyDescription(frontmatter)) {
       data.description = "";
       clearedDescription = true;
     }
-  } else if (proposal?.description && isEmptyDescription(frontmatter)) {
+  } else if (proposal.description && isEmptyDescription(frontmatter)) {
     data.description = proposal.description;
     filled.push("简要描述");
   }
-  if (!proposal) return { content: filled.length || clearedDescription ? applySummaryFrontmatter(content, data) : content, filled, clearedDescription };
   if (proposal.readingValue && (replace || isEmptyReadingValue(frontmatter))) {
     data.readingValue = proposal.readingValue;
     filled.push("阅读价值");

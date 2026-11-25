@@ -5,7 +5,7 @@ import { EmbeddingTransport } from "./services/ai/embedding-transport";
 import type { AiModelConfig, AiRuntime, KnowFlowSettings } from "./types";
 import { DEEPSEEK_SEARCH_SECRET_ID, resolveDeepSeekSearchKey } from "./services/search/public-evidence";
 
-type ModelConfigKey = "summaryModel" | "knowledgeMapModel" | "pipelineModel" | "chatModel" | "quizModel" | "embeddingModel";
+type ModelConfigKey = "summaryModel" | "knowledgePointsModel" | "pipelineModel" | "chatModel" | "quizModel" | "embeddingModel";
 type SettingsTabKey = "basic" | "ai-models" | "pipeline" | "learning" | "data";
 
 const DEFAULT_MODEL_CONFIG: AiModelConfig = {
@@ -31,7 +31,7 @@ export const DEFAULT_SETTINGS: KnowFlowSettings = {
   chatConversationFolder: "copilot-conversations",
   templatePath: "Template/article.md",
   summaryModel: { ...DEFAULT_MODEL_CONFIG },
-  knowledgeMapModel: { ...DEFAULT_MODEL_CONFIG },
+  knowledgePointsModel: { ...DEFAULT_MODEL_CONFIG },
   pipelineModel: { ...DEFAULT_MODEL_CONFIG },
   chatModel: { ...DEFAULT_MODEL_CONFIG },
   quizModel: { ...DEFAULT_MODEL_CONFIG },
@@ -189,7 +189,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
   private displayAiModels(containerEl: HTMLElement): void {
     const ai = this.createGroup(containerEl, "AI 模型", "", true);
     this.createModelEntry(ai, "Summary model", "AI Summary: generates article summary, reading value and classification.", "summaryModel");
-    this.createModelEntry(ai, "Knowledge Map model", "Generates structured knowledge points for an article.", "knowledgeMapModel");
+    this.createModelEntry(ai, "Knowledge Points model", "Generates grouped knowledge points and their evidence from the article.", "knowledgePointsModel");
     this.createModelEntry(ai, "Pipeline model", "Clipping Pipeline: heading detection, code block recognition and language classification.", "pipelineModel");
     this.createModelEntry(ai, "Chat model", "Used by the sidebar chat composer.", "chatModel");
     this.createModelEntry(ai, "Quiz model", "Generates Markdown quiz questions, including targeted knowledge-point questions.", "quizModel");

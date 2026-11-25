@@ -200,6 +200,18 @@ for (const { value } of shardMetadata()) {
     assert.equal(article.vectorLengthBytes, article.chunkCount * value.dimension * 4);
   }
 }
+const appleBeforeRace = files[0].stat.mtime;
+files[0].stat.mtime = 100;
+const embedBeforeRace = transport.embed;
+transport.embed = async (_config, inputs) => {
+  files[0].stat.mtime = 180;
+  return inputs.map((input) => input.includes("苹果") ? [1, 0] : [0.8, 0.2]);
+};
+await service.rebuild();
+const raced = metadataFor("Articles/Apple.md").value.articles.find((article) => article.path === "Articles/Apple.md");
+assert.equal(raced.mtime, 100, "a rebuild must not stamp old vectors with a newer mtime");
+files[0].stat.mtime = appleBeforeRace;
+transport.embed = embedBeforeRace;
 const includedContext = await service.searchContext("苹果", undefined, 2);
 assert.match(includedContext, /检索来源/);
 assert.match(includedContext, /苹果是一种水果/);

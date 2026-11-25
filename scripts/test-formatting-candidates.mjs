@@ -10,10 +10,11 @@ await esbuild.build({
   bundle: true,
   entryPoints: {
     "formatting-candidates": "src/services/clipping/formatting-candidates.ts",
-    "prompt-blocks": "skills/clipping-update/scripts/prompt-blocks.ts",
-    "clipped-code": "skills/clipping-update/scripts/clipped-code.ts",
-    "reading-structure": "skills/clipping-update/scripts/reading-structure.ts",
-    "detached-lists": "skills/clipping-update/scripts/detached-lists.ts"
+    "prompt-blocks": "src/services/clipping/prompt-blocks.ts",
+    "clipped-code": "src/services/clipping/clipped-code.ts",
+    "reading-structure": "src/services/clipping/reading-structure.ts",
+    "detached-lists": "src/services/clipping/detached-lists.ts",
+    "literal-html": "src/services/clipping/literal-html.ts"
   },
   format: "esm",
   outdir: tempDir,
@@ -37,6 +38,7 @@ const { formatPromptBlocks } = await import(pathToFileURL(join(tempDir, "prompt-
 const { prettyJsonBlock, removeClipperFenceSpacing, removePythonClipperSpacing, repairClippedYaml } = await import(pathToFileURL(join(tempDir, "clipped-code.js")).href);
 const { repairTableDividers } = await import(pathToFileURL(join(tempDir, "reading-structure.js")).href);
 const { restoreDetachedLists } = await import(pathToFileURL(join(tempDir, "detached-lists.js")).href);
+const { escapeLiteralHtmlTags } = await import(pathToFileURL(join(tempDir, "literal-html.js")).href);
 
 {
   const lines = ["# config.yaml", "memory:", "  root:./agent_memory", "  inject:", "    max_lines: 200", "    max_bytes: 25600", "    index_only: true"];
@@ -462,6 +464,120 @@ assert.equal(
   const migrated = formatPromptBlocks(oldTilde);
   assert.equal(migrated.content, ["提示词", "", "````text", inner, "````"].join("\n"));
   assert.equal(collectCodeCandidates(migrated.content).fencedCode.length, 0);
+}
+
+{
+  const article = [
+    "编码和解决数学问题的提示词示例：",
+    "",
+    "> Begin by enclosing all thoughts within <thinking> tags.",
+    ">",
+    "> Use <count> tags after each step.",
+    "",
+    "## 3.  提示词范式解释",
+    "",
+    "[![](https://example.com/a.png)](https://example.com/a.png)"
+  ].join("\n");
+  const fenced = [
+    "编码和解决数学问题的提示词示例：",
+    "",
+    "```text",
+    "Begin by enclosing all thoughts within <thinking> tags.",
+    "",
+    "Use <count> tags after each step.",
+    "```",
+    "",
+    "## 3.  提示词范式解释",
+    "",
+    "[![](https://example.com/a.png)](https://example.com/a.png)"
+  ].join("\n");
+  const result = formatPromptBlocks(article);
+  assert.equal(result.wrapped, 1);
+  assert.equal(result.content, fenced);
+  assert.equal(formatPromptBlocks(result.content).content, result.content);
+  assert.equal(collectCodeCandidates(result.content).fencedCode.length, 0);
+}
+
+{
+  const article = [
+    "下面这段说明里有标签。",
+    "",
+    "先写 <step> 再 </step> 继续。",
+    "",
+    "> Begin by enclosing all thoughts within <thinking> tags.",
+    ">",
+    "> Use <count> tags after each step.",
+    "",
+    "## 后文",
+    "",
+    "[![](https://example.com/a.png)](https://example.com/a.png)",
+    "",
+    "换行用 <br>，图片用 <img src=\"a.png\">。",
+    "",
+    "<video src=\"https://mpvideo.qpic.cn/a.mp4\" controls=\"\">您的浏览器不支持 video 标签</video>",
+    "",
+    "链接是 <https://example.com>。",
+    "",
+    "行内 `<thinking>` 保持原样。已转义 \\<thinking> 不再变化。",
+    "",
+    "上次转义的 \\<video src=\"https://example.com/a.mp4\" controls=\"\">播放\\</video> 应恢复。",
+    "",
+    "<!-- <note> 注释里的标签保持原样 -->",
+    "",
+    "```text",
+    "这里的 <thinking> 已经在围栏里。",
+    "```"
+  ].join("\n");
+  const expected = [
+    "下面这段说明里有标签。",
+    "",
+    "先写 \\<step> 再 \\</step> 继续。",
+    "",
+    "> Begin by enclosing all thoughts within \\<thinking> tags.",
+    ">",
+    "> Use \\<count> tags after each step.",
+    "",
+    "## 后文",
+    "",
+    "[![](https://example.com/a.png)](https://example.com/a.png)",
+    "",
+    "换行用 <br>，图片用 <img src=\"a.png\">。",
+    "",
+    "<video src=\"https://mpvideo.qpic.cn/a.mp4\" controls=\"\">您的浏览器不支持 video 标签</video>",
+    "",
+    "链接是 <https://example.com>。",
+    "",
+    "行内 `<thinking>` 保持原样。已转义 \\<thinking> 不再变化。",
+    "",
+    "上次转义的 <video src=\"https://example.com/a.mp4\" controls=\"\">播放</video> 应恢复。",
+    "",
+    "<!-- <note> 注释里的标签保持原样 -->",
+    "",
+    "```text",
+    "这里的 <thinking> 已经在围栏里。",
+    "```"
+  ].join("\n");
+  const result = escapeLiteralHtmlTags(article);
+  assert.equal(result.escaped, 6);
+  assert.equal(result.content, expected);
+  assert.equal(escapeLiteralHtmlTags(result.content).escaped, 0);
+  assert.equal(escapeLiteralHtmlTags(result.content).content, result.content);
+}
+
+{
+  const article = [
+    "编码和解决数学问题的提示词示例：",
+    "",
+    "> Begin by enclosing all thoughts within <thinking> tags.",
+    ">",
+    "> Use <count> tags after each step.",
+    "",
+    "后面还有一个 <step>。"
+  ].join("\n");
+  const fenced = escapeLiteralHtmlTags(formatPromptBlocks(article).content);
+  assert.ok(fenced.content.includes("```text\nBegin by enclosing all thoughts within <thinking> tags.\n\nUse <count> tags after each step.\n```"));
+  assert.ok(fenced.content.includes("后面还有一个 \\<step>。"));
+  assert.equal(fenced.escaped, 1);
 }
 
 {

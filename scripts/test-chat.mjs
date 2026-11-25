@@ -84,6 +84,7 @@ assert.equal(estimateChatUsage([{ content: "123456" }], "123").totalTokens, 3);
     status: index === 19 ? "error" : "done"
   }));
   const messages = buildChatRequestMessages("测试", managedArticle, history);
+  assert.ok(messages[0].content.includes("例子和类比不是每次都要"));
   assert.ok(messages[0].content.includes("真正的文章内容。"));
   assert.ok(messages[0].content.includes("Original sentence.（内联中文翻译。）"));
   assert.ok(!messages[0].content.includes("knowflow-translation"));
@@ -101,6 +102,11 @@ assert.equal(estimateChatUsage([{ content: "123456" }], "123").totalTokens, 3);
   );
   assert.ok(withVaultSearch[0].content.includes("来自 Vault Search"));
   assert.ok(withVaultSearch[0].content.includes("Articles/Related.md"));
+  assert.ok(!withVaultSearch[0].content.includes("检索到的公开资料"));
+  const withExternal = buildChatRequestMessages("测试", managedArticle, [], "", "[O1 规格](https://example.com)\n参数规模");
+  assert.ok(withExternal[0].content.includes("检索到的公开资料"));
+  assert.ok(withExternal[0].content.includes("参数规模"));
+  assert.ok(!withExternal[0].content.includes("来自 Vault Search"));
 }
 
 const thread = {

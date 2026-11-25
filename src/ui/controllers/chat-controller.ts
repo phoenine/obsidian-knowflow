@@ -3,7 +3,7 @@ import type { App } from "obsidian";
 import type KnowFlowPlugin from "../../main";
 import type { ChatMessage, ChatThread, ChatUsage, ViewContext } from "../../types";
 import { prepareArticleForAi } from "../../services/clipping/managed-content";
-import { parseFreshnessRequest, renderFreshnessReview } from "../../services/chat/freshness-chat";
+import { parseArticleUpdateReply, parseFreshnessRequest, renderFreshnessApplied, renderFreshnessReview } from "../../services/chat/freshness-chat";
 import type { FreshnessReview } from "../../services/learning/article-freshness";
 import { resolveDeepSeekSearchKey } from "../../services/search/public-evidence";
 
@@ -65,6 +65,9 @@ export class ChatController {
     try {
       const result = handlers.replay ? null : await this.handleFreshness(question, thread, file, assistantMessage, () => {
         if (this.activeThread === thread) handlers.onContent(assistantMessage);
+      }, (delta) => {
+        assistantMessage.reasoning += delta;
+        if (this.activeThread === thread) handlers.onReasoning(assistantMessage);
       });
       if (result !== null) {
         assistantMessage.content = result;
@@ -113,6 +116,16 @@ export class ChatController {
     }
     const attachedContext = await this.loadAttachedContext(handlers.contextPaths ?? []);
     retrievedContext = [attachedContext, retrievedContext].filter(Boolean).join("\n\n");
+    const searchKey = this.plugin.settings
+      ? resolveDeepSeekSearchKey(this.plugin.settings, this.app.secretStorage)
+      : "";
+    const externalContext = searchKey && this.plugin.ai.externalContextForChat
+      ? await this.plugin.ai.externalContextForChat(question, content, searchKey, () => {
+        assistantMessage.content = "正在检索";
+        if (this.activeThread === thread) handlers.onContent(assistantMessage);
+      })
+      : "";
+    assistantMessage.content = "";
     assistantMessage.status = "streaming";
     return this.plugin.ai.answerStream(
       thread.contextLabel,
@@ -129,7 +142,8 @@ export class ChatController {
           if (this.activeThread === thread) handlers.onReasoning(assistantMessage);
         },
         onUsage: () => {},
-        retrievedContext
+        retrievedContext,
+        externalContext
       }
     );
   }
@@ -139,20 +153,40 @@ export class ChatController {
     thread: ChatThread,
     file: TFile | null,
     message: ChatMessage,
-    refreshMessage: () => void
+    refreshMessage: () => void,
+    onReasoning: (delta: string) => void
   ): Promise<string | null> {
     const request = parseFreshnessRequest(question);
-    if (!request) return null;
-    if (request.kind === "classify" && (!file || !await this.plugin.ai.isFreshnessRequest(question))) return null;
+    const pending = this.pendingFreshness.get(thread);
+    const reviewIsCurrent = Boolean(pending && thread.messages.at(-3)?.id === pending.messageId);
+    const reply = reviewIsCurrent && pending && file && pending.file === file && pending.review.path === file.path
+      ? parseArticleUpdateReply(question) : null;
+    if (!request && !reply) {
+      if (pending) this.pendingFreshness.delete(thread);
+      return null;
+    }
+    if (request?.kind === "classify" && (!file || !await this.plugin.ai.isFreshnessRequest(question))) return null;
     message.kind = "article-freshness";
     if (!file || file.extension !== "md" || file.path !== thread.filePath
       || this.app.vault.getAbstractFileByPath(file.path) !== file) {
       return "请打开要检查的文章，并在该文章的对话中发起时效检查。";
     }
-    const progress = (stage: string) => {
-      message.content = `${stage}…`;
+    const progress = (stage: string, detail?: string) => {
+      message.content = detail ? `${stage} ${detail}` : stage;
       refreshMessage();
     };
+    if (reply === "decline") {
+      this.pendingFreshness.delete(thread);
+      return "原文保持不变。";
+    }
+    if (reply === "accept" && pending) {
+      return this.applyFreshnessUpdates(
+        file, thread, pending.review,
+        new Set(pending.review.updates.map((_, index) => index)),
+        progress
+      );
+    }
+    if (!request) return null;
 
     if (request.kind === "apply") {
       const pending = this.pendingFreshness.get(thread);
@@ -161,19 +195,12 @@ export class ChatController {
       }
       const { review } = pending;
       const selected = new Set(request.numbers === "all"
-        ? review.corrections.map((_, index) => index)
+        ? review.updates.map((_, index) => index)
         : request.numbers.map((number) => number - 1));
-      if ([...selected].some((index) => index < 0 || index >= review.corrections.length)) {
-        return `当前有 ${review.corrections.length} 条修订。请输入列表里的编号。`;
+      if ([...selected].some((index) => index < 0 || index >= review.updates.length)) {
+        return `当前有 ${review.updates.length} 条更新。请输入列表里的编号。`;
       }
-      progress("正在应用修订");
-      await this.plugin.freshness.apply(file, review, selected);
-      this.pendingFreshness.delete(thread);
-      const applied = { ...review, corrections: review.corrections.filter((_, index) => selected.has(index)) };
-      const result = renderFreshnessReview(file.basename, applied, selected.size);
-      return selected.size < review.corrections.length
-        ? `${result}\n\n如需继续应用其他修订，请基于更新后的正文重新检查。`
-        : result;
+      return this.applyFreshnessUpdates(file, thread, review, selected, progress);
     }
 
     this.pendingFreshness.delete(thread);
@@ -183,16 +210,30 @@ export class ChatController {
       file,
       this.plugin.settings.chatModel,
       resolveDeepSeekSearchKey(this.plugin.settings, this.app.secretStorage),
-      progress
+      progress,
+      onReasoning
     );
-    if (!review.corrections.length || !thread.messages.includes(message)) return renderFreshnessReview(file.basename, review);
+    if (!review.updates.length || !thread.messages.includes(message)) return renderFreshnessReview(file.basename, review);
     if (request.kind === "check-and-update" && !requireConfirmation && !this.plugin.settings.confirmBeforeWrite) {
       progress("正在更新正文");
-      await this.plugin.freshness.apply(file, review, new Set(review.corrections.map((_, index) => index)));
-      return renderFreshnessReview(file.basename, review, review.corrections.length);
+      await this.plugin.freshness.apply(file, review, new Set(review.updates.map((_, index) => index)));
+      return renderFreshnessApplied(review.updates.length, 0);
     }
     this.pendingFreshness.set(thread, { file, review, messageId: message.id });
     return renderFreshnessReview(file.basename, review);
+  }
+
+  private async applyFreshnessUpdates(
+    file: TFile,
+    thread: ChatThread,
+    review: FreshnessReview,
+    selected: Set<number>,
+    progress: (stage: string) => void
+  ): Promise<string> {
+    progress("正在更新原文");
+    await this.plugin.freshness.apply(file, review, selected);
+    this.pendingFreshness.delete(thread);
+    return renderFreshnessApplied(selected.size, review.updates.length - selected.size);
   }
 
   findPreviousUserMessage(thread: ChatThread, assistantId: string): ChatMessage | null {

@@ -685,10 +685,12 @@ export class KnowFlowSidebarView extends ItemView {
   }
 
   private renderChatThread(root: HTMLElement, thread: ChatThread): void {
-    const content = renderShell(root, "", "Ready", () => {
+    const topic = thread.messages.find((message) => message.role === "user")?.content.replace(/\s+/g, " ").trim() ?? "";
+    const articleTitle = thread.contextLabel && thread.contextLabel !== "Current" ? thread.contextLabel : "";
+    const content = renderShell(root, articleTitle || topic || "对话", "", () => {
       this.chatController.activeThread = null;
       this.render();
-    });
+    }, articleTitle && topic && topic !== articleTitle ? topic : "");
     this.streamingAnswerEl = null;
     this.streamingReasoningEl = null;
 
@@ -739,18 +741,9 @@ export class KnowFlowSidebarView extends ItemView {
         gap: "8px"
       });
 
-      const reasoning = assistant.createEl("details", { cls: "kf-thinking" });
-      setStyles(reasoning, {
-        backgroundColor: "var(--background-secondary)",
-        border: "1px solid color-mix(in srgb, var(--interactive-accent) 22%, var(--background-modifier-border))",
-        borderRadius: "8px",
-        display: message.reasoning ? "block" : "none",
-        padding: "9px 11px"
-      });
-      reasoning.createEl("summary", { text: "Thought process" });
-      const reasoningBody = reasoning.createDiv();
-      setStyles(reasoningBody, { fontSize: "12px", lineHeight: "1.5", marginTop: "7px", whiteSpace: "pre-wrap" });
-      reasoningBody.textContent = message.reasoning;
+      const thinking = message.status === "pending" || message.status === "streaming"
+        ? renderThinkingLine(assistant, message.reasoning)
+        : null;
 
       const answer = assistant.createDiv({ cls: "kf-answer" });
       setStyles(answer, {
@@ -767,13 +760,15 @@ export class KnowFlowSidebarView extends ItemView {
         void this.renderMarkdownSummary(answer, message.content, thread.filePath ?? "");
       } else if (message.status === "error") {
         text(answer, `生成失败：${message.error ?? "未知错误"}`, "kf-muted");
+      } else if (message.kind === "article-freshness") {
+        renderFreshnessStatus(answer, message.content || "正在检查");
       } else {
         answer.textContent = message.content || "正在等待模型响应…";
       }
 
       if (message.status === "pending" || message.status === "streaming") {
         this.streamingAnswerEl = answer;
-        this.streamingReasoningEl = reasoningBody;
+        this.streamingReasoningEl = thinking;
       }
 
       if (message.completedAt) {
@@ -995,13 +990,21 @@ export class KnowFlowSidebarView extends ItemView {
         this.composerDraft = "";
       },
       onContent: (message) => {
-        if (this.streamingAnswerEl) this.streamingAnswerEl.textContent = message.content;
+        if (!this.streamingAnswerEl) return;
+        if (message.kind === "article-freshness" && message.status !== "done" && message.status !== "error") {
+          renderFreshnessStatus(this.streamingAnswerEl, message.content || "正在检查");
+          return;
+        }
+        this.streamingAnswerEl.textContent = message.content;
       },
       onReasoning: (message) => {
-        if (!this.streamingReasoningEl) return;
-        const details = this.streamingReasoningEl.closest("details") as HTMLElement | null;
-        if (details) details.style.display = "block";
-        this.streamingReasoningEl.textContent = message.reasoning;
+        const line = this.streamingReasoningEl?.closest<HTMLElement>(".kf-thinking-line");
+        const text = this.streamingReasoningEl?.querySelector<HTMLElement>(".kf-thinking-text");
+        if (!line || !text) return;
+        line.style.display = "flex";
+        text.textContent = message.reasoning.replace(/\s+/g, " ").trim();
+        const viewport = text.parentElement;
+        if (viewport) viewport.scrollLeft = viewport.scrollWidth;
       },
       useVaultSearch: this.vaultSearchEnabled,
       contextPaths: Array.from(this.chatContextPaths),
@@ -1134,43 +1137,12 @@ export class KnowFlowSidebarView extends ItemView {
 
   private async runPipeline(file: TFile): Promise<void> {
     if (this.pipelineStates.get(file.path)?.running) return;
-    this.pipelineStates.set(file.path, {
-      completed: [],
-      skipped: [],
-      stepInfo: {},
-      currentStep: null,
-      error: null,
-      failedStep: null,
-      running: true,
-      visible: true
-    });
+    this.pipelineStates.set(file.path, { running: true, error: null });
     this.render();
     try {
-      await this.plugin.pipeline.process(file, (step, status, info) => {
-        const state = this.pipelineStates.get(file.path);
-        if (!state) return;
-        if (info) state.stepInfo[step] = info;
-        if (status === "active") {
-          if (state.currentStep && state.currentStep !== step && !state.completed.includes(state.currentStep)) {
-            state.completed.push(state.currentStep);
-          }
-          state.currentStep = step;
-        } else {
-          const target = status === "completed" ? state.completed : state.skipped;
-          if (!target.includes(step)) target.push(step);
-          if (state.currentStep === step) state.currentStep = null;
-        }
-        state.running = true;
-        state.visible = true;
-        this.pipelineStates.set(file.path, state);
-        this.render();
-      });
+      await this.plugin.pipeline.process(file);
       const state = this.pipelineStates.get(file.path);
       if (state) {
-        if (state.currentStep && !state.completed.includes(state.currentStep)) {
-          state.completed.push(state.currentStep);
-        }
-        state.currentStep = null;
         state.running = false;
         this.pipelineStates.set(file.path, state);
       }
@@ -1178,10 +1150,8 @@ export class KnowFlowSidebarView extends ItemView {
     } catch (error) {
       const state = this.pipelineStates.get(file.path);
       if (state) {
-        state.failedStep = state.currentStep;
         state.error = error instanceof Error ? error.message : String(error);
         state.running = false;
-        state.visible = true;
         this.pipelineStates.set(file.path, state);
       }
       this.render();
@@ -1350,11 +1320,6 @@ export class KnowFlowSidebarView extends ItemView {
     return this.plugin.store.isLearned(path);
   }
 
-  private getArticleReadingValue(file: TFile): number {
-    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-    return this.getFrontmatterReadingValueNumber(frontmatter) ?? 0;
-  }
-
   private getFrontmatterReadingValueNumber(frontmatter: Record<string, unknown> | undefined): number | null {
     const value = frontmatter?.["阅读价值"];
     if (typeof value === "number") return value;
@@ -1489,6 +1454,93 @@ export class KnowFlowSidebarView extends ItemView {
     });
   }
 
+}
+
+function renderThinkingLine(parent: HTMLElement, reasoning: string): HTMLElement {
+  const line = parent.createDiv({ cls: "kf-thinking-line" });
+  setStyles(line, {
+    alignItems: "center",
+    color: "var(--text-faint)",
+    display: reasoning ? "flex" : "none",
+    fontFamily: "var(--font-monospace)",
+    fontSize: "11px",
+    fontStyle: "italic",
+    gap: "8px",
+    lineHeight: "1.4",
+    minWidth: "0"
+  });
+  const label = line.createSpan({ text: "思考中" });
+  setStyles(label, {
+    color: "var(--text-accent)",
+    flex: "0 0 auto",
+    fontStyle: "normal",
+    fontWeight: "600"
+  });
+  const viewport = line.createDiv();
+  setStyles(viewport, {
+    flex: "1",
+    maskImage: "linear-gradient(90deg, transparent, #000 18px)",
+    minWidth: "0",
+    overflow: "hidden",
+    whiteSpace: "nowrap"
+  });
+  viewport.createSpan({ cls: "kf-thinking-text", text: reasoning.replace(/\s+/g, " ").trim() });
+  window.requestAnimationFrame(() => {
+    if (viewport.isConnected) viewport.scrollLeft = viewport.scrollWidth;
+  });
+  return line;
+}
+
+function renderFreshnessStatus(parent: HTMLElement, label: string): void {
+  let line = parent.querySelector<HTMLElement>(":scope > .kf-status-line");
+  if (!line) {
+    parent.replaceChildren();
+    line = parent.createDiv({ cls: "kf-status-line" });
+    setStyles(line, {
+      color: "var(--text-muted)",
+      display: "flex",
+      flexDirection: "column",
+      gap: "8px"
+    });
+    const words = line.createDiv();
+    setStyles(words, { alignItems: "center", display: "flex" });
+    words.createSpan({ cls: "kf-status-label" });
+    const dots = words.createSpan();
+    setStyles(dots, { display: "inline-flex", marginLeft: "1px" });
+    for (let index = 0; index < 3; index += 1) {
+      const dot = dots.createSpan({ text: "." });
+      setStyles(dot, { display: "inline-block", fontWeight: "600" });
+      dot.animate(
+        [
+          { opacity: 0.15, transform: "translateY(0px)" },
+          { opacity: 1, transform: "translateY(-2px)" },
+          { opacity: 0.15, transform: "translateY(0px)" }
+        ],
+        { duration: 1000, delay: index * 160, iterations: Infinity, easing: "ease-in-out" }
+      );
+    }
+    const track = line.createDiv();
+    setStyles(track, {
+      background: "var(--background-modifier-border)",
+      borderRadius: "999px",
+      height: "2px",
+      overflow: "hidden",
+      width: "88px"
+    });
+    const glow = track.createDiv();
+    setStyles(glow, {
+      background: "var(--interactive-accent)",
+      borderRadius: "999px",
+      height: "100%",
+      width: "42%"
+    });
+    glow.animate(
+      [{ transform: "translateX(-130%)" }, { transform: "translateX(280%)" }],
+      { duration: 1400, iterations: Infinity, easing: "ease-in-out" }
+    );
+  }
+  const labelEl = line.querySelector(".kf-status-label");
+  if (labelEl) labelEl.textContent = label;
 }
 
 function startOfLocalWeek(date: Date): Date {

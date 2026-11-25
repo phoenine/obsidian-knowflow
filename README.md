@@ -18,15 +18,15 @@ Clipping → 整理 → 总结 → 知识点 → Quiz → 学习状态 → 每�
 
 - 整理当前 Markdown 剪藏并修复常见格式问题。
 - 补全 Frontmatter、识别代码块并处理文章分类。
-- 仅为正文明确为全英文的文章生成段内中文翻译；中文、混合语言和语言不确定的文章跳过翻译，独立链接与元信息不参与翻译。
+- 开启翻译后，按段落交给模型判断：整段中文跳过，整段非中文译成简体中文。代码、公式、独立链接、元信息和已有生成内容不参与。
 - 生成 AI 摘要、阅读价值和文章分类建议。
-- 生成 Mermaid 知识图谱和结构化知识点。
+- 生成带原文证据的分组知识点。
 - 生成、保存和作答 Markdown Quiz。
 - 记录文章学习状态并展示 Task Overview。
 - 从全局 Quiz 题库生成每日复习试卷。
-- 基于当前文章上下文进行 Chat，并可保存会话。默认仅显示底部「与文章对话」，点开后即可输入。收起时会保留草稿和会话，底栏会提示进行中的回复是否完成。
+- 基于当前文章上下文进行 Chat，并可主动保存会话。回答先依据笔记，必要时补上标明为补充的判断；例子和类比只在有助于理解时出现。笔记缺少会变化的专业事实时，才检索公开资料。默认仅显示底部「与文章对话」，点开后即可输入。收起时会保留草稿和会话，底栏会提示进行中的回复是否完成。
 - 使用独立 embedding 模型发现 Relevant Notes，并为 Chat 提供可开关的 Vault Search。
-- 摘要、文章整理、翻译、知识骨架、知识点、Quiz 和问答通过具名 Skill 执行。
+- 整理、摘要、翻译、知识点、Quiz 和时效检查通过具名 Skill 执行。文章问答使用插件内的对话提示词。
 - 主动检索公开资料，核对并更新文章中的时效事实。
 - 通过标题术语和语义索引筛选相关文章。
 
@@ -49,7 +49,7 @@ KnowFlow 可以处理当前打开的 Markdown 剪藏，并尽量以小范围修�
 - 修复标题层级、伪标题、列表、表格、引用和代码围栏。
 - 识别「提示词」「提示词节选」等标签，用反引号 `text` 围栏保留可复制提示词，并报告处理数量。提示词位置的旧文本围栏会转换为统一格式。
 - 写入前检查 YAML、围栏、提示词覆盖及媒体目标是否保留。已有的表格和本地媒体疑点随结果提示。
-- 保护 Obsidian wikilink、embed、callout 和 Mermaid 内容。
+- 保护已有的 wikilink、embed、callout，以及代码、数学和注释围栏。
 - 根据文章模板补全 Frontmatter。
 - 将 AI 生成内容排除在后续 AI 输入之外，减少重复 token 和旧结果锚定。
 - 支持先确认再写入，以及自定义分类目录。
@@ -60,7 +60,6 @@ KnowFlow 可以处理当前打开的 Markdown 剪藏，并尽量以小范围修�
 
 - AI Summary
 - 阅读价值与分类建议
-- Mermaid 知识图谱
 - 分组知识点及原文证据
 - 单选 Quiz 与答案解析
 
@@ -68,11 +67,11 @@ KnowFlow 可以处理当前打开的 Markdown 剪藏，并尽量以小范围修�
 
 ### 文章维护
 
-`clipping-update` 的交付是整篇笔记的阅读体验。网页剪藏进入 Obsidian 后，标题、段落、列表、对比结构和可复制示例可能被压缩或变形。Agent 通读全文，是为了结合上下文恢复这些关系，保留原意，让读者能浏览、比较和复制。流程完成或 Markdown 语法通过只是技术条件。整理后的正文应能直接作为 AI Summary 的输入，复用已有的清理结果。
+`clipping-update` 的交付是整篇笔记的阅读体验。网页剪藏进入 Obsidian 后，标题、段落、列表、对比结构和可复制示例可能被压缩或变形。插件先恢复已经能确定的结构，再让模型结合候选上下文确认拿不准的标题和代码，保留原意，让读者能浏览、比较和复制。整理后的正文应能直接作为 AI Summary 的输入，复用已有的清理结果。
 
-- **内置 Skills**。规则存于项目的 [skills 目录](skills/README.md)，构建时随插件打包。`clipping-update` 通读笔记，按 Obsidian Markdown 恢复剪藏丢失的章节、段落、列表、对比内容和可复制示例。Agent 返回基于原文位置的结构编辑，插件负责应用并保存。执行时兼容 Vault 中现有的同名 `skills/<名称>/SKILL.md`，也兼容旧版 `clipping-repair` 规则文件。
+- **内置 Skills**。规则存于项目的 [skills 目录](skills/README.md)，构建时随插件打包。整理时插件先处理已经能确定的结构，再把拿不准的标题和代码按每批最多 4 条交给模型确认或保留。插件负责校验和写入。Vault 里的 `skills/<名称>/SKILL.md` 会替换同名内置规则；只有 `clipping-update` 是把 Vault 规则或旧的 `clipping-repair` 接在内置规则后面。
 - **生成文章摘要**。每次读取当前笔记一次，短文使用清理后的全文，长文在本地按章抽取片段，一次发给模型。卡片流式展示摘要正文，完成后按核心观点和章节梳理渲染，并按阅读评分显示推荐动作。模型没有返回摘要内容时，使用相同输入重试一次。保存时把摘要和可用的摘要属性合并到最新笔记，保留生成期间的正文编辑。
-- **文章时效检查**。打开文章后，在 KnowFlow 对话中输入「检查当前文章是否过时」。Agent 通过 [DeepSeek Search](https://api-docs.deepseek.com/guides/search/) 查找公开资料，用 Chat model 核查，返回带来源的编号修订或删除建议。回复「应用第 2 条」或「应用全部」可将对应修订写入当前对话绑定的文章。直接发送「检查并更新这篇文章」时，开启 `Confirm before write` 会先等待确认。DeepSeek Search 可复用已配置的官方 API Key，也可在 `Settings → AI Models → DeepSeek Search → Configure` 设置独立密钥。搜索及必要的网页抓取按接口请求计费。单次检查覆盖正文前 24,000 个字符，最多提出五项修订。
+- **文章知识检查**。打开文章后，在 KnowFlow 对话中输入「检查当前文章是否过时」。Chat model 按章节阅读全文，用 [DeepSeek Search](https://api-docs.deepseek.com/guides/search/) 核对已有说法，并查找会影响理解的遗漏进展。报告只列出可以更新的条目，并询问是否更新原文。回复「更新」后，修改写入对应章节，增加的内容用 `> [!note]` 标出。回复「应用第 2 条」只写入选中的项，回复「不用」则保持原文。直接发送「检查并更新这篇文章」时，开启 `Confirm before write` 会先等待确认。DeepSeek Search 可复用已配置的官方 API Key，也可在 `Settings → AI Models → DeepSeek Search → Configure` 设置独立密钥。搜索及必要的网页抓取按接口请求计费。
 - **相关文章**。Relevant Notes 先过滤弱语义匹配，再合并具体标题术语的匹配结果，最多展示五篇。共同标签只参与排序。每篇显示可点击的标题、加入 Chat 按钮和最多两行的「简要描述」。
 
 ### Task Overview
@@ -118,7 +117,7 @@ Vault/
 
 ## AI 模型配置
 
-摘要、知识图谱、Pipeline、Chat、Quiz 和 embedding 可以分别配置模型。支持：
+摘要、知识点、整理、Chat、Quiz 和 embedding 可以分别配置模型。设置里的 Knowledge Points model 用来生成知识点。支持：
 
 - OpenAI-compatible Cloud API
 - Ollama
@@ -146,7 +145,6 @@ Relevant Notes 与 Vault Search 共用本地语义索引。先在 `AI Models` �
 
 - `KnowFlow: Open sidebar`
 - `KnowFlow: Process current clipping`
-- `KnowFlow: Generate current article knowledge map`
 - `KnowFlow: Refresh sidebar`
 
 ## 本地安装
