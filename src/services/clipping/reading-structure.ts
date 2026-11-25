@@ -23,7 +23,16 @@ export function repairTableDividers(content: string): string {
 function tableCells(line: string): string[] {
   const trimmed = line.trim();
   if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return [];
-  return trimmed.slice(1, -1).split(/(?<!\\)\|/).map((cell) => cell.trim());
+  const body = trimmed.slice(1, -1);
+  const cells: string[] = [];
+  let start = 0;
+  for (let index = 0; index < body.length; index += 1) {
+    if (body[index] !== "|" || body[index - 1] === "\\") continue;
+    cells.push(body.slice(start, index).trim());
+    start = index + 1;
+  }
+  cells.push(body.slice(start).trim());
+  return cells;
 }
 
 function tableRow(cells: string[]): string {

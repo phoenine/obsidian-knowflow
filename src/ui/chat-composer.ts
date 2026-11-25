@@ -40,7 +40,7 @@ export function renderCollapsedChatComposer(
   restoreFocus: boolean,
   onExpand: () => void
 ): void {
-  root.style.paddingBottom = "0";
+  root.setCssStyles({ paddingBottom: "0" });
   const composer = createComposer(root, "6px 12px 4px");
   const toggle = setStyles(button(composer, "", onExpand), {
     gap: "7px",

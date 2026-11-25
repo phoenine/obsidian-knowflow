@@ -875,13 +875,9 @@ export class KnowFlowSidebarView extends ItemView {
     const flex = content.style.flex;
     const minHeight = content.style.minHeight;
     const height = content.style.height;
-    content.style.flex = "0 0 auto";
-    content.style.minHeight = "0";
-    content.style.height = "auto";
+    content.setCssStyles({ flex: "0 0 auto", minHeight: "0", height: "auto" });
     const cardsHeight = content.scrollHeight;
-    content.style.flex = flex;
-    content.style.minHeight = minHeight;
-    content.style.height = height;
+    content.setCssStyles({ flex, minHeight, height });
     const headerHeight = root.querySelector<HTMLElement>(".kf-header")?.offsetHeight ?? 0;
     const composerHeight = this.composerExpanded ? composer.offsetHeight : this.measureExpandedComposer(root);
     if (composerHeight <= 0) return false;
@@ -1000,7 +996,7 @@ export class KnowFlowSidebarView extends ItemView {
         const line = this.streamingReasoningEl?.closest<HTMLElement>(".kf-thinking-line");
         const text = this.streamingReasoningEl?.querySelector<HTMLElement>(".kf-thinking-text");
         if (!line || !text) return;
-        line.style.display = "flex";
+        line.setCssStyles({ display: "flex" });
         text.textContent = message.reasoning.replace(/\s+/g, " ").trim();
         const viewport = text.parentElement;
         if (viewport) viewport.scrollLeft = viewport.scrollWidth;

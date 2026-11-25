@@ -418,7 +418,7 @@ function applyUpdates(content: string, updates: FreshnessUpdate[], checkedOn: st
 function emphasizeArticleProse(value: string): string {
   const text = value.replace(/\s+/g, " ").trim().replace(/^#+\s*/, "");
   const marked = text.replace(/「([^」]+)」/g, "**$1**");
-  const sentences = marked.split(/(?<=[。！？])\s*/).filter(Boolean);
+  const sentences = marked.match(/[^。！？]*[。！？]|[^。！？]+$/g)?.map((sentence) => sentence.trimStart()) ?? [];
   if (sentences.length >= 2 && !sentences[0].includes("**")) sentences[0] = `**${sentences[0]}**`;
   return sentences.join("");
 }

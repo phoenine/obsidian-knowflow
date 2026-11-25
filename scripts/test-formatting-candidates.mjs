@@ -59,6 +59,12 @@ const { escapeLiteralHtmlTags } = await import(pathToFileURL(join(tempDir, "lite
   assert.equal(repairTableDividers([header, divider, row].join("\n")), [header, "| --- | --- | --- | --- |", row].join("\n"));
   const incomplete = [header, divider, "| 模型 A | 0.644 |"].join("\n");
   assert.equal(repairTableDividers(incomplete), incomplete);
+  const escapedHeader = "| 模型 A \\| B | 结果 |";
+  const escapedRow = "| 模型 C \\| D | 0.833 |";
+  assert.equal(
+    repairTableDividers([escapedHeader, "| --- |", escapedRow].join("\n")),
+    [escapedHeader, "| --- | --- |", escapedRow].join("\n")
+  );
 }
 
 {

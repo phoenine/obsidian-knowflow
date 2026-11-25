@@ -37,14 +37,12 @@ export function renderQuizResultsView(root: HTMLElement, props: QuizResultsViewP
   const regenerate = button(actions, props.pending ? t("generating") : t("regenerateQuiz"), props.onRegenerate);
   regenerate.disabled = props.pending;
   if (props.pending) {
-    regenerate.style.cursor = "default";
-    regenerate.style.opacity = "0.72";
+    regenerate.setCssStyles({ cursor: "default", opacity: "0.72" });
   }
   const retake = button(actions, retakeLabel, props.onRetake, true);
   const canRetake = !props.pending && props.quiz?.total !== 0;
   retake.disabled = !canRetake;
   if (!canRetake) {
-    retake.style.cursor = "default";
-    retake.style.opacity = "0.72";
+    retake.setCssStyles({ cursor: "default", opacity: "0.72" });
   }
 }

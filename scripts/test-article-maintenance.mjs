@@ -15,6 +15,7 @@ const { outputFiles } = await esbuild.build({
       export { readLegacyRepairSkill } from "./src/services/clipping/repair-skill";
       export { prepareArticleForAi } from "./src/services/clipping/managed-content";
       export { ArticleFreshness } from "./src/services/learning/article-freshness";
+      export { renderFreshnessReview } from "./src/services/chat/freshness-chat";
       export { findPublicEvidence, resolveDeepSeekSearchKey } from "./src/services/search/public-evidence";
     `,
     resolveDir: process.cwd()
@@ -50,7 +51,7 @@ const { outputFiles } = await esbuild.build({
     }
   }]
 });
-const { TFile, SkillStore, NoteOperationCoordinator, readLegacyRepairSkill, prepareArticleForAi, ArticleFreshness, SkillRunner, rankRelevantNotes, AiService, prepareSummarySource, SummaryNoteService, findPublicEvidence, resolveDeepSeekSearchKey } =
+const { TFile, SkillStore, NoteOperationCoordinator, readLegacyRepairSkill, prepareArticleForAi, ArticleFreshness, renderFreshnessReview, SkillRunner, rankRelevantNotes, AiService, prepareSummarySource, SummaryNoteService, findPublicEvidence, resolveDeepSeekSearchKey } =
   await import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].contents).toString("base64")}`);
 
 const files = new Map();
@@ -154,6 +155,9 @@ assert.deepEqual(requests, ["analyze", "search", "judge"]);
 assert.deepEqual(review.updates.map((item) => item.after), ["默认版本是 v2", "默认限制为 75。"]);
 assert.equal(review.verdict, "局部内容需要更新");
 assert.equal(writes, 0, "checking must leave the note untouched");
+const twoSentenceUpdate = { ...review.updates[0], after: "默认版本是 v2。 现有配置可以沿用。" };
+assert.ok(renderFreshnessReview("Source", { ...review, updates: [twoSentenceUpdate] })
+  .includes("**默认版本是 v2。**现有配置可以沿用。"));
 contents.set(file, original + "\r\n人工补充");
 await assert.rejects(() => freshness.apply(file, review, new Set([0])), /重新检查/);
 assert.match(contents.get(file), /人工补充$/);

@@ -177,7 +177,6 @@ export default class KnowFlowPlugin extends Plugin {
   onunload(): void {
     for (const timer of this.semanticRefreshTimers.values()) window.clearTimeout(timer);
     this.semanticRefreshTimers.clear();
-    this.app.workspace.detachLeavesOfType(KNOWFLOW_VIEW_TYPE);
   }
 
   private scheduleSemanticRefresh(file: TFile): void {

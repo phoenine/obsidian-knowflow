@@ -64,7 +64,7 @@ export function renderSummaryCard(content: HTMLElement, props: SummaryCardProps)
     });
   });
   if (!props.summary && !props.summaryError && !props.summaryPending) {
-    refreshButton.style.display = "none";
+    refreshButton.hide();
   }
   if (props.summaryPending) {
     refreshButton.disabled = true;
@@ -185,8 +185,7 @@ export function renderQuizButton(parent: HTMLElement, pending: boolean, hasAttem
     setStyles(quiz, { color: "var(--interactive-accent)", cursor: "default", opacity: "1" });
     const icon = quiz.querySelector("svg");
     if (icon) {
-      icon.style.transformBox = "fill-box";
-      icon.style.transformOrigin = "center";
+      icon.setCssStyles({ transformBox: "fill-box", transformOrigin: "center" });
       icon.animate(
         [{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }],
         { duration: 900, iterations: Infinity }
@@ -215,8 +214,7 @@ function renderOrganizeButton(parent: HTMLElement, props: ArticleMaintenanceProp
     setStyles(organize, { color: "var(--interactive-accent)", cursor: "default", opacity: "1" });
     const icon = organize.querySelector("svg");
     if (icon) {
-      icon.style.transformBox = "fill-box";
-      icon.style.transformOrigin = "center";
+      icon.setCssStyles({ transformBox: "fill-box", transformOrigin: "center" });
       icon.animate(
         [{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }],
         { duration: 900, iterations: Infinity }

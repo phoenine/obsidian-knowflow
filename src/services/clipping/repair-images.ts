@@ -175,7 +175,7 @@ function resolveLocalImage(app: App, notePath: string, target: string): { file: 
 
 async function readSourceImages(source: URL): Promise<SourceImage[]> {
   try {
-    const result = await withTimeout(requestUrl({ url: source.href, headers: { Accept: "text/html", "User-Agent": navigator.userAgent }, throw: false }), 8000, "原文读取超时");
+    const result = await withTimeout(requestUrl({ url: source.href, headers: { Accept: "text/html" }, throw: false }), 8000, "原文读取超时");
     if (result.status < 200 || result.status >= 300 || !result.text || result.text.length > 5_000_000) return [];
     const doc = new DOMParser().parseFromString(result.text, "text/html");
     const root = doc.querySelector("#js_content") ?? doc.querySelector('[itemprop="articleBody"], .markdown-body, article, main');
@@ -268,7 +268,6 @@ async function downloadImage(url: URL, source: URL | undefined): Promise<ImageBy
     try {
       const result = await withTimeout(requestUrl({ url: url.href, throw: false, headers: {
         Accept: "image/avif,image/webp,image/*,*/*;q=0.7",
-        "User-Agent": navigator.userAgent,
         ...(referer ? { Referer: referer } : {})
       } }), 8000, "图片下载超时");
       if (result.status < 200 || result.status >= 300 || !result.arrayBuffer?.byteLength || result.arrayBuffer.byteLength > IMAGE_LIMIT) continue;

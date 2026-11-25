@@ -56,7 +56,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: t("settingsTitle") });
+    new Setting(containerEl).setName(t("settingsTitle")).setHeading();
     this.renderTabs(containerEl);
 
     if (this.activeTab === "basic") {

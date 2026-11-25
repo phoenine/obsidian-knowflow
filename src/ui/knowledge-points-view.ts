@@ -147,8 +147,7 @@ function knowledgeShell(root: HTMLElement, props: KnowledgePointsOverviewProps):
       update.disabled = true;
       const icon = update.querySelector("svg");
       if (icon) {
-        icon.style.transformBox = "fill-box";
-        icon.style.transformOrigin = "center";
+        icon.setCssStyles({ transformBox: "fill-box", transformOrigin: "center" });
         icon.animate(
           [{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }],
           { duration: 900, iterations: Infinity }
