@@ -5,17 +5,18 @@ import type { QuizSession } from "../types";
 
 interface QuizTestViewProps {
   session: QuizSession;
+  submitting: boolean;
   sourceLabel?: string;
   onOpenSource?: () => void;
   onBack: () => void;
   onSelect: (key: string) => void;
-  onSubmit: () => Promise<void>;
+  onSubmit: () => void;
   onNext: () => void;
   onFinish: () => void;
 }
 
 export function renderQuizTestView(root: HTMLElement, props: QuizTestViewProps): void {
-  const { session } = props;
+  const { session, submitting } = props;
   const content = renderShell(root, "Quiz", `${session.index + 1}/${session.questions.length}`, props.onBack);
   const question = session.questions[session.index];
   const card = section(content, "kf-quiz-test");
@@ -60,7 +61,7 @@ export function renderQuizTestView(root: HTMLElement, props: QuizTestViewProps):
       border: `1px solid ${isCorrect ? "var(--interactive-accent)" : "color-mix(in srgb, var(--interactive-accent) 22%, var(--background-modifier-border))"}`,
       borderRadius: "8px",
       color: "var(--text-normal)",
-      cursor: session.submitted ? "default" : "pointer",
+      cursor: session.submitted || submitting ? "default" : "pointer",
       display: "flex",
       fontSize: "13px",
       height: "auto",
@@ -82,7 +83,7 @@ export function renderQuizTestView(root: HTMLElement, props: QuizTestViewProps):
       textAlign: "left",
       whiteSpace: "normal"
     });
-    optionButton.disabled = session.submitted;
+    optionButton.disabled = session.submitted || submitting;
     optionButton.addEventListener("click", () => props.onSelect(option.key));
   }
 
@@ -131,7 +132,8 @@ export function renderQuizTestView(root: HTMLElement, props: QuizTestViewProps):
   const actions = row(card, "kf-actions");
   applyActionLayout(actions);
   if (!session.submitted) {
-    button(actions, t("submitAnswer"), props.onSubmit, true);
+    const submit = button(actions, t(submitting ? "savingAnswer" : "submitAnswer"), props.onSubmit, true);
+    submit.disabled = submitting;
   } else if (session.index < session.questions.length - 1) {
     button(actions, t("nextQuestion"), props.onNext, true);
   } else {

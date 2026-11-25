@@ -41,21 +41,26 @@ async function requestSummaryText(
   let fullText = "";
   let fullReasoning = "";
   let preview = "";
-  await transport.requestTextStream(config, messages, {
-    onContent: (delta) => {
-      fullText += delta;
-      const content = readSummaryPreview(fullText);
-      if (content === preview) return;
-      preview = content;
-      onDelta({ content, reasoning: "" });
-    },
-    onReasoning: (delta) => {
-      if (preview) return;
-      fullReasoning += delta;
-      onDelta({ content: "", reasoning: fullReasoning });
-    },
-    onUsage: () => {}
-  });
+  try {
+    await transport.requestTextStream(config, messages, {
+      onContent: (delta) => {
+        fullText += delta;
+        const content = readSummaryPreview(fullText);
+        if (content === preview) return;
+        preview = content;
+        onDelta({ content, reasoning: "" });
+      },
+      onReasoning: (delta) => {
+        if (preview) return;
+        fullReasoning += delta;
+        onDelta({ content: "", reasoning: fullReasoning });
+      },
+      onUsage: () => {}
+    });
+  } catch (error) {
+    if (fullText || fullReasoning) throw error;
+    return transport.requestText(config, messages, true);
+  }
   return fullText;
 }
 

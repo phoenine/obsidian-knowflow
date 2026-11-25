@@ -8,10 +8,11 @@ import * as esbuild from "esbuild";
 const tempDir = await mkdtemp(join(tmpdir(), "knowflow-ui-controllers-"));
 await esbuild.build({
   bundle: true,
-  entryPoints: [
-    "src/ui/controllers/chat-controller.ts",
-    "src/ui/controllers/summary-controller.ts"
-  ],
+  entryPoints: {
+    "chat-controller": "src/ui/controllers/chat-controller.ts",
+    "summary-controller": "src/ui/controllers/summary-controller.ts",
+    "sidebar-view": "src/ui/sidebar-view.ts"
+  },
   format: "esm",
   outdir: tempDir,
   platform: "node",
@@ -20,7 +21,17 @@ await esbuild.build({
     setup(build) {
       build.onResolve({ filter: /^obsidian$/ }, () => ({ path: "obsidian", namespace: "stub-obsidian" }));
       build.onLoad({ filter: /.*/, namespace: "stub-obsidian" }, () => ({
-        contents: "export class Notice {}\nexport class TFile {}\nexport const requestUrl = () => { throw new Error('Unexpected network request'); };\n",
+        contents: [
+          "export class Notice { constructor(message) { globalThis.knowflowNotices?.push(message); } }",
+          "export class TFile {}",
+          "export class ItemView { constructor(leaf) { this.app = leaf.app; } }",
+          "export class MarkdownView {}",
+          "export const MarkdownRenderer = {};",
+          "export const normalizePath = (path) => path;",
+          "export const parseYaml = () => ({});",
+          "export const setIcon = () => {};",
+          "export const requestUrl = () => { throw new Error('Unexpected network request'); };"
+        ].join("\n"),
         loader: "js"
       }));
     }
@@ -29,6 +40,7 @@ await esbuild.build({
 
 const { ChatController } = await import(pathToFileURL(join(tempDir, "chat-controller.js")).href);
 const { SummaryController } = await import(pathToFileURL(join(tempDir, "summary-controller.js")).href);
+const { KnowFlowSidebarView } = await import(pathToFileURL(join(tempDir, "sidebar-view.js")).href);
 
 {
   const file = { path: "Articles/Test.md", basename: "Test" };
@@ -195,6 +207,59 @@ const { SummaryController } = await import(pathToFileURL(join(tempDir, "summary-
   const insufficient = await ask("检查当前文章是否过时");
   assert.match(insufficient.content, /证据不足，原文先不改/);
   assert.doesNotMatch(insufficient.content, /没有需要更新的内容/);
+}
+
+{
+  const notices = [];
+  globalThis.knowflowNotices = notices;
+  const saved = [];
+  let rejectWrite;
+  const view = new KnowFlowSidebarView({ app: {} }, {
+    quizNotes: {
+      recordAnswer: async (_path, _index, key) => {
+        saved.push(key);
+        if (saved.length === 1) await new Promise((_, reject) => { rejectWrite = reject; });
+      }
+    }
+  });
+  const session = {
+    filePath: "Articles/Queue.md",
+    quizPath: "Archives/Queue_Quiz.md",
+    questions: [{ answerKey: "B" }],
+    index: 0,
+    selectedKey: "B",
+    submitted: false
+  };
+  const renders = [];
+  view.quizSession = session;
+  view.render = () => renders.push({ pending: view.submittingQuizSessions.has(session), submitted: session.submitted });
+  const first = view.submitQuizAnswer(session);
+  await view.submitQuizAnswer(session);
+  assert.deepEqual(saved, ["B"], "a pending submission cannot write the same answer twice");
+  rejectWrite(new Error("Vault is read-only"));
+  await first;
+  assert.equal(session.selectedKey, "B");
+  assert.equal(session.submitted, false);
+  assert.match(notices.at(-1), /答案保存失败：Vault is read-only/);
+  await view.submitQuizAnswer(session);
+  assert.deepEqual(saved, ["B", "B"]);
+  assert.deepEqual(renders, [
+    { pending: true, submitted: false },
+    { pending: false, submitted: false },
+    { pending: true, submitted: false },
+    { pending: false, submitted: true }
+  ]);
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async () => { throw new Error("Clipboard access denied"); } }
+  });
+  try {
+    await view.copyChatText("回答");
+    assert.match(notices.at(-1), /复制失败：Clipboard access denied/);
+  } finally {
+    delete navigator.clipboard;
+  }
+  delete globalThis.knowflowNotices;
 }
 
 await rm(tempDir, { recursive: true, force: true });

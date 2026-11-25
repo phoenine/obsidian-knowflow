@@ -364,6 +364,36 @@ try {
   assert.deepEqual(previews, ["核心观点", "核心观点\n\n- 一条", '核心观点\n\n- 一条"观点"。']);
   assert.equal(streamed.summary, previews.at(-1));
   assert.equal(streamed.briefDescription, undefined);
+
+  summaryRequests.length = 0;
+  let streamInput;
+  globalThis.fetch = async (_url, { body }) => {
+    streamInput = JSON.parse(body);
+    assert.equal(streamInput.stream, true);
+    throw new TypeError("Failed to fetch");
+  };
+  const fallback = await ai.summarizeStream(file.path, file.basename, scenarios, () => {});
+  assert.match(fallback.summary, /^## 核心观点\n- 默认版本已经更新/m);
+  assert.deepEqual(summaryRequests, [JSON.parse(streamInput.messages[1].content)]);
+
+  summaryRequests.length = 0;
+  globalThis.fetch = async () => {
+    const event = "data: " + JSON.stringify({ choices: [{ delta: { content: '{"summary":"已经开始' } }] }) + "\n\n";
+    let sent = false;
+    return new Response(new ReadableStream({
+      pull(controller) {
+        if (sent) return controller.error(new Error("Stream disconnected"));
+        sent = true;
+        controller.enqueue(new TextEncoder().encode(event));
+      }
+    }));
+  };
+  const partial = [];
+  await assert.rejects(ai.summarizeStream(file.path, file.basename, scenarios, ({ content }) => {
+    partial.push(content);
+  }), /Stream disconnected/);
+  assert.deepEqual(partial, ["已经开始"]);
+  assert.deepEqual(summaryRequests, [], "do not start a second request after a partial summary");
 } finally {
   globalThis.fetch = fetchBeforeSummary;
 }

@@ -55,6 +55,7 @@ export class KnowFlowSidebarView extends ItemView {
   private summaryController: SummaryController;
   private quizController: QuizController;
   private quizSession: QuizSession | null = null;
+  private submittingQuizSessions = new WeakSet<QuizSession>();
   private quizResults: QuizResultsState | null = null;
   private quizOpenPath: string | null = null;
   private knowledgePointView: KnowledgePointViewState | null = null;
@@ -632,6 +633,7 @@ export class KnowFlowSidebarView extends ItemView {
       : null;
     renderQuizTestView(root, {
       session,
+      submitting: this.submittingQuizSessions.has(session),
       sourceLabel: reviewQuestion?.articleTitle,
       onOpenSource: reviewQuestion ? () => void this.openReviewSource(reviewQuestion.articlePath, reviewQuestion.question.sourceSection) : undefined,
       onBack: () => {
@@ -642,9 +644,7 @@ export class KnowFlowSidebarView extends ItemView {
         session.selectedKey = key;
         this.render();
       },
-      onSubmit: async () => {
-        await this.submitQuizAnswer(session);
-      },
+      onSubmit: () => void this.submitQuizAnswer(session),
       onNext: () => {
         session.index += 1;
         const review = session.reviewDate ? this.plugin.store.getDailyReviewSession(session.reviewDate) : null;
@@ -723,7 +723,7 @@ export class KnowFlowSidebarView extends ItemView {
           const svg = action.querySelector<SVGSVGElement>("svg");
           if (svg) Object.assign(svg.style, { height: "14px", width: "14px" });
         };
-        userAction(t("copyQuestion"), "copy", () => navigator.clipboard.writeText(message.content));
+        userAction(t("copyQuestion"), "copy", () => void this.copyChatText(message.content));
         userAction(t("editQuestion"), "square-pen", () => {
           this.openComposer(undefined, message.content);
         });
@@ -793,7 +793,7 @@ export class KnowFlowSidebarView extends ItemView {
             }
           });
         }
-        chatAction(t("copyAnswer"), "copy", () => navigator.clipboard.writeText(message.content));
+        chatAction(t("copyAnswer"), "copy", () => void this.copyChatText(message.content));
         if (!message.kind) {
           chatAction(t("regenerate"), "refresh-cw", () => {
             const previous = this.chatController.findPreviousUserMessage(thread, message.id);
@@ -1205,18 +1205,35 @@ export class KnowFlowSidebarView extends ItemView {
   }
 
   private async submitQuizAnswer(session: QuizSession): Promise<void> {
+    if (session.submitted || this.submittingQuizSessions.has(session)) return;
     if (!session.selectedKey) {
       new Notice(t("chooseAnswer"));
       return;
     }
-    if (session.reviewDate && session.reviewQuestionKeys) {
-      const questionKey = session.reviewQuestionKeys[session.index];
-      await this.plugin.dailyReview.recordAnswer(session.reviewDate, questionKey, session.selectedKey);
-    } else {
-      await this.quizController.recordAnswer(session);
-    }
-    session.submitted = true;
+    this.submittingQuizSessions.add(session);
     this.render();
+    try {
+      if (session.reviewDate && session.reviewQuestionKeys) {
+        const questionKey = session.reviewQuestionKeys[session.index];
+        await this.plugin.dailyReview.recordAnswer(session.reviewDate, questionKey, session.selectedKey);
+      } else {
+        await this.quizController.recordAnswer(session);
+      }
+      session.submitted = true;
+    } catch (error) {
+      new Notice(t("saveAnswerFailed", { message: error instanceof Error ? error.message : String(error) }), 8000);
+    } finally {
+      this.submittingQuizSessions.delete(session);
+      if (this.quizSession === session) this.render();
+    }
+  }
+
+  private async copyChatText(content: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch (error) {
+      new Notice(t("copyFailed", { message: error instanceof Error ? error.message : String(error) }), 8000);
+    }
   }
 
   private getSummaryViewModel(file: TFile): NoteSummary | null {

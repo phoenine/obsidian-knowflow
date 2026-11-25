@@ -1,25 +1,8 @@
-import type { AiModelConfig, KnowledgePoint, KnowledgePointGroup, QuizQuestion } from "../../types";
+import type { AiModelConfig, KnowledgePoint, KnowledgePointGroup, QuizOption, QuizQuestion } from "../../types";
 import { AiTransport } from "./ai-transport";
 import type { ChatRequestMessage } from "../chat/chat-context";
 import { batchQuizSections, getQuizFocusTargets, getQuizQuestionLimit, prepareQuizSections } from "../learning/quiz-generation";
 import type { QuizFocusType, QuizSourceSection } from "../learning/quiz-generation";
-
-interface QuizBatchResponse {
-  sections: Array<{
-    sectionId: string;
-    value: number;
-    questions: Array<{
-      focusType: QuizFocusType;
-      sourceQuote: string;
-      knowledgePointId?: string;
-      question: string;
-      options: Array<{ key: string; content: string }>;
-      answerKey: string;
-      explanation: string;
-      difficulty: number;
-    }>;
-  }>;
-}
 
 interface RatedQuizQuestion {
   focusType: QuizFocusType;
@@ -27,16 +10,6 @@ interface RatedQuizQuestion {
   sectionValue: number;
   markedPriority: number;
   question: QuizQuestion;
-}
-
-interface KnowledgePointQuizResponse {
-  question: {
-    question: string;
-    options: Array<{ key: string; content: string }>;
-    answerKey: string;
-    explanation: string;
-    difficulty: number;
-  };
 }
 
 export class QuizAi {
@@ -65,7 +38,7 @@ export class QuizAi {
       const batchChars = batch.reduce((total, section) => total + section.content.length, 0);
       const batchQuestionLimit = Math.max(1, Math.ceil(limit * batchChars / totalChars) + 1);
       try {
-        const payload = await this.transport.requestJson<QuizBatchResponse>(
+        const payload = await this.transport.requestJson<unknown>(
           config,
           buildQuizBatchMessages(title, readingValue, batch, batchQuestionLimit, focusTargets, knowledgePoints)
         );
@@ -85,7 +58,7 @@ export class QuizAi {
     articleTitle: string,
     point: KnowledgePoint
   ): Promise<QuizQuestion> {
-    const payload = await this.transport.requestJson<KnowledgePointQuizResponse>(config, [
+    const payload = await this.transport.requestJson<unknown>(config, [
       {
         role: "system",
         content: "按 Skill 出题。只输出严格 JSON，不要输出 Markdown。"
@@ -180,37 +153,31 @@ function buildQuizBatchMessages(
 }
 
 function normalizeQuizBatchResponse(
-  value: QuizBatchResponse,
+  value: unknown,
   sourceSections: QuizSourceSection[],
   filePath: string,
   knowledgePointIds: Set<string>
 ): RatedQuizQuestion[] {
   const now = new Date().toISOString();
   const byId = new Map(sourceSections.map((section) => [section.id, section]));
-  const sections = Array.isArray(value.sections) ? value.sections : [];
+  const sections: unknown[] = isRecord(value) && Array.isArray(value.sections) ? value.sections : [];
   const result: RatedQuizQuestion[] = [];
   for (const sectionResult of sections) {
+    if (!isRecord(sectionResult) || typeof sectionResult.sectionId !== "string") continue;
     const source = byId.get(sectionResult.sectionId);
-    if (!source) continue;
-    const sectionValue = Number.isInteger(sectionResult.value)
-      ? Math.min(3, Math.max(0, sectionResult.value))
-      : 0;
-    if (sectionValue === 0 || !Array.isArray(sectionResult.questions)) continue;
-    for (const question of sectionResult.questions) {
-      if (!isQuizFocusType(question.focusType)) continue;
+    const rating = sectionResult.value;
+    if (!source || typeof rating !== "number" || !Number.isInteger(rating) || rating <= 0) continue;
+    const sectionValue = Math.min(3, rating);
+    const questions: unknown[] = Array.isArray(sectionResult.questions) ? sectionResult.questions : [];
+    for (const question of questions) {
+      if (!isRecord(question) || !isQuizFocusType(question.focusType)) continue;
       const sourceQuote = typeof question.sourceQuote === "string" ? question.sourceQuote.trim() : "";
       if (!sourceQuote || !sourceContainsQuote(source.content, sourceQuote)) continue;
-      const options = Array.isArray(question.options)
-        ? question.options
-          .filter((option) => ["A", "B", "C", "D"].includes(option.key) && typeof option.content === "string" && option.content.trim())
-          .slice(0, 4)
-        : [];
-      const optionKeys = new Set(options.map((option) => option.key));
       if (typeof question.question !== "string" || !question.question.trim()) continue;
-      if (options.length !== 4 || !optionKeys.has(question.answerKey)) continue;
-      const difficulty = Number.isInteger(question.difficulty)
-        ? Math.min(5, Math.max(1, question.difficulty))
-        : 3;
+      const options = normalizeQuizOptions(question.options);
+      const answerKey = question.answerKey;
+      if (typeof answerKey !== "string" || options.length !== 4 || !options.some((option) => option.key === answerKey)) continue;
+      const pointId = typeof question.knowledgePointId === "string" ? question.knowledgePointId : "";
       result.push({
         focusType: question.focusType,
         sectionId: source.id,
@@ -219,14 +186,14 @@ function normalizeQuizBatchResponse(
         question: {
           id: `${Date.now()}-${result.length}-${Math.random().toString(36).slice(2, 8)}`,
           notePath: filePath,
-          ...(knowledgePointIds.has(question.knowledgePointId ?? "") ? { knowledgePointId: question.knowledgePointId } : {}),
+          ...(knowledgePointIds.has(pointId) ? { knowledgePointId: pointId } : {}),
           sourceSection: source.title,
           question: question.question.trim(),
           type: "single_choice",
-          options: options.map((option) => ({ key: option.key, content: option.content.trim() })),
-          answerKey: question.answerKey,
+          options,
+          answerKey,
           explanation: typeof question.explanation === "string" ? question.explanation.trim() : "",
-          difficulty,
+          difficulty: normalizeDifficulty(question.difficulty),
           createdAt: now
         }
       });
@@ -236,22 +203,18 @@ function normalizeQuizBatchResponse(
 }
 
 function normalizeKnowledgePointQuiz(
-  value: KnowledgePointQuizResponse,
+  value: unknown,
   filePath: string,
   knowledgePointId: string,
   sourceSection: string
 ): QuizQuestion {
-  const question = value?.question;
-  const options = Array.isArray(question?.options)
-    ? question.options
-      .filter((option) => ["A", "B", "C", "D"].includes(option.key) && typeof option.content === "string" && option.content.trim())
-      .slice(0, 4)
-    : [];
-  const optionKeys = new Set(options.map((option) => option.key));
-  if (!question || typeof question.question !== "string" || !question.question.trim()) {
+  const question = isRecord(value) ? value.question : null;
+  if (!isRecord(question) || typeof question.question !== "string" || !question.question.trim()) {
     throw new Error("Quiz model did not return a valid question.");
   }
-  if (options.length !== 4 || !optionKeys.has(question.answerKey)) {
+  const options = normalizeQuizOptions(question.options);
+  const answerKey = question.answerKey;
+  if (typeof answerKey !== "string" || options.length !== 4 || !options.some((option) => option.key === answerKey)) {
     throw new Error("Quiz model did not return four valid options and one answer.");
   }
   return {
@@ -261,12 +224,33 @@ function normalizeKnowledgePointQuiz(
     sourceSection,
     question: question.question.trim(),
     type: "single_choice",
-    options: options.map((option) => ({ key: option.key, content: option.content.trim() })),
-    answerKey: question.answerKey,
+    options,
+    answerKey,
     explanation: typeof question.explanation === "string" ? question.explanation.trim() : "",
-    difficulty: Number.isInteger(question.difficulty) ? Math.min(5, Math.max(1, question.difficulty)) : 3,
+    difficulty: normalizeDifficulty(question.difficulty),
     createdAt: new Date().toISOString()
   };
+}
+
+function normalizeQuizOptions(value: unknown): QuizOption[] {
+  const candidates: unknown[] = Array.isArray(value) ? value : [];
+  const options: QuizOption[] = [];
+  const keys = new Set<string>();
+  for (const option of candidates) {
+    if (!isRecord(option) || typeof option.key !== "string" || !["A", "B", "C", "D"].includes(option.key)) continue;
+    if (keys.has(option.key) || typeof option.content !== "string" || !option.content.trim()) continue;
+    keys.add(option.key);
+    options.push({ key: option.key, content: option.content.trim() });
+  }
+  return options;
+}
+
+function normalizeDifficulty(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) ? Math.min(5, Math.max(1, value)) : 3;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function selectQuizQuestions(
