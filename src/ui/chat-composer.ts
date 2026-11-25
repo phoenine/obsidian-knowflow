@@ -1,4 +1,5 @@
 import { setIcon } from "obsidian";
+import { t } from "../i18n";
 import { attachPressFeedback, button, iconButton, iconSpan, row, setStyles } from "./dom";
 
 interface ChatComposerProps {
@@ -50,7 +51,7 @@ export function renderCollapsedChatComposer(
   toggle.addClass("kf-composer-expand");
   toggle.setAttribute("aria-expanded", "false");
   iconSpan(toggle, "message-square").setAttribute("aria-hidden", "true");
-  toggle.createSpan({ text: "与文章对话" });
+  toggle.createSpan({ text: t("chatWithArticle") });
   if (status) {
     setStyles(toggle.createSpan({ text: status }), {
       color: "var(--text-muted)",
@@ -78,7 +79,7 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
   });
   const mode = row(toolbar);
   setStyles(mode, { gap: "8px" });
-  setStyles(mode.createDiv({ text: "chat (free)" }), {
+  setStyles(mode.createDiv({ text: t("chatFree") }), {
     color: "var(--text-normal)",
     fontSize: "13px",
     fontWeight: "600"
@@ -102,7 +103,7 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
     });
   const vaultSearch = iconButton(
     tools,
-    props.vaultSearchEnabled ? "关闭 Vault Search" : "开启 Vault Search",
+    props.vaultSearchEnabled ? t("vaultSearchOff") : t("vaultSearchOn"),
     "database",
     props.onToggleVaultSearch
   );
@@ -116,9 +117,9 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
     opacity: props.vaultSearchAvailable ? "1" : "0.45",
     width: "26px"
   });
-  tool("保存到 Note", "download", props.onSaveNote);
-  tool("历史对话", "history", props.onOpenHistory);
-  tool("收起对话", "chevron-down", props.onCollapse).setAttribute("aria-expanded", "true");
+  tool(t("saveToNote"), "download", props.onSaveNote);
+  tool(t("chatHistory"), "history", props.onOpenHistory);
+  tool(t("collapseChat"), "chevron-down", props.onCollapse).setAttribute("aria-expanded", "true");
 
   const panel = composer.createDiv({ cls: "kf-composer-panel" });
   setStyles(panel, {
@@ -154,7 +155,7 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
   for (const path of props.additionalContextPaths) {
     const label = path.split("/").slice(-1)[0]?.replace(/\.md$/i, "") ?? path;
     const relatedChip = createContextChip(contextRow, label, "100%");
-    const removeLabel = `移除 ${label}`;
+    const removeLabel = t("removeContext", { label });
     const remove = relatedChip.createEl("button", { text: "×", attr: { "aria-label": removeLabel, title: removeLabel } });
     setStyles(remove, {
       background: "transparent",
@@ -171,7 +172,7 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
   }
   const input = panel.createEl("textarea", {
     cls: "kf-input",
-    attr: { placeholder: "输入问题，或请 Agent 检查文章时效" }
+    attr: { placeholder: t("composerPlaceholder") }
   });
   setStyles(input, {
     backgroundColor: "transparent",
@@ -242,8 +243,8 @@ export function renderChatComposer(root: HTMLElement, props: ChatComposerProps):
     height: "28px"
   });
   const send = sendTools.createEl("button");
-  send.setAttribute("aria-label", "发送");
-  send.setAttribute("title", "发送");
+  send.setAttribute("aria-label", t("send"));
+  send.setAttribute("title", t("send"));
   setStyles(send, {
     alignItems: "center",
     backgroundColor: "transparent",

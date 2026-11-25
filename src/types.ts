@@ -23,25 +23,16 @@ export interface KnowFlowSettings {
   clippingFolder: string;
   articlesFolder: string;
   semanticIndexExcludeFolders: string[];
-  defaultArticleCategory: string;
   archiveFolder: string;
   chatConversationFolder: string;
   templatePath: string;
   summaryModel: AiModelConfig;
-  knowledgePointsModel: AiModelConfig;
-  pipelineModel: AiModelConfig;
+  taskModel: AiModelConfig;
   chatModel: AiModelConfig;
-  quizModel: AiModelConfig;
   embeddingModel: AiModelConfig;
-  embeddingDimensions: number;
-  autoCreateCategoryFolders: boolean;
-  confirmBeforeWrite: boolean;
-  translateEnglishClippings: boolean;
-  autoOrganize: boolean;
-  autoGenerateSummary: boolean;
-  autoGenerateQuiz: boolean;
   dailyNewArticleLimit: number;
   dailyReviewQuestionCap: number;
+  language: "zh" | "en";
 }
 
 export interface RelatedNote {

@@ -1,4 +1,5 @@
 import type { FreshnessReview } from "../learning/article-freshness";
+import { t } from "../../i18n";
 
 export type FreshnessRequest =
   | { kind: "check" | "check-and-update" | "classify" }
@@ -17,7 +18,7 @@ export function parseFreshnessRequest(question: string): FreshnessRequest | null
     return { kind: "apply", numbers: "all" };
   }
   const list = /^(?:应用|采纳)\s*(.+)$/.exec(text)?.[1];
-  const englishItem = /^apply (?:revision|change|item)\s+(\d{1,2})$/i.exec(text);
+  const englishItem = /^apply(?:\s+(?:revision|change|item))?\s+(\d{1,2})$/i.exec(text);
   if (englishItem) return { kind: "apply", numbers: [Number(englishItem[1])] };
   if (list && /^第/.test(list)) {
     const items = list.replace(/(?:修订|更新|修改)$/, "").split(/[、,，和及与]/);
@@ -38,25 +39,25 @@ export function parseFreshnessRequest(question: string): FreshnessRequest | null
 /** A direct answer to the update prompt. It only applies while a review is waiting. */
 export function parseArticleUpdateReply(question: string): "accept" | "decline" | null {
   const text = question.trim().replace(/[。！.!？?]+$/, "").replace(/^(?:请(?:帮我)?|麻烦(?:帮我)?|帮我)\s*/, "");
-  if (/^(?:不(?:用|要|更新|改了)?|先不(?:用|更新)?|保持原文|不用更新)$/.test(text)) return "decline";
-  if (/^(?:好的|同意|更新|更新原文|更新文章|帮我更新(?:原文|文章)?|按建议更新)$/.test(text)) return "accept";
+  if (/^(?:不(?:用|要|更新|改了)?|先不(?:用|更新)?|保持原文|不用更新|no|don't update|do not update|keep(?: the)? (?:original|note))$/i.test(text)) return "decline";
+  if (/^(?:好的|同意|更新|更新原文|更新文章|帮我更新(?:原文|文章)?|按建议更新|update(?: the (?:article|note))?|apply(?: the)? suggestions?)$/i.test(text)) return "accept";
   return null;
 }
 
 export function renderFreshnessReview(_title: string, review: FreshnessReview): string {
   if (!review.updates.length) {
-    return review.unverified.length ? "这些内容证据不足，原文先不改。" : "没有需要更新的内容。";
+    return review.unverified.length ? t("freshnessInsufficient") : t("freshnessNone");
   }
   const updates = review.updates.map((update, index) => renderFreshnessUpdate(index, update));
   return [
     updates.join("\n\n---\n\n"),
-    "要不要按这些建议更新原文？回复「更新」写入全部建议，回复「应用第 1 条」只写选中的项，回复「不用」则保持原文。"
+    t("freshnessAsk")
   ].join("\n\n");
 }
 
 export function renderFreshnessApplied(applied: number, remaining: number): string {
-  if (remaining > 0) return `已更新 ${applied} 项，写在对应章节里。还有 ${remaining} 项没写入。`;
-  return `已更新 ${applied} 项，写在对应章节里。`;
+  if (remaining > 0) return t("freshnessAppliedRemaining", { count: applied, remaining });
+  return t("freshnessApplied", { count: applied });
 }
 
 function renderFreshnessUpdate(index: number, update: FreshnessReview["updates"][number]): string {

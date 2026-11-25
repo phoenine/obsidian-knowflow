@@ -1,4 +1,5 @@
 import { applyActionLayout, button, row, section, setStyles, text } from "./dom";
+import { t } from "../i18n";
 import { renderShell } from "./shell";
 import type { QuizSession } from "../types";
 
@@ -20,7 +21,7 @@ export function renderQuizTestView(root: HTMLElement, props: QuizTestViewProps):
   const card = section(content, "kf-quiz-test");
   const difficulty = row(card);
   setStyles(difficulty, { justifyContent: "flex-end" });
-  text(difficulty, `难度 ${question.difficulty}/5`, "kf-pill");
+  text(difficulty, t("difficulty", { value: question.difficulty }), "kf-pill");
   const questionRow = row(card);
   setStyles(questionRow, { alignItems: "flex-start", gap: "6px" });
   setStyles(questionRow.createSpan({ text: `${session.index + 1}.` }), {
@@ -100,7 +101,7 @@ export function renderQuizTestView(root: HTMLElement, props: QuizTestViewProps):
       gap: "6px",
       padding: "10px 12px"
     });
-    setStyles(explanation.createDiv({ text: `${isCorrect ? "✓" : "✗"} 正确答案：${question.answerKey}. ${correctOption?.content ?? ""}` }), {
+    setStyles(explanation.createDiv({ text: t("correctAnswer", { mark: isCorrect ? "✓" : "✗", key: question.answerKey, content: correctOption?.content ?? "" }) }), {
       color: accentColor,
       fontSize: "13px",
       fontWeight: "650",
@@ -111,7 +112,7 @@ export function renderQuizTestView(root: HTMLElement, props: QuizTestViewProps):
     }
     if (props.sourceLabel && props.onOpenSource) {
       const source = explanation.createEl("button", {
-        text: `查看原文 · ${props.sourceLabel}`
+        text: t("viewSource", { label: props.sourceLabel })
       });
       setStyles(source, {
         alignSelf: "flex-start",
@@ -130,10 +131,10 @@ export function renderQuizTestView(root: HTMLElement, props: QuizTestViewProps):
   const actions = row(card, "kf-actions");
   applyActionLayout(actions);
   if (!session.submitted) {
-    button(actions, "提交答案", props.onSubmit, true);
+    button(actions, t("submitAnswer"), props.onSubmit, true);
   } else if (session.index < session.questions.length - 1) {
-    button(actions, "下一题", props.onNext, true);
+    button(actions, t("nextQuestion"), props.onNext, true);
   } else {
-    button(actions, "完成测试", props.onFinish, true);
+    button(actions, t("finishTest"), props.onFinish, true);
   }
 }

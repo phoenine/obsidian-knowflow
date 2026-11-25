@@ -1,5 +1,6 @@
 import { setIcon } from "obsidian";
 import type { KnowledgePoint, KnowledgePointGroup, KnowledgePointStatus } from "../types";
+import { t } from "../i18n";
 import { setStyles } from "./dom";
 
 interface KnowledgePointsOverviewProps {
@@ -43,7 +44,7 @@ export function renderKnowledgePointsOverview(root: HTMLElement, props: Knowledg
       lineHeight: "21px",
       overflowWrap: "anywhere"
     });
-    setStyles(content.createDiv({ text: `${points.length} 个核心知识点` }), {
+    setStyles(content.createDiv({ text: t("pointCount", { count: points.length }) }), {
       color: "#629160",
       fontSize: "13px",
       fontWeight: "500",
@@ -53,12 +54,12 @@ export function renderKnowledgePointsOverview(root: HTMLElement, props: Knowledg
     divider(content, "24px -7px 17px");
 
     if (props.loading) {
-      state(content, "正在从文章中提取核心知识点…");
+      state(content, t("extractingPoints"));
       return;
     }
     if (points.length === 0) {
-      state(content, "尚未生成知识点");
-      const generate = content.createEl("button", { text: "生成知识点" });
+      state(content, t("noPointsYet"));
+      const generate = content.createEl("button", { text: t("generatePoints") });
       setStyles(generate, {
         alignSelf: "center",
         background: COLORS.accent,
@@ -123,9 +124,9 @@ function knowledgeShell(root: HTMLElement, props: KnowledgePointsOverviewProps):
     flex: "0 0 63px",
     padding: "0 24px"
   });
-  const back = bareIconButton(header, "返回", "arrow-left", props.onBack, 18);
+  const back = bareIconButton(header, t("back"), "arrow-left", props.onBack, 18);
   setStyles(back, { color: "#24482A", marginRight: "14px" });
-  setStyles(header.createDiv({ text: "知识点" }), {
+  setStyles(header.createDiv({ text: t("knowledgePoints") }), {
     color: COLORS.text,
     fontSize: "15px",
     fontWeight: "650",
@@ -133,7 +134,7 @@ function knowledgeShell(root: HTMLElement, props: KnowledgePointsOverviewProps):
   });
   const hasPoints = props.groups.some((group) => group.points.length > 0);
   if (hasPoints) {
-    const update = bareIconButton(header, "更新知识点", "refresh-cw", () => {
+    const update = bareIconButton(header, t("updatePoints"), "refresh-cw", () => {
       if (!props.loading) props.onRefresh();
     }, 16);
     update.removeAttribute("title");
@@ -184,12 +185,12 @@ function renderGroup(
   });
   const toggle = bareIconButton(
     heading,
-    `${expanded ? "折叠" : "展开"} ${group.title}`,
+    `${expanded ? t("collapse") : t("expand")} ${group.title}`,
     expanded ? "chevron-down" : "chevron-right",
     () => {
       expanded = !expanded;
       rows.style.display = expanded ? "block" : "none";
-      const label = `${expanded ? "折叠" : "展开"} ${group.title}`;
+      const label = `${expanded ? t("collapse") : t("expand")} ${group.title}`;
       toggle.setAttribute("aria-label", label);
       toggle.setAttribute("title", label);
       setIcon(toggle, expanded ? "chevron-down" : "chevron-right");
@@ -222,7 +223,7 @@ function renderGroup(
   });
   for (const point of group.points) {
     const selected = point.id === selectedId;
-    const item = rows.createEl("button", { attr: { title: `选择：${point.title}` } });
+    const item = rows.createEl("button", { attr: { title: t("selectPoint", { title: point.title }) } });
     setStyles(item, {
       alignItems: "start",
       background: selected ? "linear-gradient(90deg, #EAF4E6 0%, #F3F9F0 100%)" : "transparent",
@@ -305,7 +306,7 @@ function renderPointDetails(
   paragraph(card, point.explanation);
 
   divider(card, "16px 0");
-  sectionTitle(card, "原文依据");
+  sectionTitle(card, t("evidence"));
 
   const source = card.createDiv();
   setStyles(source, {
@@ -315,7 +316,7 @@ function renderPointDetails(
     lineHeight: "18px",
     marginTop: "10px"
   });
-  setStyles(source.createSpan({ text: "来源：" }), {
+  setStyles(source.createSpan({ text: t("sourcePrefix") }), {
     color: "#639261",
     flex: "0 0 auto",
     fontWeight: "700"
@@ -348,7 +349,7 @@ function renderPointDetails(
   });
 
   divider(card, "16px 0");
-  sectionTitle(card, "检验问题");
+  sectionTitle(card, t("checkQuestion"));
   paragraph(card, point.question, { marginTop: "10px" });
 
   if (point.relations.dependsOn.length > 0 || point.relations.extends.length > 0) {
@@ -359,8 +360,8 @@ function renderPointDetails(
       gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
       minHeight: "30px"
     });
-    relation(relations, "link-2", "依赖：", point.relations.dependsOn, points, false);
-    relation(relations, "git-branch", "扩展：", point.relations.extends, points, true);
+    relation(relations, "link-2", t("dependsOn"), point.relations.dependsOn, points, false);
+    relation(relations, "git-branch", t("extendsPoint"), point.relations.extends, points, true);
   }
 
   const generate = card.createEl("button");
@@ -368,7 +369,7 @@ function renderPointDetails(
   const icon = generate.createSpan();
   setIcon(icon, "file-text");
   setStyles(icon, { display: "inline-flex", height: "19px", width: "19px" });
-  generate.createSpan({ text: "针对该知识点出题" });
+  generate.createSpan({ text: t("quizForPoint") });
   generate.addEventListener("click", () => props.onGenerateQuiz(point));
 }
 
@@ -408,7 +409,7 @@ function relation(parent: HTMLElement, iconName: string, label: string, ids: str
   const text = item.createDiv();
   const titles = ids.map((id) => points.find((point) => point.id === id)?.title ?? id);
   setStyles(text.createSpan({ text: label }), { color: "#253F29", fontSize: "12px", fontWeight: "700" });
-  setStyles(text.createSpan({ text: titles.length > 0 ? titles.join("、") : "无" }), {
+  setStyles(text.createSpan({ text: titles.length > 0 ? titles.join("、") : t("none") }), {
     color: "#667168",
     fontSize: "11px",
     lineHeight: "16px",
@@ -500,9 +501,9 @@ function paragraph(parent: HTMLElement, value: string, extra: Partial<CSSStyleDe
 }
 
 function statusLabel(status: KnowledgePointStatus | undefined): string {
-  if (status === "mastered") return "已掌握";
-  if (status === "review") return "需复习";
-  return "未测试";
+  if (status === "mastered") return t("mastered");
+  if (status === "review") return t("needsReview");
+  return t("untested");
 }
 
 function statusColor(status: KnowledgePointStatus | undefined): string {

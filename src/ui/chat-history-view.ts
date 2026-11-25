@@ -1,5 +1,6 @@
 import { setIcon } from "obsidian";
 import type { ChatThread } from "../types";
+import { t } from "../i18n";
 import { attachPressFeedback, setStyles, text } from "./dom";
 
 interface ChatHistoryViewProps {
@@ -40,7 +41,7 @@ export function renderChatHistoryPopover(root: HTMLElement, props: ChatHistoryVi
   });
   const search = popover.createEl("input", {
     cls: "kf-chat-history-search",
-    attr: { type: "search", placeholder: "Search...", "aria-label": "搜索历史对话" }
+    attr: { type: "search", placeholder: t("searchPlaceholder"), "aria-label": t("searchHistory") }
   });
   setStyles(search, {
     backgroundColor: "var(--background-primary)",
@@ -64,7 +65,7 @@ export function renderChatHistoryPopover(root: HTMLElement, props: ChatHistoryVi
       || thread.messages.some((message) => message.content.toLocaleLowerCase().includes(normalizedQuery))
     );
     if (visible.length === 0) {
-      text(list, "没有匹配的历史对话。", "kf-muted");
+      text(list, t("noHistoryMatch"), "kf-muted");
       return;
     }
     let previousGroup = "";
@@ -121,13 +122,13 @@ export function renderChatHistoryPopover(root: HTMLElement, props: ChatHistoryVi
 function relativeDateGroup(value: string): string {
   const date = new Date(value);
   const now = new Date();
-  if (date.toDateString() === now.toDateString()) return "Today";
+  if (date.toDateString() === now.toDateString()) return t("today");
   const minutes = Math.max(1, Math.floor((now.getTime() - date.getTime()) / 60000));
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return t("minutesAgo", { count: minutes });
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return t("hoursAgo", { count: hours });
   const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
-  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+  if (date.toDateString() === yesterday.toDateString()) return t("yesterday");
   return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }

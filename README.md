@@ -18,7 +18,7 @@ Clipping → 整理 → 总结 → 知识点 → Quiz → 学习状态 → 每�
 
 - 整理当前 Markdown 剪藏并修复常见格式问题。
 - 补全 Frontmatter、识别代码块并处理文章分类。
-- 开启翻译后，按段落交给模型判断：整段中文跳过，整段非中文译成简体中文。代码、公式、独立链接、元信息和已有生成内容不参与。
+- 整理时按段落判断：整段中文跳过，整段非中文译成简体中文。代码、公式、独立链接、元信息和已有生成内容不参与。
 - 生成 AI 摘要、阅读价值和文章分类建议。
 - 生成带原文证据的分组知识点。
 - 生成、保存和作答 Markdown Quiz。
@@ -35,9 +35,8 @@ Clipping → 整理 → 总结 → 知识点 → Quiz → 学习状态 → 每�
 - Auto organize
 - Auto generate summary
 - Auto generate quiz
-- 插件界面中英双语切换
 
-前三个自动化选项在 Settings 中固定关闭，计划在 2.0 后续版本开放。
+前三个自动化还没放进设置，计划在 2.0 后续版本开放。界面语言在 Settings → Basic 切换，默认简体中文。模型回复和笔记字段不随界面语言改变。
 
 ## 核心能力
 
@@ -52,7 +51,7 @@ KnowFlow 可以处理当前打开的 Markdown 剪藏，并尽量以小范围修�
 - 保护已有的 wikilink、embed、callout，以及代码、数学和注释围栏。
 - 根据文章模板补全 Frontmatter。
 - 将 AI 生成内容排除在后续 AI 输入之外，减少重复 token 和旧结果锚定。
-- 支持先确认再写入，以及自定义分类目录。
+- 点整理直接写回。移动到内置分类时，对应目录不存在会自动创建。
 
 ### AI 学习材料
 
@@ -71,7 +70,7 @@ KnowFlow 可以处理当前打开的 Markdown 剪藏，并尽量以小范围修�
 
 - **内置 Skills**。规则存于项目的 [skills 目录](skills/README.md)，构建时随插件打包。整理时插件先处理已经能确定的结构，再把拿不准的标题和代码按每批最多 4 条交给模型确认或保留。插件负责校验和写入。Vault 里的 `skills/<名称>/SKILL.md` 会替换同名内置规则；只有 `clipping-update` 是把 Vault 规则或旧的 `clipping-repair` 接在内置规则后面。
 - **生成文章摘要**。每次读取当前笔记一次，短文使用清理后的全文，长文在本地按章抽取片段，一次发给模型。卡片流式展示摘要正文，完成后按核心观点和章节梳理渲染，并按阅读评分显示推荐动作。模型没有返回摘要内容时，使用相同输入重试一次。保存时把摘要和可用的摘要属性合并到最新笔记，保留生成期间的正文编辑。
-- **文章知识检查**。打开文章后，在 KnowFlow 对话中输入「检查当前文章是否过时」。Chat model 按章节阅读全文，用 [DeepSeek Search](https://api-docs.deepseek.com/guides/search/) 核对已有说法，并查找会影响理解的遗漏进展。报告只列出可以更新的条目，并询问是否更新原文。回复「更新」后，修改写入对应章节，增加的内容用 `> [!note]` 标出。回复「应用第 2 条」只写入选中的项，回复「不用」则保持原文。直接发送「检查并更新这篇文章」时，开启 `Confirm before write` 会先等待确认。DeepSeek Search 可复用已配置的官方 API Key，也可在 `Settings → AI Models → DeepSeek Search → Configure` 设置独立密钥。搜索及必要的网页抓取按接口请求计费。
+- **文章知识检查**。打开文章后，在 KnowFlow 对话中输入「检查当前文章是否过时」。Chat model 按章节阅读全文，用 [DeepSeek Search](https://api-docs.deepseek.com/guides/search/) 核对已有说法，并查找会影响理解的遗漏进展。报告只列出可以更新的条目，并询问是否更新原文。回复「更新」后，修改写入对应章节，增加的内容用 `> [!note]` 标出。回复「应用第 2 条」只写入选中的项，回复「不用」则保持原文。「检查并更新」同样先列出建议，确认后才写入。DeepSeek Search 可复用已配置的官方 API Key，也可在 `Settings → AI Models → DeepSeek Search → Configure` 设置独立密钥。搜索及必要的网页抓取按接口请求计费。
 - **相关文章**。Relevant Notes 先过滤弱语义匹配，再合并具体标题术语的匹配结果，最多展示五篇。共同标签只参与排序。每篇显示可点击的标题、加入 Chat 按钮和最多两行的「简要描述」。
 
 ### Task Overview
@@ -93,7 +92,7 @@ Task Overview 汇总当天的学习进度：
 - 新学文章从第二天开始进入题库。
 - 选题优先级为：错题 → 未做题 → 到期的正确题。
 - 正确题冷却 7 天。
-- 每日最多 10 题，可在 Settings 中调整上限。
+- 每日最多 10 题，可在 Settings → Basic 的 Learning 中调整上限。
 - 实际题量根据当前有效题库动态计算，不会用未到期题目强行补足。
 - 同一文章默认有 2 题的软上限；题目优先级高于文章分散度。
 - 开始答题后锁定当天试卷，刷新不会替换已经开始的题目。
@@ -117,7 +116,7 @@ Vault/
 
 ## AI 模型配置
 
-摘要、知识点、整理、Chat、Quiz 和 embedding 可以分别配置模型。设置里的 Knowledge Points model 用来生成知识点。支持：
+摘要单独配置。知识点、整理和 Quiz 共用 Task model。Chat 与时效检查共用 Chat model。Embedding model 单独配置。设置项名称是 Task model。支持：
 
 - OpenAI-compatible Cloud API
 - Ollama
@@ -126,7 +125,7 @@ Vault/
 
 每个模型可以独立设置 Runtime、Base URL、API Key 和 Model ID。
 
-Relevant Notes 与 Vault Search 共用本地语义索引。先在 `AI Models` 配置 Embedding model，再到 `Data` 设置 `Excluded folders`、可选的 `Embedding dimensions` 并建立索引；索引只覆盖 `Articles folder` 所配置的文章目录（默认 `Articles/`），默认排除任意层级的 `assets` 子目录。索引使用小型清单和 128 个稳定哈希分片，chunk 元数据与 Float32 二进制向量分开保存，并支持分片级中断续建和损坏隔离。每篇文章只索引已存在的 AI 摘要，无摘要的文章不生成向量。Vault Search 在命中后读取原文段落。已有全文索引在升级后需重建。使用 Cloud runtime 建索引时，AI 摘要会发送给所配置的 embedding 服务。详细设计见 [Relevant Notes 与 Vault Search](docs/relevant-notes-and-vault-search.md)。
+Relevant Notes 与 Vault Search 共用本地语义索引。先在 `AI Models` 配置 Embedding model，再到 `Data` 设置 `Excluded folders` 并建立索引；索引只覆盖 `Articles folder` 所配置的文章目录（默认 `Articles/`），默认排除任意层级的 `assets` 子目录。索引使用小型清单和 128 个稳定哈希分片，chunk 元数据与 Float32 二进制向量分开保存，并支持分片级中断续建和损坏隔离。每篇文章只索引已存在的 AI 摘要，无摘要的文章不生成向量。Vault Search 在命中后读取原文段落。已有全文索引在升级后需重建。使用 Cloud runtime 建索引时，AI 摘要会发送给所配置的 embedding 服务。详细设计见 [Relevant Notes 与 Vault Search](docs/relevant-notes-and-vault-search.md)。
 
 > [!WARNING]
 > 各模型的 API Key 当前以明文保存在 Vault 的 `.obsidian/plugins/knowflow/data.json`。如果 Vault 会通过 Git 或云盘同步，请排除该文件或使用不含密钥的配置。
@@ -272,8 +271,6 @@ src/
 
 ## 路线图
 
-- 插件界面语言：简体中文 / English。
-- 将插件界面语言与 AI 输出语言拆分配置。
 - 开放 Pipeline 自动整理、自动摘要和自动生成 Quiz。
 - 继续完善运行中 Obsidian 的交互和导航验证。
 

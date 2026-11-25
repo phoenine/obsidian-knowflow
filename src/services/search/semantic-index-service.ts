@@ -340,7 +340,7 @@ export class SemanticIndexService {
     if (!this.isReady() || !query.trim()) return "";
     await this.ensureChunksLoaded();
     const [raw] = await this.transport.embed(this.settings.embeddingModel, [query.trim()]);
-    const embedding = normalizeEmbedding(raw, this.settings.embeddingDimensions);
+    const embedding = normalizeEmbedding(raw);
     this.assertDimension([{ embedding }]);
     const hits = searchSemanticChunks(this.chunks, [embedding], limit * 2, excludedPath);
     const passages: string[] = [];
@@ -370,7 +370,7 @@ export class SemanticIndexService {
       const batch = chunks.slice(start, start + EMBEDDING_BATCH_SIZE);
       const vectors = await this.transport.embed(this.settings.embeddingModel, batch.map((chunk) => chunk.content));
       if (vectors.length !== batch.length) throw new Error("Embedding endpoint returned an unexpected number of vectors.");
-      vectors.forEach((vector, index) => { batch[index].embedding = normalizeEmbedding(vector, this.settings.embeddingDimensions); });
+      vectors.forEach((vector, index) => { batch[index].embedding = normalizeEmbedding(vector); });
     }
     return chunks;
   }
@@ -665,7 +665,7 @@ export class SemanticIndexService {
 function currentModelKey(settings: KnowFlowSettings): string {
   const scope = settings.articlesFolder.trim().replace(/^\/+|\/+$/g, "");
   const excluded = settings.semanticIndexExcludeFolders.map((folder) => folder.trim()).filter(Boolean).sort().join(",");
-  return `${scope}|exclude:${excluded}|dims:${settings.embeddingDimensions}|shards:${SHARD_COUNT}|source:${SUMMARY_INDEX_SOURCE}|${modelKey(settings.embeddingModel)}`;
+  return `${scope}|exclude:${excluded}|dims:0|shards:${SHARD_COUNT}|source:${SUMMARY_INDEX_SOURCE}|${modelKey(settings.embeddingModel)}`;
 }
 
 function modelKey(config: AiModelConfig): string { return `${config.runtime}|${config.apiBaseUrl.trim().replace(/\/+$/g, "")}|${config.model.trim()}`; }

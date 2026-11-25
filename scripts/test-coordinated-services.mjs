@@ -119,13 +119,12 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
   const previousWindow = globalThis.window;
   globalThis.window = { moment: () => ({ format: () => "2026-10-22" }) };
   try {
-    for (const { body, enabled, calls, status, info } of [
-      { body: `这篇中文文章介绍 ESP32 开发板，以及如何选择入门项目。\n\n- ${link}`, enabled: true, calls: 1, status: "skipped", info: "无可翻译正文" },
-      { body: `${english}\n\n这一段是原文自带的中文说明。`, enabled: true, calls: 1, status: "completed" },
-      { body: link, enabled: true, calls: 0, status: "skipped", info: "无可翻译正文" },
-      { body: french, enabled: true, calls: 1, status: "completed" },
-      { body: english, enabled: false, calls: 0, status: "skipped", info: "未开启英文翻译" },
-      { body: `> [!summary]- AI 摘要\n> 中文摘要不改变原文语言。\n\n${english}\n\n- ${link}`, enabled: true, calls: 1, status: "completed" }
+    for (const { body, calls, status, info } of [
+      { body: `这篇中文文章介绍 ESP32 开发板，以及如何选择入门项目。\n\n- ${link}`, calls: 1, status: "skipped", info: "无可翻译正文" },
+      { body: `${english}\n\n这一段是原文自带的中文说明。`, calls: 1, status: "completed" },
+      { body: link, calls: 0, status: "skipped", info: "无可翻译正文" },
+      { body: french, calls: 1, status: "completed" },
+      { body: `> [!summary]- AI 摘要\n> 中文摘要不改变原文语言。\n\n${english}\n\n- ${link}`, calls: 1, status: "completed" }
     ]) {
       let translationCalls = 0;
       let written;
@@ -147,7 +146,7 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
             .map((candidate) => ({ id: candidate.id, translation: "中文译文。" }));
         }
       };
-      const pipeline = new ClippingPipeline(app, { translateEnglishClippings: enabled, templatePath: "" }, {
+      const pipeline = new ClippingPipeline(app, { templatePath: "" }, {
         recordPipelineSuccess: async () => { success = true; },
         setPipelineStatus: async (status) => { assert.fail(status.error); }
       }, ai, { runExclusive: async (_path, operation) => operation() });
@@ -197,7 +196,7 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
           .map((candidate) => ({ id: candidate.id, translation: "一个好的线束会沿途做出许多小决定。" }));
       }
     };
-    const pipeline = new ClippingPipeline(app, { translateEnglishClippings: true, templatePath: "" }, {
+    const pipeline = new ClippingPipeline(app, { templatePath: "" }, {
       recordPipelineSuccess: async () => {},
       setPipelineStatus: async (status) => { assert.fail(status.error); }
     }, ai, { runExclusive: async (_path, operation) => operation() });
@@ -226,9 +225,10 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
       adapter: { exists: async () => false }
     } };
     const ai = {
-      confirmFormatting: async () => { throw new Error("AI response did not contain message content."); }
+      confirmFormatting: async () => { throw new Error("AI response did not contain message content."); },
+      translateEnglishParagraphs: async () => []
     };
-    const pipeline = new ClippingPipeline(app, { templatePath: "", translateEnglishClippings: false }, {
+    const pipeline = new ClippingPipeline(app, { templatePath: "" }, {
       recordPipelineSuccess: async () => { success = true; },
       setPipelineStatus: async (status) => { assert.fail(status.error); }
     }, ai, { runExclusive: async (_path, operation) => operation() });
@@ -273,9 +273,10 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
         await new Promise((resolve) => setTimeout(resolve, 20));
         inFlight -= 1;
         return batch.map((candidate) => ({ id: candidate.id, action: "heading", level: 2 }));
-      }
+      },
+      translateEnglishParagraphs: async () => []
     };
-    const pipeline = new ClippingPipeline(app, { templatePath: "", translateEnglishClippings: false }, {
+    const pipeline = new ClippingPipeline(app, { templatePath: "" }, {
       recordPipelineSuccess: async () => {},
       setPipelineStatus: async (status) => { assert.fail(status.error); }
     }, ai, { runExclusive: async (_path, operation) => operation() });
@@ -302,7 +303,7 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
       adapter: { exists: async () => false }
     } };
     let propertyCalls = 0;
-    const pipeline = new ClippingPipeline(app, { templatePath: "", translateEnglishClippings: false }, {
+    const pipeline = new ClippingPipeline(app, { templatePath: "" }, {
       recordPipelineSuccess: async () => {},
       setPipelineStatus: async (status) => { assert.fail(status.error); }
     }, {
@@ -314,7 +315,8 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
           category: "人工智能",
           tags: ["agent-memory"]
         };
-      }
+      },
+      translateEnglishParagraphs: async () => []
     }, { runExclusive: async (_path, operation) => operation() });
     await pipeline.process({ path: "Clippings/Memory.md", basename: "Memory" }, (...event) => progress.push(event));
     assert.match(written, /简要描述: "说明事件日志和派生索引的分工。"/);
@@ -341,14 +343,15 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
       adapter: { exists: async () => false }
     } };
     propertyCalls = 0;
-    await new ClippingPipeline(keeping, { templatePath: "", translateEnglishClippings: false }, {
+    await new ClippingPipeline(keeping, { templatePath: "" }, {
       recordPipelineSuccess: async () => {},
       setPipelineStatus: async (status) => { assert.fail(status.error); }
     }, {
       proposeNoteProperties: async () => {
         propertyCalls += 1;
         return { description: "说明事件日志和派生索引的分工。", readingValue: 5, category: "人工智能", tags: ["agent-memory"] };
-      }
+      },
+      translateEnglishParagraphs: async () => []
     }, { runExclusive: async (_path, operation) => operation() }).process(
       { path: "Clippings/Memory.md", basename: "Memory" }
     );
@@ -361,11 +364,12 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
     assert.doesNotMatch(written, /知识积累/);
     assert.doesNotMatch(written, /  - kept/);
 
-    await new ClippingPipeline(keeping, { templatePath: "", translateEnglishClippings: false }, {
+    await new ClippingPipeline(keeping, { templatePath: "" }, {
       recordPipelineSuccess: async () => {},
       setPipelineStatus: async (status) => { assert.fail(status.error); }
     }, {
-      proposeNoteProperties: async () => ({})
+      proposeNoteProperties: async () => ({}),
+      translateEnglishParagraphs: async () => []
     }, { runExclusive: async (_path, operation) => operation() }).process(
       { path: "Clippings/Memory.md", basename: "Memory" }
     );
@@ -373,11 +377,12 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
     assert.doesNotMatch(written, /已有描述/);
     assert.match(written, /阅读价值: 2/);
 
-    await new ClippingPipeline(keeping, { templatePath: "", translateEnglishClippings: false }, {
+    await new ClippingPipeline(keeping, { templatePath: "" }, {
       recordPipelineSuccess: async () => {},
       setPipelineStatus: async (status) => { assert.fail(status.error); }
     }, {
-      proposeNoteProperties: async () => { throw new Error("model down"); }
+      proposeNoteProperties: async () => { throw new Error("model down"); },
+      translateEnglishParagraphs: async () => []
     }, { runExclusive: async (_path, operation) => operation() }).process(
       { path: "Clippings/Memory.md", basename: "Memory" }
     );
@@ -412,7 +417,7 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
   const coordinator = { runExclusive: async (_path, operation) => operation() };
   const pipeline = new ClippingPipeline(
     app,
-    { articlesFolder: "Articles", autoCreateCategoryFolders: true },
+    { articlesFolder: "Articles" },
     store,
     {},
     coordinator
@@ -433,7 +438,7 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
   const coordinator = { runExclusive: async (_path, operation) => operation() };
   const pipeline = new ClippingPipeline(
     app,
-    { articlesFolder: "Articles", autoCreateCategoryFolders: true },
+    { articlesFolder: "Articles" },
     {},
     {},
     coordinator
@@ -602,10 +607,10 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
       process: async (_file, transform) => { written = transform(body); },
       adapter: { exists: async () => false }
     } };
-    const pipeline = new ClippingPipeline(app, { templatePath: "", translateEnglishClippings: false }, {
+    const pipeline = new ClippingPipeline(app, { templatePath: "" }, {
       recordPipelineSuccess: async () => {},
       setPipelineStatus: async (status) => { assert.fail(status.error); }
-    }, {}, { runExclusive: async (_path, operation) => operation() });
+    }, { translateEnglishParagraphs: async () => [] }, { runExclusive: async (_path, operation) => operation() });
     await pipeline.process({ path: "Clippings/Fences.md", basename: "Fences" });
     assert.ok(written.includes(listFence), "an indented list fence must keep its tabs");
     assert.ok(written.includes(calloutFence), "a callout fence must keep its tabs");

@@ -148,7 +148,7 @@ export class AiService {
     knowledgePointGroups: KnowledgePointGroup[] = []
   ): Promise<QuizQuestion[]> {
     return this.skills.run("article-quiz", (instructions) => new QuizAi(new AiTransport(instructions)).generateQuiz(
-      this.settings.quizModel,
+      this.settings.taskModel,
       filePath,
       title,
       content,
@@ -159,22 +159,22 @@ export class AiService {
 
   async generateKnowledgePoints(title: string, content: string): Promise<KnowledgePointGroup[]> {
     return this.skills.run("knowledge-points", (instructions) =>
-      new KnowledgeAi(new AiTransport(instructions)).generateKnowledgePoints(this.settings.knowledgePointsModel, title, content)
+      new KnowledgeAi(new AiTransport(instructions)).generateKnowledgePoints(this.settings.taskModel, title, content)
     );
   }
 
   async generateKnowledgePointQuiz(filePath: string, articleTitle: string, point: KnowledgePoint): Promise<QuizQuestion> {
     return this.skills.run("article-quiz", (instructions) =>
-      new QuizAi(new AiTransport(instructions)).generateKnowledgePointQuiz(this.settings.quizModel, filePath, articleTitle, point)
+      new QuizAi(new AiTransport(instructions)).generateKnowledgePointQuiz(this.settings.taskModel, filePath, articleTitle, point)
     );
   }
 
   confirmFormatting(candidates: FormattingCandidate[], instructions: string): Promise<FormattingDecision[]> {
-    return requestFormattingDecisions(this.settings.pipelineModel, candidates, instructions);
+    return requestFormattingDecisions(this.settings.taskModel, candidates, instructions);
   }
 
   proposeNoteProperties(title: string, content: string, categories: string[]): Promise<NotePropertyProposal> {
-    return requestNoteProperties(this.settings.pipelineModel, title, content, categories);
+    return requestNoteProperties(this.settings.taskModel, title, content, categories);
   }
 
   async translateEnglishParagraphs(
@@ -183,7 +183,7 @@ export class AiService {
     instructions?: string
   ): Promise<TranslationDecision[]> {
     const translate = (skill: string) => new RepairAi(new AiTransport([skill, translationFormatRules.trim()].join("\n\n")))
-      .translateEnglishParagraphs(this.settings.pipelineModel, title, candidates);
+      .translateEnglishParagraphs(this.settings.taskModel, title, candidates);
     if (instructions?.trim()) return translate(instructions);
     return this.skills.run("article-translation", translate);
   }

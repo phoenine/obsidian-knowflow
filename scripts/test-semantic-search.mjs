@@ -147,7 +147,6 @@ const app = {
 const settings = {
   articlesFolder: "Articles",
   semanticIndexExcludeFolders: ["assets"],
-  embeddingDimensions: 0,
   embeddingModel: {
     runtime: "openai-compatible",
     apiBaseUrl: "https://embedding.example/v1",
@@ -306,9 +305,6 @@ service.updateSettings({
 assert.equal(service.getStats().compatible, false);
 service.updateSettings(settings);
 service.updateSettings({ ...settings, semanticIndexExcludeFolders: [] });
-assert.equal(service.getStats().compatible, false);
-service.updateSettings(settings);
-service.updateSettings({ ...settings, embeddingDimensions: 1 });
 assert.equal(service.getStats().compatible, false);
 service.updateSettings(settings);
 await service.removePath("Articles/Fruit.md");

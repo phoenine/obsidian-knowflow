@@ -18,6 +18,7 @@ import { isMarkdownInFolder } from "./services/search/semantic-search";
 import { DEFAULT_SETTINGS, KnowFlowSettingTab } from "./settings";
 import { KNOWFLOW_VIEW_TYPE, type AiModelConfig, type KnowFlowSettings } from "./types";
 import { KnowFlowSidebarView } from "./ui/sidebar-view";
+import { setAppLanguage, t } from "./i18n";
 
 export default class KnowFlowPlugin extends Plugin {
   settings: KnowFlowSettings;
@@ -71,23 +72,23 @@ export default class KnowFlowPlugin extends Plugin {
 
     this.registerView(KNOWFLOW_VIEW_TYPE, (leaf) => new KnowFlowSidebarView(leaf, this));
 
-    this.addRibbonIcon("brain", "Open KnowFlow", () => {
+    this.addRibbonIcon("brain", t("openKnowflow"), () => {
       void this.activateView();
     });
 
     this.addCommand({
       id: "open-knowflow-sidebar",
-      name: "Open sidebar",
+      name: t("commandOpen"),
       callback: () => void this.activateView()
     });
 
     this.addCommand({
       id: "process-current-clipping",
-      name: "Process current clipping",
+      name: t("commandProcess"),
       callback: async () => {
         const file = this.app.workspace.getActiveFile();
         if (!file) {
-          new Notice("No active file");
+          new Notice(t("noActiveFile"));
           return;
         }
         await this.pipeline.process(file);
@@ -97,7 +98,7 @@ export default class KnowFlowPlugin extends Plugin {
 
     this.addCommand({
       id: "refresh-knowflow",
-      name: "Refresh sidebar",
+      name: t("commandRefresh"),
       callback: () => this.refreshView()
     });
 
@@ -156,7 +157,7 @@ export default class KnowFlowPlugin extends Plugin {
     try {
       await this.quizNotes.updateSourcePath(newPath);
     } catch (error) {
-      new Notice(`KnowFlow: failed to update Quiz source link: ${error instanceof Error ? error.message : String(error)}`);
+      new Notice(t("quizLinkFailed", { message: error instanceof Error ? error.message : String(error) }));
     }
     await this.store.migratePath(oldPath, newPath);
     this.refreshView();
@@ -166,7 +167,7 @@ export default class KnowFlowPlugin extends Plugin {
     try {
       await this.quizNotes.updateSourceFolder(newPath);
     } catch (error) {
-      new Notice(`KnowFlow: failed to update Quiz source links: ${error instanceof Error ? error.message : String(error)}`);
+      new Notice(t("quizLinksFailed", { message: error instanceof Error ? error.message : String(error) }));
     }
     await this.store.migrateFolder(oldPath, newPath);
     this.refreshView();
@@ -211,9 +212,11 @@ export default class KnowFlowPlugin extends Plugin {
     const root = await this.dataManager.read();
     const savedSettings = "settings" in root ? (root as { settings?: Partial<KnowFlowSettings> }).settings : root;
     this.settings = normalizeSettings(savedSettings);
+    setAppLanguage(this.settings.language);
   }
 
   async saveSettings(): Promise<void> {
+    setAppLanguage(this.settings.language);
     await this.dataManager.update((root) => ({ ...root, settings: this.settings }));
     this.router?.updateSettings(this.settings);
     this.ai?.updateSettings(this.settings);
@@ -258,46 +261,46 @@ function normalizeSettings(savedSettings: unknown): KnowFlowSettings {
   const settings = {
     ...DEFAULT_SETTINGS,
     ...saved,
-    autoOrganize: false,
-    autoGenerateSummary: false,
-    autoGenerateQuiz: false,
     dailyReviewQuestionCap: normalizePositiveInt(
       saved.dailyReviewQuestionCap ?? saved.dailyReviewLimit,
       DEFAULT_SETTINGS.dailyReviewQuestionCap
     ),
-    embeddingDimensions: normalizeNonNegativeInt(
-      saved.embeddingDimensions,
-      DEFAULT_SETTINGS.embeddingDimensions
-    ),
     summaryModel,
-    knowledgePointsModel: normalizeModelConfig(saved.knowledgePointsModel ?? saved.knowledgeMapModel, summaryModel),
-    pipelineModel: normalizeModelConfig(saved.pipelineModel, DEFAULT_SETTINGS.pipelineModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
+    taskModel: normalizeModelConfig(
+      saved.taskModel ?? saved.pipelineModel ?? saved.knowledgePointsModel ?? saved.knowledgeMapModel ?? saved.quizModel,
+      DEFAULT_SETTINGS.taskModel,
+      legacyRuntime,
+      legacyBaseUrl,
+      legacyApiKey
+    ),
     chatModel: normalizeModelConfig(saved.chatModel, DEFAULT_SETTINGS.chatModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
-    quizModel: normalizeModelConfig(saved.quizModel, DEFAULT_SETTINGS.quizModel, legacyRuntime, legacyBaseUrl, legacyApiKey),
     embeddingModel: normalizeModelConfig(saved.embeddingModel, DEFAULT_SETTINGS.embeddingModel),
     semanticIndexExcludeFolders: normalizeFolderList(
       saved.semanticIndexExcludeFolders,
       DEFAULT_SETTINGS.semanticIndexExcludeFolders
-    )
+    ),
+    language: (saved.language === "en" ? "en" : "zh") as KnowFlowSettings["language"]
   };
   delete (settings as typeof settings & { knowledgeMapModel?: unknown }).knowledgeMapModel;
+  delete (settings as typeof settings & { knowledgePointsModel?: unknown }).knowledgePointsModel;
+  delete (settings as typeof settings & { pipelineModel?: unknown }).pipelineModel;
+  delete (settings as typeof settings & { quizModel?: unknown }).quizModel;
+  delete (settings as typeof settings & { autoOrganize?: unknown }).autoOrganize;
+  delete (settings as typeof settings & { autoGenerateSummary?: unknown }).autoGenerateSummary;
+  delete (settings as typeof settings & { autoGenerateQuiz?: unknown }).autoGenerateQuiz;
+  delete (settings as typeof settings & { translateEnglishClippings?: unknown }).translateEnglishClippings;
+  delete (settings as typeof settings & { autoCreateCategoryFolders?: unknown }).autoCreateCategoryFolders;
+  delete (settings as typeof settings & { confirmBeforeWrite?: unknown }).confirmBeforeWrite;
+  delete (settings as typeof settings & { defaultArticleCategory?: unknown }).defaultArticleCategory;
   delete (settings as typeof settings & { dailyReviewLimit?: unknown }).dailyReviewLimit;
   delete (settings as typeof settings & { autoLinkRelatedArticles?: unknown }).autoLinkRelatedArticles;
   delete (settings as typeof settings & { autoReviewRelatedArticles?: unknown }).autoReviewRelatedArticles;
   delete (settings as typeof settings & { autoAnalyzeRelatedArticles?: unknown }).autoAnalyzeRelatedArticles;
+  delete (settings as typeof settings & { embeddingDimensions?: unknown }).embeddingDimensions;
   return settings;
 }
 
 function normalizePositiveInt(value: unknown, fallback: number): number {
-  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.floor(value));
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number.parseInt(value, 10);
-    if (Number.isFinite(parsed)) return Math.max(0, parsed);
-  }
-  return fallback;
-}
-
-function normalizeNonNegativeInt(value: unknown, fallback: number): number {
   if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.floor(value));
   if (typeof value === "string" && value.trim()) {
     const parsed = Number.parseInt(value, 10);

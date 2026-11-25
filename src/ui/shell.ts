@@ -1,4 +1,5 @@
 import { setIcon } from "obsidian";
+import { t } from "../i18n";
 import { iconButton, setStyles, text } from "./dom";
 
 export function renderShell(root: HTMLElement, title: string, status: string, onBack?: () => void, subtitle = ""): HTMLElement {
@@ -21,7 +22,7 @@ export function renderShell(root: HTMLElement, title: string, status: string, on
     overflow: "hidden"
   });
   if (onBack) {
-    iconButton(left, "Back", "arrow-left", onBack);
+    iconButton(left, t("back"), "arrow-left", onBack);
   }
   if (title || subtitle) {
     const copy = left.createDiv();

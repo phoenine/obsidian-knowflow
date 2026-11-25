@@ -1,5 +1,6 @@
 import { setIcon } from "obsidian";
 import type { RelatedNote } from "../types";
+import { t } from "../i18n";
 import { applyActionLayout, button, cardHeader, iconButton, row, section, setStyles, text } from "./dom";
 
 export interface RelevantNotesCardProps {
@@ -18,11 +19,11 @@ export interface RelevantNotesCardProps {
 /** Renders related-note discovery with explicit index and failure states. */
 export function renderRelevantNotesCard(content: HTMLElement, props: RelevantNotesCardProps): void {
   const card = section(content, "kf-relevant-notes");
-  const indexAction = props.indexReady ? "重建摘要索引" : "建立摘要索引";
+  const indexAction = props.indexReady ? t("rebuildSummaryIndex") : t("buildSummaryIndex");
   cardHeader(card, "git-fork", "Relevant Notes", (header) => {
     const rebuild = iconButton(
       header,
-      props.indexBuilding ? `正在${indexAction}` : indexAction,
+      props.indexBuilding ? t("indexingAction", { action: indexAction }) : indexAction,
       "refresh-cw",
       () => void props.onBuildIndex()
     );
@@ -31,24 +32,24 @@ export function renderRelevantNotesCard(content: HTMLElement, props: RelevantNot
     rebuild.setAttribute("aria-busy", String(props.indexBuilding));
   });
   if (props.indexBuilding) {
-    text(card, `正在${indexAction}…`, "kf-muted").setAttribute("role", "status");
+    text(card, t("indexingAction", { action: indexAction }), "kf-muted").setAttribute("role", "status");
   } else if (!props.indexReady) {
-    text(card, `可用 ${props.indexScope} 中已有的 AI 摘要建立索引。`, "kf-muted");
+    text(card, t("indexFromSummaries", { scope: props.indexScope }), "kf-muted");
   }
 
   if (props.loading && props.notes.length === 0) {
-    text(card, "正在查找相关文章…", "kf-muted");
+    text(card, t("findingRelated"), "kf-muted");
     return;
   }
   if (props.error) {
-    text(card, `检索失败：${props.error}`, "kf-muted");
+    text(card, t("searchFailed", { message: props.error }), "kf-muted");
     const actions = row(card, "kf-actions");
     applyActionLayout(actions);
-    button(actions, "重试", props.onRetry);
+    button(actions, t("retry"), props.onRetry);
     return;
   }
   if (props.notes.length === 0) {
-    text(card, "暂未找到相关文章。", "kf-muted");
+    text(card, t("noRelated"), "kf-muted");
     return;
   }
   const list = card.createDiv({ cls: "kf-relevant-list" });
@@ -68,7 +69,7 @@ export function renderRelevantNotesCard(content: HTMLElement, props: RelevantNot
     });
     const titleRow = row(item);
     setStyles(titleRow, { gap: "6px" });
-    const open = titleRow.createEl("button", { attr: { title: `打开 ${note.title}` } });
+    const open = titleRow.createEl("button", { attr: { title: t("openNote", { title: note.title }) } });
     setStyles(open, {
       background: "transparent",
       border: "0",
@@ -91,7 +92,7 @@ export function renderRelevantNotesCard(content: HTMLElement, props: RelevantNot
       whiteSpace: "nowrap"
     });
     open.addEventListener("click", () => props.onOpen(note.path));
-    const chatLabel = note.addedToChat ? "已加入对话，点击打开" : "加入 Chat";
+    const chatLabel = note.addedToChat ? t("addedToChat") : t("addToChat");
     const add = titleRow.createEl("button", { attr: { "aria-label": chatLabel, title: chatLabel } });
     setIcon(add, note.addedToChat ? "check" : "message-circle-plus");
     setStyles(add, {

@@ -15,8 +15,7 @@ export function resolveDeepSeekSearchKey(
   const storedKey = secrets?.getSecret(DEEPSEEK_SEARCH_SECRET_ID)?.trim();
   if (storedKey) return storedKey;
   const officialModel = [
-    settings.summaryModel, settings.pipelineModel, settings.chatModel,
-    settings.knowledgePointsModel, settings.quizModel, settings.embeddingModel
+    settings.summaryModel, settings.taskModel, settings.chatModel, settings.embeddingModel
   ].find((config) => config.runtime === "openai-compatible" && config.apiKey.trim()
     && [DEEPSEEK_ORIGIN, `${DEEPSEEK_ORIGIN}/v1`].includes(config.apiBaseUrl.trim().replace(/\/+$/, "")));
   return officialModel?.apiKey.trim() ?? "";

@@ -71,7 +71,7 @@ const { SummaryController } = await import(pathToFileURL(join(tempDir, "summary-
   let saved = null;
   const app = { vault: { read: async () => "文章正文" } };
   const plugin = {
-    settings: { defaultArticleCategory: "知识积累" },
+    settings: {},
     ai: {
       summarizeStream: async (_path, _title, _content, onDelta) => {
         onDelta({ content: "核心观点\n- 内容", reasoning: "" });
@@ -125,8 +125,8 @@ const { SummaryController } = await import(pathToFileURL(join(tempDir, "summary-
   const app = { vault: { getAbstractFileByPath: (path) => path === file.path ? file : null } };
   const plugin = {
     settings: {
-      summaryModel: model, knowledgePointsModel: model, pipelineModel: model, chatModel: model,
-      quizModel: model, embeddingModel: model, confirmBeforeWrite: true
+      summaryModel: model, taskModel: model, chatModel: model,
+      embeddingModel: model
     },
     freshness: {
       check: async (target, model) => {
@@ -160,7 +160,7 @@ const { SummaryController } = await import(pathToFileURL(join(tempDir, "summary-
   await ask("应用第 2 条");
   assert.deepEqual(writes, [[1]]);
   await ask("检查并更新这篇文章");
-  assert.deepEqual(writes, [[1]], "confirmation setting should leave edits pending");
+  assert.deepEqual(writes, [[1]], "check-and-update waits for confirmation");
   await ask("应用第 1、2 条");
   assert.deepEqual(writes, [[1], [0, 1]]);
   controller.activeThread = null;

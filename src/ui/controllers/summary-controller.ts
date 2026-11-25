@@ -1,6 +1,7 @@
 import { Notice, type App, type TFile } from "obsidian";
 import type KnowFlowPlugin from "../../main";
 import { parseSummaryCallout, type SummaryText } from "../../services/learning/summary-notes";
+import { t } from "../../i18n";
 
 interface CachedSummaryText {
   mtime: number;
@@ -90,7 +91,7 @@ export class SummaryController {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.errors.set(path, message);
-      new Notice(`KnowFlow summary failed: ${message}`, 8000);
+      new Notice(t("summaryFailedNotice", { message }), 8000);
     } finally {
       this.clearStreaming(path);
       this.pending.delete(path);

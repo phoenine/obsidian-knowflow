@@ -1,5 +1,6 @@
 import { Notice, TFile, normalizePath, parseYaml } from "obsidian";
 import type { App } from "obsidian";
+import { t } from "../../i18n";
 import type { KnowFlowSettings } from "../../types";
 import type { AiService } from "../ai/ai-service";
 import { protectedRanges } from "./protected-markdown";
@@ -103,7 +104,6 @@ export class ClippingPipeline {
         throw new Error("Frontmatter 缺少独立的结束行，原文已保留。");
       }
       this.assertReadableBody(body);
-      const translate = this.settings.translateEnglishClippings;
       const prompts = formatPromptBlocks(body);
       const literalHtml = escapeLiteralHtmlTags(prompts.content);
       let formatted = normalizeBodyHeadingLevels(repairTableDividers(this.organizeMarkdownStyle(restoreDetachedLists(literalHtml.content))));
@@ -140,9 +140,9 @@ export class ClippingPipeline {
         return imagePlan;
       };
 
-      const translationPlan = translate ? planEnglishTranslation(text) : { candidates: [], skipReason: "未开启英文翻译" };
+      const translationPlan = planEnglishTranslation(text);
       let propertyTask: Promise<Awaited<ReturnType<ClippingPipeline["proposeNoteProperties"]>>> | undefined;
-      if (!translate || translationPlan.skipReason) {
+      if (translationPlan.skipReason) {
         await report(translationStep, "skipped", translationPlan.skipReason);
         propertyTask = this.startNoteProperties(title, text);
       } else {
@@ -193,8 +193,9 @@ export class ClippingPipeline {
       const propertyInfo = [filled.length ? `已更新${filled.join("、")}` : undefined, warnings.length ? warnings.join("；") : undefined]
         .filter(Boolean).join("；") || undefined;
       await report(propertyStep, "completed", propertyInfo);
-      const imageResult = repaired.restored ? `已恢复 ${repaired.restored} 张图片。` : "";
-      new Notice(`KnowFlow 已整理。${imageResult}${warnings.length ? `待检查：${warnings.join("；")}` : ""}`);
+      const imageResult = repaired.restored ? t("imagesRestored", { count: repaired.restored }) : "";
+      const warningText = warnings.length ? t("checkWarnings", { warnings: warnings.join("；") }) : "";
+      new Notice(t("organizedNotice", { images: imageResult, warnings: warningText }));
     } catch (error) {
       if (!noteWritten) await Promise.allSettled(createdAttachments.map((attachment) => this.app.vault.delete(attachment)));
       await this.store.setPipelineStatus({
@@ -231,13 +232,13 @@ export class ClippingPipeline {
     if (categorized !== content) await this.app.vault.modify(movedFile, categorized);
 
     await this.store.recordCategoryMove({ oldPath, newPath: movedFile.path });
-    new Notice(`KnowFlow: moved to ${category}`);
+    new Notice(t("movedTo", { category }));
     return movedFile;
   }
 
   private async ensureCategoryFolder(targetFolder: string, category: string): Promise<void> {
     if (await this.app.vault.adapter.exists(targetFolder)) return;
-    if (!this.settings.autoCreateCategoryFolders && !ARTICLE_CATEGORIES.includes(category)) {
+    if (!ARTICLE_CATEGORIES.includes(category)) {
       throw new Error(`目标分类目录不存在：${targetFolder}`);
     }
     await this.app.vault.createFolder(targetFolder);

@@ -1,5 +1,6 @@
 import { setIcon } from "obsidian";
 import type { ArticleStats, DailyReviewSession, DailyTask } from "../types";
+import { t } from "../i18n";
 import { iconButton, setStyles } from "./dom";
 import { renderBrandShell } from "./shell";
 
@@ -53,7 +54,7 @@ export function renderTaskOverviewView(root: HTMLElement, props: TaskOverviewVie
     ? Math.round((completedTaskCount / totalTaskCount) * 100)
     : 0;
 
-  const content = renderBrandShell(root, "Task Overview");
+  const content = renderBrandShell(root, t("taskOverview"));
   setStyles(content, {
     backgroundColor: PALETTE.background,
     gap: "0",
@@ -111,21 +112,22 @@ function renderTodayCard(parent: HTMLElement, props: TodayCardProps): void {
 
   const hero = card.createDiv();
   setStyles(hero, {
+    alignItems: "center",
     display: "grid",
-    gap: "16px",
-    gridTemplateColumns: "minmax(0, 1fr) 82px",
+    gap: "12px",
+    gridTemplateColumns: "minmax(0, 1fr) 88px",
     minHeight: "82px"
   });
   const copy = hero.createDiv();
   const heading = copy.createDiv();
   setStyles(heading, { alignItems: "center", display: "flex", gap: "8px" });
   createIcon(heading, "leaf", 20);
-  setStyles(heading.createDiv({ text: "今日学习" }), {
+  setStyles(heading.createDiv({ text: t("todayLearning") }), {
     fontSize: "15px",
     fontWeight: "650",
     lineHeight: "20px"
   });
-  setStyles(copy.createDiv({ text: "每日进步，持续积累。" }), {
+  setStyles(copy.createDiv({ text: t("dailyMotto") }), {
     color: PALETTE.muted,
     fontSize: "13px",
     lineHeight: "18px",
@@ -139,9 +141,12 @@ function renderTodayCard(parent: HTMLElement, props: TodayCardProps): void {
     gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
     margin: "14px 0 12px"
   });
-  dailyMetric(metrics, "新文章", `${props.dailyNew} 篇`);
-  dailyMetric(metrics, "复习", `${props.dailyReview} 题`, true);
-  dailyMetric(metrics, "已完成", `${props.completedCount}/${props.tasks.length + (props.dailyReview > 0 ? 1 : 0)} 项`, true);
+  dailyMetric(metrics, t("newArticles"), t("articleCount", { count: props.dailyNew }));
+  dailyMetric(metrics, t("review"), t("questionCount", { count: props.dailyReview }), true);
+  dailyMetric(metrics, t("completed"), t("itemCount", {
+    done: props.completedCount,
+    total: props.tasks.length + (props.dailyReview > 0 ? 1 : 0)
+  }), true);
 
   divider(card);
   const taskHeading = card.createDiv();
@@ -153,18 +158,18 @@ function renderTodayCard(parent: HTMLElement, props: TodayCardProps): void {
   });
   createIcon(taskHeading, "calendar-check", 16, PALETTE.text);
   const totalTasks = props.tasks.length + (props.dailyReview > 0 ? 1 : 0);
-  setStyles(taskHeading.createDiv({ text: `今日任务 · ${totalTasks}` }), {
+  setStyles(taskHeading.createDiv({ text: t("todayTasks", { count: totalTasks }) }), {
     fontSize: "14px",
     fontWeight: "600",
     lineHeight: "19px"
   });
 
   if (props.loading) {
-    stateMessage(card, "正在生成全局复习题目…");
+    stateMessage(card, t("generatingReview"));
   } else if (totalTasks === 0) {
     stateMessage(card, props.review && props.review.bankSize > 0
-      ? "今天没有到期的复习题目"
-      : "当前暂无可学习文章或可复习题目");
+      ? t("noDueReview")
+      : t("noLearningItems"));
   } else {
     const taskRows = props.tasks.map((task) => taskRow(card, task, props));
     if (props.review && props.review.questions.length > 0) {
@@ -179,9 +184,9 @@ function renderTodayCard(parent: HTMLElement, props: TodayCardProps): void {
     };
     updateTaskRows(false);
     if (taskRows.length > 4) {
-      expandButton(card, taskRows.length - 4, "项", updateTaskRows);
+      expandButton(card, taskRows.length - 4, t("itemsUnit"), updateTaskRows);
     } else if (props.pendingCount === 0) {
-      setStyles(card.createDiv({ text: "今日任务已完成" }), {
+      setStyles(card.createDiv({ text: t("tasksDone") }), {
         color: PALETTE.accent,
         fontSize: "13px",
         fontWeight: "500",
@@ -217,7 +222,7 @@ function reviewTaskRow(parent: HTMLElement, review: DailyReviewSession, props: T
   if (review.completedAt) createIcon(status, "check", 10, PALETTE.background);
 
   const copy = item.createDiv();
-  setStyles(copy.createDiv({ text: "今日复习" }), {
+  setStyles(copy.createDiv({ text: t("todayReview") }), {
     color: PALETTE.review,
     fontSize: "13px",
     fontWeight: "400",
@@ -225,10 +230,10 @@ function reviewTaskRow(parent: HTMLElement, review: DailyReviewSession, props: T
     textDecoration: review.completedAt ? "line-through" : "none"
   });
 
-  taskAction(item, "刷新题目", "refresh-cw", answered === 0, props.onRefreshReview);
+  taskAction(item, t("refreshQuestions"), "refresh-cw", answered === 0, props.onRefreshReview);
   taskAction(
     item,
-    review.completedAt ? "查看结果" : answered > 0 ? "继续考试" : "开始考试",
+    review.completedAt ? t("viewResult") : answered > 0 ? t("continueQuiz") : t("startQuiz"),
     "clipboard-check",
     true,
     props.onStartReview
@@ -237,18 +242,26 @@ function reviewTaskRow(parent: HTMLElement, review: DailyReviewSession, props: T
 }
 
 function renderProgressRing(parent: HTMLElement, percent: number): void {
-  const ring = parent.createDiv({ cls: "kf-task-progress-ring" });
+  const column = parent.createDiv();
+  setStyles(column, {
+    alignItems: "center",
+    display: "flex",
+    flexDirection: "column",
+    gap: "6px",
+    minWidth: "0"
+  });
+  const ring = column.createDiv({ cls: "kf-task-progress-ring" });
   setStyles(ring, {
     alignItems: "center",
-    alignSelf: "start",
     background: `conic-gradient(${PALETTE.accent} 0 ${percent}%, #E3EBE0 ${percent}% 100%)`,
     borderRadius: "50%",
     boxSizing: "border-box",
     display: "flex",
-    height: "80px",
+    flex: "0 0 auto",
+    height: "72px",
     justifyContent: "center",
     padding: "6px",
-    width: "80px"
+    width: "72px"
   });
   const center = ring.createDiv();
   setStyles(center, {
@@ -256,7 +269,6 @@ function renderProgressRing(parent: HTMLElement, percent: number): void {
     backgroundColor: PALETTE.surface,
     borderRadius: "50%",
     display: "flex",
-    flexDirection: "column",
     height: "100%",
     justifyContent: "center",
     width: "100%"
@@ -265,15 +277,15 @@ function renderProgressRing(parent: HTMLElement, percent: number): void {
     fontFamily: "Inter, system-ui, sans-serif",
     fontSize: "18px",
     fontWeight: "800",
-    lineHeight: "21px",
-    whiteSpace: "nowrap"
+    lineHeight: "21px"
   });
-  setStyles(center.createDiv({ text: "今日进度" }), {
+  setStyles(column.createDiv({ text: t("todayProgress") }), {
     color: PALETTE.muted,
     fontSize: "11px",
     lineHeight: "14px",
-    marginTop: "2px",
-    whiteSpace: "nowrap"
+    overflowWrap: "anywhere",
+    textAlign: "center",
+    width: "100%"
   });
 }
 
@@ -290,7 +302,7 @@ function dailyMetric(parent: HTMLElement, label: string, value: string, separate
     fontSize: METRIC_LABEL_FONT_SIZE,
     fontWeight: "500",
     lineHeight: METRIC_LABEL_LINE_HEIGHT,
-    whiteSpace: "nowrap"
+    overflowWrap: "anywhere"
   });
   setStyles(item.createDiv({ text: value }), {
     borderTop: `1px solid ${PALETTE.divider}`,
@@ -299,8 +311,7 @@ function dailyMetric(parent: HTMLElement, label: string, value: string, separate
     fontWeight: "700",
     lineHeight: METRIC_VALUE_LINE_HEIGHT,
     marginTop: "5px",
-    paddingTop: "5px",
-    whiteSpace: "nowrap"
+    paddingTop: "5px"
   });
 }
 
@@ -318,8 +329,8 @@ function taskRow(parent: HTMLElement, task: DailyTask, props: TaskOverviewViewPr
   const status = item.createEl("button", {
     cls: "kf-task-status-button",
     attr: {
-      "aria-label": task.status === "pending" ? `完成 ${task.title}` : taskStatusLabel(task.status),
-      title: task.status === "pending" ? "标记完成" : taskStatusLabel(task.status)
+      "aria-label": task.status === "pending" ? t("completeTask", { title: task.title }) : taskStatusLabel(task.status),
+      title: task.status === "pending" ? t("markComplete") : taskStatusLabel(task.status)
     }
   });
   setStyles(status, {
@@ -366,8 +377,8 @@ function taskRow(parent: HTMLElement, task: DailyTask, props: TaskOverviewViewPr
     if (task.targetPath) props.onOpenTask(task);
   });
 
-  taskAction(item, "换一篇", "refresh-cw", task.status === "pending", () => props.onRefreshTask(task));
-  taskAction(item, "跳过", "skip-forward", task.status === "pending", () => props.onSkipTask(task));
+  taskAction(item, t("swapArticle"), "refresh-cw", task.status === "pending", () => props.onRefreshTask(task));
+  taskAction(item, t("skipTask"), "skip-forward", task.status === "pending", () => props.onSkipTask(task));
   return item;
 }
 
@@ -396,7 +407,7 @@ function renderLearningTrend(
 ): void {
   const section = parent.createDiv({ cls: "kf-learning-trend" });
   setStyles(section, { padding: "14px 4px 0" });
-  sectionHeading(section, "chart-no-axes-column", "学习趋势", 15);
+  sectionHeading(section, "chart-no-axes-column", t("learningTrend"), 15);
 
   const chart = section.createDiv();
   setStyles(chart, {
@@ -408,7 +419,7 @@ function renderLearningTrend(
     marginTop: "3px",
     padding: "0 13px"
   });
-  const days = ["一", "二", "三", "四", "五", "六", "日"];
+  const days = [t("weekdayMon"), t("weekdayTue"), t("weekdayWed"), t("weekdayThu"), t("weekdayFri"), t("weekdaySat"), t("weekdaySun")];
   const readValues = days.map((_, index) => weeklyReadTrend[index] ?? 0);
   const reviewValues = days.map((_, index) => weeklyReviewTrend[index] ?? 0);
   const totals = days.map((_, index) => readValues[index] + reviewValues[index]);
@@ -416,7 +427,7 @@ function renderLearningTrend(
   const today = (new Date().getDay() + 6) % 7;
   for (let index = 0; index < days.length; index += 1) {
     const column = chart.createDiv();
-    const tooltip = `阅读：${readValues[index]} 篇\n复习：${reviewValues[index]} 题`;
+    const tooltip = t("trendTooltip", { read: readValues[index], review: reviewValues[index] });
     column.setAttribute("aria-label", tooltip);
     column.setAttribute("title", tooltip);
     setStyles(column, {
@@ -461,13 +472,20 @@ function renderLearningTrend(
   const stats = section.createDiv();
   setStyles(stats, {
     display: "grid",
-    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+    gap: "14px 8px",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
     padding: "18px 0 15px"
   });
-  trendMetric(stats, "连续学习", `${currentWeekStreak(readValues, today)} 天`);
-  trendMetric(stats, "本周阅读", `${weeklyLearned} 篇`, true);
-  trendMetric(stats, "本周复习", `${weeklyReviewCount} 次`, true);
-  trendMetric(stats, "平均正确率", weeklyReviewAccuracy === null ? "--" : `${weeklyReviewAccuracy}%`, true);
+  const streak = currentWeekStreak(readValues, today);
+  const trendItems: Array<[string, string]> = [
+    [t("streak"), t(streak === 1 ? "dayCountOne" : "dayCount", { count: streak })],
+    [t("weeklyReading"), t("articleCount", { count: weeklyLearned })],
+    [t("weeklyReview"), t("reviewCount", { count: weeklyReviewCount })],
+    [t("averageAccuracy"), weeklyReviewAccuracy === null ? "--" : `${weeklyReviewAccuracy}%`]
+  ];
+  for (const [index, [label, value]] of trendItems.entries()) {
+    trendMetric(stats, label, value, index % 2 === 1);
+  }
 }
 
 function trendSegmentHeight(value: number, maxValue: number): number {
@@ -487,7 +505,7 @@ function trendMetric(parent: HTMLElement, label: string, value: string, separate
     fontSize: METRIC_LABEL_FONT_SIZE,
     fontWeight: "500",
     lineHeight: METRIC_LABEL_LINE_HEIGHT,
-    whiteSpace: "nowrap"
+    overflowWrap: "anywhere"
   });
   setStyles(item.createDiv({ text: value }), {
     borderTop: `1px solid ${PALETTE.divider}`,
@@ -496,8 +514,7 @@ function trendMetric(parent: HTMLElement, label: string, value: string, separate
     fontWeight: "700",
     lineHeight: METRIC_VALUE_LINE_HEIGHT,
     marginTop: "5px",
-    paddingTop: "5px",
-    whiteSpace: "nowrap"
+    paddingTop: "5px"
   });
 }
 
@@ -513,12 +530,24 @@ function renderArticleStats(
     padding: "17px 4px 0"
   });
   const header = section.createDiv();
-  setStyles(header, { alignItems: "center", display: "flex", justifyContent: "space-between" });
-  sectionHeading(header, "chart-pie", "Articles 分类统计", 15);
-  setStyles(header.createDiv({ text: scopeLabel === "全部文章" ? "全部" : scopeLabel }), {
+  setStyles(header, {
+    alignItems: "center",
+    display: "flex",
+    gap: "8px",
+    justifyContent: "space-between",
+    minWidth: "0"
+  });
+  sectionHeading(header, "chart-pie", t("categoryStats"), 15);
+  setStyles(header.createDiv({ text: scopeLabel === t("allArticles") ? t("allShort") : scopeLabel }), {
+    flex: "0 1 auto",
     fontSize: "11px",
     fontWeight: "500",
-    lineHeight: "14px"
+    lineHeight: "14px",
+    maxWidth: "46%",
+    overflow: "hidden",
+    textAlign: "right",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap"
   });
 
   const metrics = section.createDiv();
@@ -527,12 +556,12 @@ function renderArticleStats(
     gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
     margin: "14px 0 9px"
   });
-  articleMetric(metrics, "文章", stats.total);
-  articleMetric(metrics, "已学习", stats.learned, true);
-  articleMetric(metrics, "待读", stats.unread, true);
+  articleMetric(metrics, t("articles"), stats.total);
+  articleMetric(metrics, t("learned"), stats.learned, true);
+  articleMetric(metrics, t("unread"), stats.unread, true);
 
   if (categories.length === 0) {
-    stateMessage(section, "当前范围内暂无分类数据");
+    stateMessage(section, t("noCategoryData"));
     return;
   }
   const categoryRows: HTMLElement[] = [];
@@ -543,7 +572,7 @@ function renderArticleStats(
       alignItems: "center",
       display: "grid",
       gap: "7px",
-      gridTemplateColumns: "68px 82px minmax(90px, 1fr)",
+      gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.4fr) minmax(48px, 0.7fr)",
       minHeight: "28px"
     });
     setStyles(item.createDiv({ text: category.name }), {
@@ -554,10 +583,12 @@ function renderArticleStats(
       textOverflow: "ellipsis",
       whiteSpace: "nowrap"
     });
-    setStyles(item.createDiv({ text: `${category.total} · 已学习 ${category.learned}` }), {
+    const learnedLabel = t("learnedOf", { total: category.total, learned: category.learned });
+    setStyles(item.createDiv({ text: learnedLabel, attr: { title: learnedLabel } }), {
       fontSize: "11px",
       lineHeight: "14px",
-      whiteSpace: "nowrap"
+      minWidth: "0",
+      overflowWrap: "anywhere"
     });
     progressBar(item, category.total > 0 ? Math.round((category.learned / category.total) * 100) : 0);
   }
@@ -568,7 +599,7 @@ function renderArticleStats(
   };
   updateCategoryRows(false);
   if (categories.length > 4) {
-    expandButton(section, categories.length - 4, "个分类", updateCategoryRows);
+    expandButton(section, categories.length - 4, t("categoriesUnit"), updateCategoryRows);
   }
 }
 
@@ -584,7 +615,8 @@ function articleMetric(parent: HTMLElement, label: string, value: number, separa
     color: PALETTE.muted,
     fontSize: METRIC_LABEL_FONT_SIZE,
     fontWeight: "500",
-    lineHeight: METRIC_LABEL_LINE_HEIGHT
+    lineHeight: METRIC_LABEL_LINE_HEIGHT,
+    overflowWrap: "anywhere"
   });
   setStyles(item.createDiv({ text: String(value) }), {
     borderTop: `1px solid ${PALETTE.divider}`,
@@ -599,12 +631,16 @@ function articleMetric(parent: HTMLElement, label: string, value: number, separa
 
 function sectionHeading(parent: HTMLElement, icon: string, label: string, fontSize: number): HTMLElement {
   const heading = parent.createDiv();
-  setStyles(heading, { alignItems: "center", display: "flex", gap: "8px" });
+  setStyles(heading, { alignItems: "center", display: "flex", flex: "1", gap: "8px", minWidth: "0" });
   createIcon(heading, icon, 20);
   setStyles(heading.createDiv({ text: label }), {
     fontSize: `${fontSize}px`,
     fontWeight: "500",
-    lineHeight: fontSize >= 19 ? "25px" : "20px"
+    lineHeight: fontSize >= 19 ? "25px" : "20px",
+    minWidth: "0",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap"
   });
   return heading;
 }
@@ -639,7 +675,7 @@ function expandButton(
   let expanded = false;
   const control = parent.createEl("button", {
     cls: "kf-expand-button",
-    attr: { "aria-expanded": "false", title: "展开全部" }
+    attr: { "aria-expanded": "false", title: t("expandAll") }
   });
   setStyles(control, {
     alignItems: "center",
@@ -660,9 +696,9 @@ function expandButton(
   const label = control.createSpan();
   const icon = createIcon(control, "chevron-down", 14);
   const updateControl = (): void => {
-    label.textContent = expanded ? "收起" : `展开全部（还有 ${hiddenCount} ${unit}）`;
+    label.textContent = expanded ? t("collapseAll") : t("expandRemaining", { count: hiddenCount, unit });
     control.setAttribute("aria-expanded", String(expanded));
-    control.setAttribute("title", expanded ? "收起" : "展开全部");
+    control.setAttribute("title", expanded ? t("collapseAll") : t("expandAll"));
     icon.style.transform = expanded ? "rotate(180deg)" : "rotate(0deg)";
   };
   updateControl();
@@ -702,9 +738,9 @@ function countTasks(tasks: DailyTask[], type: DailyTask["type"]): number {
 }
 
 function taskStatusLabel(status: DailyTask["status"]): string {
-  if (status === "completed") return "已完成";
-  if (status === "skipped") return "已跳过";
-  return "待处理";
+  if (status === "completed") return t("taskCompleted");
+  if (status === "skipped") return t("taskSkipped");
+  return t("taskPending");
 }
 
 function currentWeekStreak(values: number[], today: number): number {

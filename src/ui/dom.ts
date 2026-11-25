@@ -169,8 +169,12 @@ export function button(parent: HTMLElement, label: string, onClick: () => void, 
     fontSize: "13px",
     fontWeight: "600",
     justifyContent: "center",
+    lineHeight: "1.3",
     minHeight: "34px",
+    overflowWrap: "anywhere",
     padding: "7px 10px",
+    textAlign: "center",
+    whiteSpace: "normal",
     transition: "filter 120ms ease, opacity 120ms ease, transform 120ms ease"
   });
   attachPressFeedback(el);
@@ -203,7 +207,7 @@ export function metric(parent: HTMLElement, label: string, value: string, onClic
     fontSize: "10.5px",
     fontWeight: "500",
     lineHeight: "1.25",
-    whiteSpace: "nowrap"
+    overflowWrap: "anywhere"
   });
   setStyles(el.createDiv({ text: value, cls: "kf-metric-value" }), {
     borderTop: "1px solid color-mix(in srgb, var(--interactive-accent) 12%, var(--background-modifier-border))",

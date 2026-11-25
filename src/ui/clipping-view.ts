@@ -1,6 +1,7 @@
 import { setIcon } from "obsidian";
 import { ARTICLE_CATEGORIES } from "../services/clipping/clipping-pipeline";
 import type { NoteSummary, PipelineStatus, PipelineUiState } from "../types";
+import { t } from "../i18n";
 import { applyActionLayout, applyMetricsLayout, attachPressFeedback, button, cardHeader, iconSpan, metric, row, section, setStyles, text } from "./dom";
 import { renderBrandShell } from "./shell";
 import { renderRelevantNotesCard, type RelevantNotesCardProps } from "./relevant-notes-view";
@@ -33,7 +34,7 @@ interface ClippingViewProps extends SummaryCardProps, RelevantNotesCardProps, Ar
 }
 
 export function renderClippingView(root: HTMLElement, props: ClippingViewProps): void {
-  const content = renderBrandShell(root, "Clipping assistant", (actions) => {
+  const content = renderBrandShell(root, t("clippingAssistant"), (actions) => {
     renderArticleMaintenanceActions(actions, props);
   });
 
@@ -43,9 +44,9 @@ export function renderClippingView(root: HTMLElement, props: ClippingViewProps):
   text(titleRow, props.title, "kf-card-title");
   const metrics = row(current, "kf-metrics");
   applyMetricsLayout(metrics);
-  metric(metrics, "阅读价值", props.readingValueLabel);
-  metric(metrics, "推荐动作", props.recommendedActionLabel);
-  metric(metrics, "建议目录", props.suggestedCategoryLabel);
+  metric(metrics, t("readingValue"), props.readingValueLabel);
+  metric(metrics, t("recommendedAction"), props.recommendedActionLabel);
+  metric(metrics, t("suggestedFolder"), props.suggestedCategoryLabel);
 
   renderSummaryCard(content, props);
   renderRelevantNotesCard(content, props);
@@ -120,14 +121,14 @@ export function renderSummaryCard(content: HTMLElement, props: SummaryCardProps)
     if (props.summaryPending) {
       renderPendingSummary(summary, props.sourceLabel);
     } else if (props.summaryError) {
-      text(summary, `生成失败：${props.summaryError}`, "kf-muted");
+      text(summary, t("summaryFailed", { message: props.summaryError }), "kf-muted");
     } else {
-      text(summary, "还没有摘要。", "kf-muted");
+      text(summary, t("noSummary"), "kf-muted");
     }
     if (!props.summaryPending) {
       const summaryActions = row(summary, "kf-actions");
       applyActionLayout(summaryActions);
-      const generateButton = button(summaryActions, props.summaryError ? "重新生成摘要" : "生成摘要", () => {
+      const generateButton = button(summaryActions, props.summaryError ? t("regenerateSummary") : t("generateSummary"), () => {
         void lockButton(generateButton, props.onGenerateSummary);
       }, true);
     }
@@ -171,11 +172,11 @@ export function renderArticleMaintenanceActions(parent: HTMLElement, props: Arti
 }
 
 export function renderKnowledgePointsButton(parent: HTMLElement, onOpen: () => void): void {
-  headerIconButton(parent, "知识点", "network", onOpen);
+  headerIconButton(parent, t("knowledgePoints"), "network", onOpen);
 }
 
 export function renderQuizButton(parent: HTMLElement, pending: boolean, hasAttempt: boolean, onOpen: () => void): void {
-  const label = pending ? "正在生成试题" : hasAttempt ? "查看考试成绩" : "考试";
+  const label = pending ? t("quizGenerating") : hasAttempt ? t("viewQuizScore") : t("quiz");
   const quiz = headerIconButton(parent, label, pending ? "loader-2" : "clipboard-check", () => {
     if (!pending) onOpen();
   });
@@ -205,7 +206,7 @@ function renderOrganizeButton(parent: HTMLElement, props: ArticleMaintenanceProp
   const running = props.pipelineState?.running === true;
   const error = running ? undefined : props.pipelineState?.error ?? (props.persistedPipeline.status === "failed" ? props.persistedPipeline.error : undefined);
   const processed = !running && !error && props.persistedPipeline.status === "processed";
-  const label = running ? "整理中" : error ? compactErrorMessage(error) : processed ? "已整理" : "整理当前文章";
+  const label = running ? t("organizing") : error ? compactErrorMessage(error) : processed ? t("organized") : t("organizeArticle");
   const organize = headerIconButton(parent, label, running ? "loader-2" : "list-checks", () => {
     if (!running) void props.onRunPipeline();
   });
@@ -233,7 +234,7 @@ function renderOrganizeButton(parent: HTMLElement, props: ArticleMaintenanceProp
 }
 
 function renderMoveButton(parent: HTMLElement, props: ArticleMaintenanceProps): void {
-  const move = headerIconButton(parent, "移动到分类", "folder-input", () => {
+  const move = headerIconButton(parent, t("moveCategory"), "folder-input", () => {
     const existing = parent.querySelector<HTMLElement>(".kf-move-menu");
     if (existing) {
       existing.remove();
@@ -277,7 +278,7 @@ function renderMoveButton(parent: HTMLElement, props: ArticleMaintenanceProps): 
         textAlign: "left"
       });
       item.createSpan({ text: category });
-      const hint = current ? "当前" : category === suggested ? "建议" : "";
+      const hint = current ? t("currentCategory") : category === suggested ? t("suggestedCategory") : "";
       if (hint) {
         setStyles(item.createSpan({ text: hint }), {
           color: "var(--text-muted)",
@@ -369,7 +370,7 @@ async function lockButton(button: HTMLButtonElement, action: () => Promise<void>
 }
 
 function renderPendingSummary(parent: HTMLElement, sourceLabel: string): void {
-  const line = text(parent, `正在根据当前 ${sourceLabel} 生成摘要`, "kf-muted");
+  const line = text(parent, t("summarizingFrom", { source: sourceLabel }), "kf-muted");
   const dots = line.createSpan();
   setStyles(dots, { display: "inline-block", textAlign: "left", width: "1.4em" });
   let count = 0;

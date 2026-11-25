@@ -4,9 +4,10 @@ import { withTimeout } from "./services/ai/ai-transport";
 import { EmbeddingTransport } from "./services/ai/embedding-transport";
 import type { AiModelConfig, AiRuntime, KnowFlowSettings } from "./types";
 import { DEEPSEEK_SEARCH_SECRET_ID, resolveDeepSeekSearchKey } from "./services/search/public-evidence";
+import { setAppLanguage, t } from "./i18n";
 
-type ModelConfigKey = "summaryModel" | "knowledgePointsModel" | "pipelineModel" | "chatModel" | "quizModel" | "embeddingModel";
-type SettingsTabKey = "basic" | "ai-models" | "pipeline" | "learning" | "data";
+type ModelConfigKey = "summaryModel" | "taskModel" | "chatModel" | "embeddingModel";
+type SettingsTabKey = "basic" | "ai-models" | "data";
 
 const DEFAULT_MODEL_CONFIG: AiModelConfig = {
   runtime: "openai-compatible",
@@ -26,30 +27,21 @@ export const DEFAULT_SETTINGS: KnowFlowSettings = {
   clippingFolder: "Clippings",
   articlesFolder: "Articles",
   semanticIndexExcludeFolders: ["assets"],
-  defaultArticleCategory: "知识积累",
   archiveFolder: "Archives",
   chatConversationFolder: "copilot-conversations",
   templatePath: "Template/article.md",
   summaryModel: { ...DEFAULT_MODEL_CONFIG },
-  knowledgePointsModel: { ...DEFAULT_MODEL_CONFIG },
-  pipelineModel: { ...DEFAULT_MODEL_CONFIG },
+  taskModel: { ...DEFAULT_MODEL_CONFIG },
   chatModel: { ...DEFAULT_MODEL_CONFIG },
-  quizModel: { ...DEFAULT_MODEL_CONFIG },
-  embeddingModel: {
+    embeddingModel: {
     runtime: "disabled",
     apiBaseUrl: "",
     apiKey: "",
     model: "text-embedding-3-small"
   },
-  embeddingDimensions: 0,
-  confirmBeforeWrite: false,
-  translateEnglishClippings: false,
-  autoOrganize: false,
-  autoGenerateSummary: false,
-  autoGenerateQuiz: false,
   dailyNewArticleLimit: 1,
   dailyReviewQuestionCap: 10,
-  autoCreateCategoryFolders: false
+  language: "zh"
 };
 
 export class KnowFlowSettingTab extends PluginSettingTab {
@@ -64,29 +56,46 @@ export class KnowFlowSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "KnowFlow Settings" });
+    containerEl.createEl("h2", { text: t("settingsTitle") });
     this.renderTabs(containerEl);
 
     if (this.activeTab === "basic") {
+      this.displayLanguage(containerEl);
       this.displayBasic(containerEl);
+      this.displayLearning(containerEl);
     } else if (this.activeTab === "ai-models") {
       this.displayAiModels(containerEl);
-    } else if (this.activeTab === "pipeline") {
-      this.displayPipeline(containerEl);
-    } else if (this.activeTab === "learning") {
-      this.displayLearning(containerEl);
     } else {
       this.displayData(containerEl);
     }
     this.renderSupportFooter(containerEl);
   }
 
+  private displayLanguage(containerEl: HTMLElement): void {
+    const language = this.createGroup(containerEl, t("language"), "", true);
+    new Setting(language)
+      .setName(t("interfaceLanguage"))
+      .setDesc(t("interfaceLanguageDesc"))
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("zh", "中文")
+          .addOption("en", "English")
+          .setValue(this.plugin.settings.language)
+          .onChange(async (value) => {
+            this.plugin.settings.language = value === "en" ? "en" : "zh";
+            setAppLanguage(this.plugin.settings.language);
+            await this.plugin.saveSettings();
+            this.display();
+          })
+      );
+  }
+
   private displayBasic(containerEl: HTMLElement): void {
-    const vault = this.createGroup(containerEl, "Vault 路径", `${this.plugin.settings.clippingFolder} -> ${this.plugin.settings.articlesFolder}`, true);
+    const vault = this.createGroup(containerEl, t("vaultPaths"), "", true);
 
     new Setting(vault)
-      .setName("Clipping folder")
-      .setDesc("Folder where Obsidian Web Clipper saves new articles.")
+      .setName(t("clippingFolder"))
+      .setDesc(t("clippingFolderDesc"))
       .addText((text) =>
         text
           .setPlaceholder("Clippings")
@@ -98,8 +107,8 @@ export class KnowFlowSettingTab extends PluginSettingTab {
       );
 
     new Setting(vault)
-      .setName("Articles folder")
-      .setDesc("Long-term article library root.")
+      .setName(t("articlesFolder"))
+      .setDesc(t("articlesFolderDesc"))
       .addText((text) =>
         text
           .setPlaceholder("Articles")
@@ -111,21 +120,8 @@ export class KnowFlowSettingTab extends PluginSettingTab {
       );
 
     new Setting(vault)
-      .setName("Default article category")
-      .setDesc("Fallback category when classification confidence is low.")
-      .addText((text) =>
-        text
-          .setPlaceholder("知识积累")
-          .setValue(this.plugin.settings.defaultArticleCategory)
-          .onChange(async (value) => {
-            this.plugin.settings.defaultArticleCategory = value.trim() || DEFAULT_SETTINGS.defaultArticleCategory;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(vault)
-      .setName("Archive folder")
-      .setDesc("Where generated quiz notes are stored (one markdown note per article, instead of growing data.json).")
+      .setName(t("archiveFolder"))
+      .setDesc(t("archiveFolderDesc"))
       .addText((text) =>
         text
           .setPlaceholder("Archives")
@@ -137,8 +133,8 @@ export class KnowFlowSettingTab extends PluginSettingTab {
       );
 
     new Setting(vault)
-      .setName("Chat conversation folder")
-      .setDesc("Only conversations explicitly saved from Chat are stored here and shown in history.")
+      .setName(t("chatFolder"))
+      .setDesc(t("chatFolderDesc"))
       .addText((text) =>
         text
           .setPlaceholder("copilot-conversations")
@@ -150,8 +146,8 @@ export class KnowFlowSettingTab extends PluginSettingTab {
       );
 
     new Setting(vault)
-      .setName("Article template")
-      .setDesc("Frontmatter field reference. Defaults to your current Template/article.md.")
+      .setName(t("articleTemplate"))
+      .setDesc(t("articleTemplateDesc"))
       .addText((text) =>
         text
           .setPlaceholder("Template/article.md")
@@ -163,23 +159,11 @@ export class KnowFlowSettingTab extends PluginSettingTab {
       );
 
     new Setting(vault)
-      .setName("Auto-create category folders")
-      .setDesc("Built-in categories are always auto-created. Off by default; enable to also auto-create folders for custom (non-built-in) categories.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.autoCreateCategoryFolders)
-          .onChange(async (value) => {
-            this.plugin.settings.autoCreateCategoryFolders = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(vault)
-      .setName("Validate paths")
-      .setDesc("Check whether the configured folders and article template exist in the current vault.")
+      .setName(t("validatePaths"))
+      .setDesc(t("validatePathsDesc"))
       .addButton((button) =>
         button
-          .setButtonText("Validate")
+          .setButtonText(t("validate"))
           .onClick(async () => {
             await this.validateBasicPaths();
           })
@@ -187,84 +171,27 @@ export class KnowFlowSettingTab extends PluginSettingTab {
   }
 
   private displayAiModels(containerEl: HTMLElement): void {
-    const ai = this.createGroup(containerEl, "AI 模型", "", true);
-    this.createModelEntry(ai, "Summary model", "AI Summary: generates article summary, reading value and classification.", "summaryModel");
-    this.createModelEntry(ai, "Knowledge Points model", "Generates grouped knowledge points and their evidence from the article.", "knowledgePointsModel");
-    this.createModelEntry(ai, "Pipeline model", "Clipping Pipeline: heading detection, code block recognition and language classification.", "pipelineModel");
-    this.createModelEntry(ai, "Chat model", "Used by the sidebar chat composer.", "chatModel");
-    this.createModelEntry(ai, "Quiz model", "Generates Markdown quiz questions, including targeted knowledge-point questions.", "quizModel");
-    this.createModelEntry(ai, "Embedding model", "Builds the local Relevant Notes and Vault Search index.", "embeddingModel");
+    const ai = this.createGroup(containerEl, t("aiModels"), "", true);
+    this.createModelEntry(ai, t("summaryModel"), t("summaryModelDesc"), "summaryModel");
+    this.createModelEntry(ai, t("taskModel"), t("taskModelDesc"), "taskModel");
+    this.createModelEntry(ai, t("chatModel"), t("chatModelDesc"), "chatModel");
+    this.createModelEntry(ai, t("embeddingModel"), t("embeddingModelDesc"), "embeddingModel");
 
     const secrets = this.app.secretStorage;
     const separateKey = secrets?.getSecret(DEEPSEEK_SEARCH_SECRET_ID)?.trim();
-    const status = separateKey ? "Dedicated API key"
-      : resolveDeepSeekSearchKey(this.plugin.settings, secrets) ? "Using DeepSeek model key" : "Not configured";
-    this.createConfiguredEntry(ai, "DeepSeek Search", "Finds public sources for article freshness checks.", status,
+    const status = separateKey ? t("deepseekDedicated")
+      : resolveDeepSeekSearchKey(this.plugin.settings, secrets) ? t("deepseekFallback") : t("deepseekMissing");
+    this.createConfiguredEntry(ai, t("deepseekSearch"), t("deepseekSearchDesc"), status,
       () => new DeepSeekSearchConfigModal(this.app, () => this.display()).open()
-    );
-  }
-
-  private displayPipeline(containerEl: HTMLElement): void {
-    const pipeline = this.createGroup(containerEl, "Pipeline", this.plugin.settings.confirmBeforeWrite ? "confirm before write" : "direct apply", true);
-
-    new Setting(pipeline)
-      .setName("Confirm before write")
-      .setDesc("When enabled, file modifications require manual confirmation.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.confirmBeforeWrite)
-          .onChange(async (value) => {
-            this.plugin.settings.confirmBeforeWrite = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(pipeline)
-      .setName("Translate non-Chinese prose")
-      .setDesc("While organizing, the skill decides each paragraph. Non-Chinese prose is translated; Chinese paragraphs are skipped. Code, formulas, standalone links, metadata and generated content stay out.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.translateEnglishClippings)
-          .onChange(async (value) => {
-            this.plugin.settings.translateEnglishClippings = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(pipeline)
-      .setName("Auto organize")
-      .setDesc("Available in 2.0. Automatically process new clippings.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(false)
-          .setDisabled(true)
-      );
-
-    new Setting(pipeline)
-      .setName("Auto generate summary")
-      .setDesc("Available in 2.0. Generate summaries after pipeline processing.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(false)
-          .setDisabled(true)
-      );
-
-    new Setting(pipeline)
-      .setName("Auto generate quiz")
-      .setDesc("Available in 2.0. Generate database-backed quiz after article processing.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(false)
-          .setDisabled(true)
       );
   }
 
   private displayLearning(containerEl: HTMLElement): void {
-    const learning = this.createGroup(containerEl, "Learning", `${this.plugin.settings.dailyNewArticleLimit} new · up to ${this.plugin.settings.dailyReviewQuestionCap} review questions`, true);
+    const learning = this.createGroup(containerEl, t("learning"), "", true);
 
     new Setting(learning)
-      .setName("Daily new article limit")
-      .setDesc("Maximum new articles in Daily Learning.")
+      .setName(t("dailyNewLimit"))
+      .setDesc(t("dailyNewLimitDesc"))
       .addText((text) =>
         text
           .setPlaceholder("1")
@@ -276,8 +203,8 @@ export class KnowFlowSettingTab extends PluginSettingTab {
       );
 
     new Setting(learning)
-      .setName("Daily review question cap")
-      .setDesc("Maximum questions in the global daily review.")
+      .setName(t("dailyReviewCap"))
+      .setDesc(t("dailyReviewCapDesc"))
       .addText((text) =>
         text
           .setPlaceholder("10")
@@ -291,29 +218,22 @@ export class KnowFlowSettingTab extends PluginSettingTab {
 
   private displayData(containerEl: HTMLElement): void {
     const stats = this.plugin.semanticIndex.getStats();
-    const semantic = this.createGroup(
-      containerEl,
-      "Semantic index",
-      stats.chunks > 0 ? `${stats.files} indexed summaries` : "no indexed summaries",
-      true
-    );
-    semantic.createEl("p", {
-      text: stats.chunks === 0
-        ? "Configure an Embedding model and build the AI summary index for Relevant Notes and Vault Search."
-        : stats.compatible
-          ? `Model: ${stats.model || "unknown"} · Updated: ${stats.updatedAt || "--"}`
-          : "Rebuild the saved index to use the current summary index format and embedding configuration.",
-      cls: "setting-item-description"
-    });
+    const semantic = this.createGroup(containerEl, t("semanticIndex"), "", true);
+    if (stats.chunks === 0 || !stats.compatible) {
+      semantic.createEl("p", {
+        text: stats.chunks === 0 ? t("indexEmptyHint") : t("indexRebuildHint"),
+        cls: "setting-item-description"
+      });
+    }
     if (stats.degraded) {
       semantic.createEl("p", {
-        text: `Degraded: ${stats.unhealthyShards} damaged or missing shard(s) affect ${stats.unavailableFiles} file(s). Other shards remain searchable; rebuild to repair them.`,
+        text: t("indexDegraded", { shards: stats.unhealthyShards, files: stats.unavailableFiles }),
         cls: "setting-item-description"
       });
     }
     new Setting(semantic)
-      .setName("Excluded folders")
-      .setDesc("Comma-separated folder names or paths under the configured Articles folder. A simple name such as assets matches at any depth.")
+      .setName(t("excludedFolders"))
+      .setDesc(t("excludedFoldersDesc"))
       .addText((input) => input
         .setPlaceholder("assets, Attachments")
         .setValue(this.plugin.settings.semanticIndexExcludeFolders.join(", "))
@@ -322,71 +242,36 @@ export class KnowFlowSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
     new Setting(semantic)
-      .setName("Embedding dimensions")
-      .setDesc("0 keeps the model's full vector. Use 1024 only with a model that supports Matryoshka truncation; KnowFlow re-normalizes truncated vectors.")
-      .addText((input) => input
-        .setPlaceholder("0")
-        .setValue(String(this.plugin.settings.embeddingDimensions))
-        .onChange(async (value) => {
-          this.plugin.settings.embeddingDimensions = toNonNegativeInt(value, 0);
-          await this.plugin.saveSettings();
-        }));
-    new Setting(semantic)
-      .setName(stats.chunks > 0 ? "Rebuild index" : "Build index")
-      .setDesc(`Indexes existing AI summaries under ${this.plugin.settings.articlesFolder}. Cloud runtimes send those summaries to the configured embedding provider.`)
+      .setName(stats.chunks > 0 ? t("rebuildIndex") : t("buildIndex"))
+      .setDesc(t("indexDesc", { folder: this.plugin.settings.articlesFolder }))
       .addButton((button) => button
-        .setButtonText(stats.chunks > 0 ? "Rebuild" : "Build")
+        .setButtonText(stats.chunks > 0 ? t("rebuild") : t("build"))
         .setCta()
         .onClick(async () => {
-          button.setDisabled(true).setButtonText("Building...");
+          button.setDisabled(true).setButtonText(t("building"));
           try {
             const next = await this.plugin.semanticIndex.rebuild();
-            new Notice(`KnowFlow indexed ${next.files} AI summaries.`);
+            new Notice(t("indexedNotice", { count: next.files }));
             this.plugin.refreshView();
             this.display();
           } catch (error) {
-            new Notice(`KnowFlow index failed: ${error instanceof Error ? error.message : String(error)}`, 8000);
-            button.setDisabled(false).setButtonText(stats.chunks > 0 ? "Rebuild" : "Build");
+            new Notice(t("indexFailed", { message: error instanceof Error ? error.message : String(error) }), 8000);
+            button.setDisabled(false).setButtonText(stats.chunks > 0 ? t("rebuild") : t("build"));
           }
         }));
     new Setting(semantic)
-      .setName("Clear semantic index")
-      .setDesc("Deletes the derived local index. Your Markdown notes are not changed.")
+      .setName(t("clearIndex"))
+      .setDesc(t("clearIndexDesc"))
       .addButton((button) => button
-        .setButtonText("Clear")
+        .setButtonText(t("clear"))
         .setWarning()
         .setDisabled(stats.chunks === 0)
         .onClick(async () => {
           await this.plugin.semanticIndex.clear();
-          new Notice("KnowFlow semantic index cleared.");
+          new Notice(t("indexCleared"));
           this.plugin.refreshView();
           this.display();
         }));
-
-    const privacy = this.createGroup(containerEl, "Data & Privacy", "local settings", true);
-    privacy.createEl("p", {
-      text: "KnowFlow stores settings, learning state and the derived semantic index locally. Chat requests send the current note and selected context; cloud embedding sends AI summaries to the configured provider.",
-      cls: "setting-item-description"
-    });
-    const apiKeyWarning = privacy.createEl("p", {
-      text: "Warning: AI model API keys are stored in plain text inside this vault's plugin data file (.obsidian/plugins/knowflow/data.json). If this vault is synced via Git or a cloud service, exclude that file or your keys may be exposed.",
-      cls: "setting-item-description"
-    });
-    Object.assign(apiKeyWarning.style, { color: "var(--text-warning)" });
-
-    new Setting(privacy)
-      .setName("Export data")
-      .setDesc("Data export will include notes, summaries, quizzes, attempts and review tasks.")
-      .addButton((button) =>
-        button
-          .setButtonText("Export")
-          .onClick(() => this.exportData())
-      );
-
-    new Setting(privacy)
-      .setName("Clear AI task history")
-      .setDesc("Clear AI task logs after the AI adapter and task queue are implemented.")
-      .addButton((button) => button.setButtonText("Clear").setDisabled(true));
   }
 
   private renderTabs(containerEl: HTMLElement): void {
@@ -400,11 +285,9 @@ export class KnowFlowSettingTab extends PluginSettingTab {
     });
 
     const items: Array<[SettingsTabKey, string]> = [
-      ["basic", "Basic"],
-      ["ai-models", "AI Models"],
-      ["pipeline", "Pipeline"],
-      ["learning", "Learning"],
-      ["data", "Data"]
+      ["basic", t("tabBasic")],
+      ["ai-models", t("tabAi")],
+      ["data", t("tabData")]
     ];
 
     for (const [key, label] of items) {
@@ -475,7 +358,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
       textAlign: "center"
     });
     const message = footer.createEl("p", {
-      text: "If you like KnowFlow and would like to support its continued development, star the project on GitHub."
+      text: t("supportMessage")
     });
     Object.assign(message.style, {
       lineHeight: "1.45",
@@ -487,7 +370,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
         href: "https://github.com/phoenine/KnowFlow",
         rel: "noopener noreferrer",
         target: "_blank",
-        title: "Star KnowFlow on GitHub"
+        title: t("starTitle")
       }
     });
     Object.assign(link.style, {
@@ -515,7 +398,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
     path.setAttribute("d", "M10.226 17.284c-2.965-.36-5.054-2.493-5.054-5.256 0-1.123.404-2.336 1.078-3.144-.292-.741-.247-2.314.09-2.965.898-.112 2.111.36 2.83 1.01.853-.269 1.752-.404 2.853-.404 1.1 0 1.999.135 2.807.382.696-.629 1.932-1.1 2.83-.988.315.606.36 2.179.067 2.942.72.854 1.101 2 1.101 3.167 0 2.763-2.089 4.852-5.098 5.234.763.494 1.28 1.572 1.28 2.807v2.336c0 .674.561 1.056 1.235.786 4.066-1.55 7.255-5.615 7.255-10.646C23.5 6.188 18.334 1 11.978 1 5.62 1 .5 6.188.5 12.545c0 4.986 3.167 9.12 7.435 10.669.606.225 1.19-.18 1.19-.786V20.63a2.9 2.9 0 0 1-1.078.224c-1.483 0-2.359-.808-2.987-2.313-.247-.607-.517-.966-1.034-1.033-.27-.023-.359-.135-.359-.27 0-.27.45-.471.898-.471.652 0 1.213.404 1.797 1.235.45.651.921.943 1.483.943.561 0 .92-.202 1.437-.719.382-.381.674-.718.944-.943");
     icon.appendChild(path);
     link.appendChild(icon);
-    link.createSpan({ text: "Star on GitHub" });
+    link.createSpan({ text: t("starGithub") });
   }
 
   private createModelEntry(containerEl: HTMLElement, name: string, desc: string, key: ModelConfigKey): void {
@@ -544,7 +427,7 @@ export class KnowFlowSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName(name)
       .setDesc(description)
-      .addButton((button) => button.setButtonText("Configure").onClick(configure));
+      .addButton((button) => button.setButtonText(t("configure")).onClick(configure));
   }
 
   private async validateBasicPaths(): Promise<void> {
@@ -562,38 +445,17 @@ export class KnowFlowSettingTab extends PluginSettingTab {
     }
 
     if (missing.length === 0) {
-      new Notice("KnowFlow paths are valid.");
+      new Notice(t("pathsValid"));
       return;
     }
 
-    new Notice(`KnowFlow missing paths:\n${missing.join("\n")}`, 8000);
-  }
-
-  private exportData(): void {
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      settings: this.plugin.settings,
-      store: this.plugin.store.exportData()
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `knowflow-export-${new Date().toISOString().slice(0, 10)}.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    new Notice("KnowFlow data exported.");
+    new Notice(t("pathsMissing", { paths: missing.join("\n") }), 8000);
   }
 }
 
 function toPositiveInt(value: string, fallback: number): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function toNonNegativeInt(value: string, fallback: number): number {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function parseFolderList(value: string): string[] {
@@ -604,20 +466,20 @@ function parseFolderList(value: string): string[] {
 }
 
 function runtimeLabel(runtime: AiRuntime): string {
-  if (runtime === "openai-compatible") return "Cloud";
+  if (runtime === "openai-compatible") return t("runtimeCloud");
   if (runtime === "ollama") return "Ollama";
   if (runtime === "lm-studio") return "LM Studio";
-  return "Disabled";
+  return t("runtimeDisabled");
 }
 
 async function testModelConnection(config: AiModelConfig): Promise<void> {
   if (config.runtime === "disabled") {
-    throw new Error("AI Runtime is disabled.");
+    throw new Error(t("runtimeDisabledError"));
   }
 
   const baseUrl = config.apiBaseUrl.trim().replace(/\/+$/g, "");
   if (!baseUrl) {
-    throw new Error("API Base URL is required.");
+    throw new Error(t("apiBaseRequired"));
   }
 
   const headers: Record<string, string> = {
@@ -635,12 +497,12 @@ async function testModelConnection(config: AiModelConfig): Promise<void> {
       throw: false
     }),
     15000,
-    `Connection test timed out after 15s. Check that ${baseUrl} is reachable.`
+    t("connectionTimeout", { url: baseUrl })
   );
 
   if (response.status < 200 || response.status >= 300) {
     const message = response.text?.slice(0, 160) || `HTTP ${response.status}`;
-    throw new Error(`Connection failed: ${message}`);
+    throw new Error(t("connectionFailed", { message }));
   }
 
   const models = Array.isArray(response.json?.data) ? response.json.data : [];
@@ -650,7 +512,7 @@ async function testModelConnection(config: AiModelConfig): Promise<void> {
       return (model as { id?: unknown }).id === config.model;
     });
     if (!found) {
-      new Notice(`Connection succeeded, but model "${config.model}" was not found in /models.`, 8000);
+      new Notice(t("modelMissing", { model: config.model }), 8000);
     }
   }
 }
@@ -666,16 +528,16 @@ class DeepSeekSearchConfigModal extends Modal {
     const originalKey = secrets?.getSecret(DEEPSEEK_SEARCH_SECRET_ID) ?? "";
     let apiKey = originalKey;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "DeepSeek Search" });
+    contentEl.createEl("h2", { text: t("deepseekSearch") });
     contentEl.createEl("p", {
-      text: "时效检查使用 DeepSeek 搜索公开资料。",
+      text: t("deepseekIntro"),
       cls: "setting-item-description"
     });
     new Setting(contentEl)
-      .setName("API Key")
+      .setName(t("apiKey"))
       .setDesc(secrets
-        ? "可选。留空时复用已配置的官方 DeepSeek 模型密钥。独立密钥保存在 Obsidian Secret Storage。"
-        : "独立密钥需要 Obsidian 1.11.4 或更新版本。也可复用已配置的官方 DeepSeek 模型密钥。")
+        ? t("deepseekKeyDesc")
+        : t("deepseekKeyUnavailable"))
       .addText((input) => {
         input.inputEl.type = "password";
         input.setPlaceholder("sk-...")
@@ -684,7 +546,7 @@ class DeepSeekSearchConfigModal extends Modal {
           .onChange((value) => { apiKey = value.trim(); });
       });
     new Setting(contentEl)
-      .addButton((button) => button.setButtonText("Save").setCta().onClick(() => {
+      .addButton((button) => button.setButtonText(t("save")).setCta().onClick(() => {
         if (apiKey !== originalKey) secrets?.setSecret(DEEPSEEK_SEARCH_SECRET_ID, apiKey);
         this.close();
         this.onSave();
@@ -713,21 +575,21 @@ class ModelConfigModal extends Modal {
     contentEl.empty();
     contentEl.createEl("h2", { text: this.title });
     contentEl.createEl("p", {
-      text: "Configure this model independently. Cloud uses an OpenAI-compatible endpoint. Local runtimes support Ollama and LM Studio.",
+      text: t("modelIntro"),
       cls: "setting-item-description"
     });
 
     let baseUrlInput: TextComponent | undefined;
 
     new Setting(contentEl)
-      .setName("AI Runtime")
-      .setDesc("Cloud uses OpenAI-compatible API. Local supports Ollama and LM Studio.")
+      .setName(t("aiRuntime"))
+      .setDesc(t("aiRuntimeDesc"))
       .addDropdown((dropdown) =>
         dropdown
-          .addOption("openai-compatible", "Cloud")
+          .addOption("openai-compatible", t("runtimeCloud"))
           .addOption("ollama", "Ollama")
           .addOption("lm-studio", "LM Studio")
-          .addOption("disabled", "Disabled")
+          .addOption("disabled", t("runtimeDisabled"))
           .setValue(config.runtime)
           .onChange(async (value) => {
             const previousBaseUrl = config.apiBaseUrl;
@@ -744,8 +606,8 @@ class ModelConfigModal extends Modal {
       );
 
     new Setting(contentEl)
-      .setName("API Base URL")
-      .setDesc("Cloud: OpenAI-compatible endpoint. Ollama and LM Studio use local v1-compatible endpoints.")
+      .setName(t("apiBaseUrl"))
+      .setDesc(t("apiBaseUrlDesc"))
       .addText((text) => {
         baseUrlInput = text;
         text
@@ -758,8 +620,8 @@ class ModelConfigModal extends Modal {
       });
 
     new Setting(contentEl)
-      .setName("API Key")
-      .setDesc("Required for Cloud. Usually empty for local Ollama and LM Studio.")
+      .setName(t("apiKey"))
+      .setDesc(t("apiKeyDesc"))
       .addText((text) => {
         text.inputEl.type = "password";
         text
@@ -772,8 +634,8 @@ class ModelConfigModal extends Modal {
       });
 
     new Setting(contentEl)
-      .setName("Model ID")
-      .setDesc("The exact model name exposed by this runtime.")
+      .setName(t("modelId"))
+      .setDesc(t("modelIdDesc"))
       .addText((text) =>
         text
           .setPlaceholder(DEFAULT_SETTINGS[this.key].model)
@@ -785,15 +647,15 @@ class ModelConfigModal extends Modal {
       );
 
     new Setting(contentEl)
-      .setName("Test connection")
+      .setName(t("testConnection"))
       .setDesc(this.key === "embeddingModel"
-        ? "Embeds a short test string using the current /embeddings endpoint."
-        : "Calls the runtime /models endpoint using the current base URL and API key.")
+        ? t("testEmbeddingDesc")
+        : t("testModelsDesc"))
       .addButton((button) =>
         button
-          .setButtonText("Test")
+          .setButtonText(t("test"))
           .onClick(async () => {
-            button.setButtonText("Testing...");
+            button.setButtonText(t("testing"));
             button.setDisabled(true);
             try {
               if (this.key === "embeddingModel") {
@@ -801,11 +663,11 @@ class ModelConfigModal extends Modal {
               } else {
                 await testModelConnection(config);
               }
-              new Notice(`${this.title}: connection succeeded.`);
+              new Notice(t("connectionSucceeded", { title: this.title }));
             } catch (error) {
-              new Notice(`${this.title}: ${error instanceof Error ? error.message : String(error)}`, 8000);
+              new Notice(t("connectionFailedNotice", { title: this.title, message: error instanceof Error ? error.message : String(error) }), 8000);
             } finally {
-              button.setButtonText("Test");
+              button.setButtonText(t("test"));
               button.setDisabled(false);
             }
           })
@@ -814,7 +676,7 @@ class ModelConfigModal extends Modal {
     new Setting(contentEl)
       .addButton((button) =>
         button
-          .setButtonText("Save")
+          .setButtonText(t("save"))
           .setCta()
           .onClick(() => this.close())
       );

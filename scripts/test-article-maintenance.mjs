@@ -172,13 +172,13 @@ const retired = await vault.create("Articles/Retired Tool.md", "Retired Tool 提
 const withdrawal = "Retired Tool 的远程公开服务已永久停止，旧版和新版客户端均不能连接。";
 const searchSettings = {
   summaryModel: model,
-  pipelineModel: { ...model, runtime: "openai-compatible", apiBaseUrl: "https://api.deepseek.com/v1/", apiKey: "official-key" },
-  chatModel: model, quizModel: model, knowledgePointsModel: model, embeddingModel: model
+  taskModel: { ...model, runtime: "openai-compatible", apiBaseUrl: "https://api.deepseek.com/v1/", apiKey: "official-key" },
+  chatModel: model, embeddingModel: model
 };
 const searchKey = resolveDeepSeekSearchKey(searchSettings);
 assert.equal(searchKey, "official-key");
 assert.equal(resolveDeepSeekSearchKey({
-  ...searchSettings, pipelineModel: { ...searchSettings.pipelineModel, apiBaseUrl: "https://api.deepseek.com.example.org" }
+  ...searchSettings, taskModel: { ...searchSettings.taskModel, apiBaseUrl: "https://api.deepseek.com.example.org" }
 }), "", "proxy credentials must not be forwarded to official DeepSeek");
 assert.equal(resolveDeepSeekSearchKey(searchSettings, {
   getSecret: (name) => name === "knowflow-deepseek-search" ? "dedicated-search-key" : null
