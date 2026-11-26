@@ -14,6 +14,7 @@ interface KnowledgePointsOverviewProps {
   onSelectPoint: (pointId: string) => void;
   onOpenEvidence: (point: KnowledgePoint) => void;
   onGenerateQuiz: (point: KnowledgePoint) => void;
+  renderMarkdown: (parent: HTMLElement, markdown: string) => void;
 }
 
 const COLORS = {
@@ -335,16 +336,14 @@ function renderPointDetails(
     props.onOpenEvidence(point);
   });
   divider(card, "10px 0");
-  const excerpt = card.createDiv({ text: point.evidence.excerpt });
+  const excerpt = card.createDiv();
   setStyles(excerpt, {
     borderLeft: "3px solid #E0EEDF",
-    color: "#526056",
-    fontSize: "12px",
-    lineHeight: "20px",
     overflowWrap: "anywhere",
-    paddingLeft: "12px",
-    whiteSpace: "pre-wrap"
+    paddingLeft: "12px"
   });
+  // The excerpt is verbatim note text, so it keeps Markdown (bold, links, lists).
+  props.renderMarkdown(excerpt, point.evidence.excerpt);
 
   divider(card, "16px 0");
   sectionTitle(card, t("checkQuestion"));

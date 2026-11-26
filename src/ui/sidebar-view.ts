@@ -535,7 +535,11 @@ export class KnowFlowSidebarView extends ItemView {
       onOpenEvidence: (point: KnowledgePoint) => {
         void this.openKnowledgePointEvidence(sourceFile, point);
       },
-      onGenerateQuiz: (point: KnowledgePoint) => void this.quizController.generateKnowledgePointQuiz(sourceFile, point)
+      onGenerateQuiz: (point: KnowledgePoint) => void this.quizController.generateKnowledgePointQuiz(sourceFile, point),
+      renderMarkdown: (parent: HTMLElement, markdown: string) => void this.renderMarkdownSummary(parent, markdown, sourceFile.path, {
+        compact: true,
+        style: { color: "#526056", fontSize: "12px", lineHeight: "20px" }
+      })
     };
 
     renderKnowledgePointsOverview(root, {
@@ -1436,12 +1440,18 @@ export class KnowFlowSidebarView extends ItemView {
     });
   }
 
-  private async renderMarkdownSummary(parent: HTMLElement, markdown: string, sourcePath: string): Promise<void> {
+  private async renderMarkdownSummary(
+    parent: HTMLElement,
+    markdown: string,
+    sourcePath: string,
+    options: { style?: Partial<CSSStyleDeclaration>; compact?: boolean } = {}
+  ): Promise<void> {
     const container = parent.createDiv({ cls: "kf-markdown-summary markdown-rendered" });
     setStyles(container, {
       color: "var(--text-muted)",
       fontSize: "13px",
-      lineHeight: "1.5"
+      lineHeight: "1.5",
+      ...options.style
     });
     await MarkdownRenderer.render(this.app, markdown, container, sourcePath, this);
     container.querySelectorAll("p").forEach((el) => {
@@ -1464,6 +1474,10 @@ export class KnowFlowSidebarView extends ItemView {
         margin: "8px 0 4px"
       });
     });
+    if (options.compact) {
+      const last = container.lastElementChild;
+      if (last instanceof HTMLElement) setStyles(last, { marginBottom: "0" });
+    }
   }
 
 }
