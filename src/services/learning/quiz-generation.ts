@@ -21,8 +21,7 @@ const BATCH_CHARS = 16000;
 
 export function prepareQuizSections(content: string): QuizSourceSection[] {
   const body = prepareArticleForAi(content);
-  const logicalSections = splitArticleSections(body)
-    .filter((section) => !/^(?:Knowledge Map|知识骨架)$/i.test(section.title.trim()));
+  const logicalSections = splitArticleSections(body);
   const chunks = logicalSections.flatMap((section) => splitLargeSection(section));
   return chunks.map((section, index) => ({
     id: `section-${index + 1}`,

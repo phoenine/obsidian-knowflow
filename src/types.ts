@@ -219,8 +219,6 @@ export interface ArticleStats {
   total: number;
   learned: number;
   unread: number;
-  reviewDue: number;
-  weakPoints: number;
 }
 
 export type DailyTaskType = "new_note";

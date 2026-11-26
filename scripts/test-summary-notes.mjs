@@ -139,10 +139,10 @@ const text = {
   const aligned = alignSummaryOutline(outline);
   assert.equal(aligned, [
     "## 章节梳理",
-    "9. 对比：向量库/Mem0/Letta/Anthropic 方案适用性。",
-    "10. 选型：过期性/推理需求/团队能力混合架构建议。",
-    "11. 场景与问答（11–12）：客服/研发等五类场景及面试核心问题。",
-    "12. 资产与检查（13–15）：格式契约、代码实现及十条上线清单。"
+    "9. **对比**：向量库/Mem0/Letta/Anthropic 方案适用性。",
+    "10. **选型**：过期性/推理需求/团队能力混合架构建议。",
+    "11. **场景与问答（11–12）**：客服/研发等五类场景及面试核心问题。",
+    "12. **资产与检查（13–15）**：格式契约、代码实现及十条上线清单。"
   ].join("\n"));
   assert.equal(alignSummaryOutline(aligned), aligned);
   const parsed = parseSummaryCallout(buildSummaryCallout({ summary: outline, reason: "适合工程师。" }));
@@ -161,6 +161,39 @@ const text = {
   assert.equal(alignSummaryOutline(prose), prose);
   const singleLine = "Value: low latency matters.\n\n## 核心观点\n- 保持低延迟";
   assert.equal(alignSummaryOutline(singleLine), singleLine);
+}
+
+{
+  // Key labels are bolded so each point can be scanned. Only the label is bold, and the closing ** sits after a word.
+  const summary = [
+    "## 核心观点",
+    "- 核心判断：显式依赖比范式标签更直接影响 AI 协作。",
+    "- 实现差异: 控制方式不同。",
+    "- 这是一条没有标签的很长结论，因为标签超过了十二个字所以不加粗：结论内容。",
+    "- 参考 https://example.com 的说明。",
+    "- 已经有 **重点** 的：保持原样。",
+    "",
+    "## 章节梳理",
+    "1. 定义与前提（1-2）：区分三种风格。",
+    "",
+    "```",
+    "- 代码：不要加粗",
+    "```"
+  ].join("\n");
+  const emphasized = alignSummaryOutline(summary);
+  assert.ok(emphasized.includes("- **核心判断**：显式依赖比范式标签更直接影响 AI 协作。"));
+  assert.ok(emphasized.includes("- **实现差异**: 控制方式不同。"));
+  assert.ok(emphasized.includes("1. **定义与前提（1-2）**：区分三种风格。"));
+  assert.ok(emphasized.includes("- 这是一条没有标签的很长结论"), "labels longer than 12 characters are left plain");
+  assert.equal(alignSummaryOutline("2. 任务对比分析（4-7,9）：通过平方。"), "2. **任务对比分析（4-7,9）**：通过平方。", "a range suffix does not count toward the label length");
+  assert.ok(emphasized.includes("- 参考 https://example.com 的说明。"), "URLs are not labels");
+  assert.ok(emphasized.includes("- 已经有 **重点** 的：保持原样。"), "lines that already have bold are untouched");
+  assert.ok(emphasized.includes("```\n- 代码：不要加粗\n```"), "code blocks are untouched");
+  const inline = "- `a: b` 是配置项。";
+  assert.equal(alignSummaryOutline(inline), inline, "a colon inside inline code is not a label");
+  const nestedFence = ["````md", "```", "- 代码：保留原文。", "11-12. 不调整编号。", "```", "````"].join("\n");
+  assert.equal(alignSummaryOutline(nestedFence), nestedFence, "a shorter fence inside a code block does not close it");
+  assert.equal(alignSummaryOutline(emphasized), emphasized, "emphasis is idempotent");
 }
 
 await rm(tempDir, { recursive: true, force: true });

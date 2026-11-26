@@ -4,6 +4,7 @@ import { ARTICLE_CATEGORIES } from "../services/clipping/clipping-pipeline";
 import { createDailyTaskPlan, type DailyTaskCandidate } from "../services/learning/daily-tasks";
 import { summarizeWeeklyReviewActivity } from "../services/learning/review-activity";
 import { insertBelowCursor } from "../services/chat/editor-bridge";
+import { localDateKey } from "../services/core/local-date";
 import { KNOWFLOW_VIEW_TYPE, type ArticleStats, type ChatMessage, type ChatThread, type DailyReviewSession, type DailyTask, type DailyTaskPlan, type KnowledgePoint, type NoteSummary, type PipelineUiState, type QuizSession, type RelatedNote, type ViewContext } from "../types";
 import { displayLearningStatus, t } from "../i18n";
 import { renderArticleDetailView } from "./article-detail-view";
@@ -55,6 +56,7 @@ export class KnowFlowSidebarView extends ItemView {
   private summaryController: SummaryController;
   private quizController: QuizController;
   private quizSession: QuizSession | null = null;
+  private submittingQuizSessions = new WeakSet<QuizSession>();
   private quizResults: QuizResultsState | null = null;
   private quizOpenPath: string | null = null;
   private knowledgePointView: KnowledgePointViewState | null = null;
@@ -71,6 +73,8 @@ export class KnowFlowSidebarView extends ItemView {
   private collapsedChats = new Map<string, CollapsedChat>();
   private dailyTaskPlanLoads = new Set<string>();
   private dailyReviewLoads = new Set<string>();
+  private dailyTaskPlanErrors = new Map<string, string>();
+  private dailyReviewErrors = new Map<string, string>();
   private relatedNotes = new Map<string, RelatedNotesState>();
   private relatedNoteLoads = new Set<string>();
   private relatedNoteErrors = new Map<string, string>();
@@ -297,18 +301,21 @@ export class KnowFlowSidebarView extends ItemView {
     const { stats, categoryStats } = overview;
     const weeklyActivity = overview.weekly;
     const weeklyLearned = weeklyActivity.dailyLearned.reduce((sum, count) => sum + count, 0);
-    const plan = this.getCurrentDailyTaskPlan(scope);
-    if (!plan) void this.ensureDailyTaskPlan(scope, false, files);
     const reviewDate = localDateKey(new Date());
+    const planKey = dailyTaskPlanKey(reviewDate, scope);
+    const plan = this.getCurrentDailyTaskPlan(scope);
+    if (!plan && !this.dailyTaskPlanErrors.has(planKey)) void this.ensureDailyTaskPlan(scope, files);
     const review = this.getCurrentDailyReview(reviewDate);
-    if (!review) void this.ensureDailyReview(false);
-    const loading = this.dailyTaskPlanLoads.has(dailyTaskPlanKey(reviewDate, scope)) || this.dailyReviewLoads.has(reviewDate);
+    if (!review && !this.dailyReviewErrors.has(reviewDate)) void this.ensureDailyReview(false);
+    const loading = this.dailyTaskPlanLoads.has(planKey) || this.dailyReviewLoads.has(reviewDate);
     renderTaskOverviewView(root, {
       stats,
       categoryStats,
       tasks: plan?.tasks ?? [],
       review,
       loading,
+      taskError: this.dailyTaskPlanErrors.get(planKey),
+      reviewError: this.dailyReviewErrors.get(reviewDate),
       weeklyLearned,
       weeklyReviewCount: weeklyActivity.reviewCount,
       weeklyReviewAccuracy: weeklyActivity.reviewAccuracy,
@@ -324,6 +331,7 @@ export class KnowFlowSidebarView extends ItemView {
       onSkipTask: (task) => {
         if (plan) void this.updateDailyTask(plan, task, "skipped");
       },
+      onRetryTasks: () => void this.ensureDailyTaskPlan(scope),
       onRefreshReview: () => void this.ensureDailyReview(true),
       onStartReview: () => {
         if (review) this.startDailyReview(review);
@@ -349,15 +357,17 @@ export class KnowFlowSidebarView extends ItemView {
     return existing && Object.keys(existing.answers).length > 0 ? existing : null;
   }
 
-  private async ensureDailyTaskPlan(scopePath: string, force: boolean, files?: TFile[]): Promise<void> {
+  private async ensureDailyTaskPlan(scopePath: string, files?: TFile[]): Promise<void> {
     const date = localDateKey(new Date());
     const loadKey = dailyTaskPlanKey(date, scopePath);
     if (this.dailyTaskPlanLoads.has(loadKey)) return;
-    if (!force && this.getCurrentDailyTaskPlan(scopePath)) return;
+    if (this.getCurrentDailyTaskPlan(scopePath) && !this.dailyTaskPlanErrors.has(loadKey)) return;
+    const retrying = this.dailyTaskPlanErrors.delete(loadKey);
     this.dailyTaskPlanLoads.add(loadKey);
+    if (retrying) this.render();
 
     try {
-      const existing = force ? null : this.plugin.store.getDailyTaskPlan(date, scopePath);
+      const existing = this.plugin.store.getDailyTaskPlan(date, scopePath);
       const candidates = this.getDailyTaskCandidates(scopePath, files);
 
       const plan = createDailyTaskPlan({
@@ -370,7 +380,7 @@ export class KnowFlowSidebarView extends ItemView {
       });
       await this.plugin.store.saveDailyTaskPlan(plan);
     } catch (error) {
-      new Notice(t("dailyTasksFailed", { message: error instanceof Error ? error.message : String(error) }));
+      this.dailyTaskPlanErrors.set(loadKey, t("dailyTasksFailed", { message: error instanceof Error ? error.message : String(error) }));
     } finally {
       this.dailyTaskPlanLoads.delete(loadKey);
       if (this.plugin.router.getContext().mode === "task-overview") this.render();
@@ -380,11 +390,13 @@ export class KnowFlowSidebarView extends ItemView {
   private async ensureDailyReview(force: boolean): Promise<void> {
     const date = localDateKey(new Date());
     if (this.dailyReviewLoads.has(date)) return;
+    const retrying = this.dailyReviewErrors.delete(date);
     this.dailyReviewLoads.add(date);
+    if (retrying) this.render();
     try {
       await this.plugin.dailyReview.ensureSession(date, this.plugin.settings.dailyReviewQuestionCap, force);
     } catch (error) {
-      new Notice(t("dailyReviewFailed", { message: error instanceof Error ? error.message : String(error) }));
+      this.dailyReviewErrors.set(date, t("dailyReviewFailed", { message: error instanceof Error ? error.message : String(error) }));
     } finally {
       this.dailyReviewLoads.delete(date);
       if (this.plugin.router.getContext().mode === "task-overview") this.render();
@@ -534,7 +546,11 @@ export class KnowFlowSidebarView extends ItemView {
       onOpenEvidence: (point: KnowledgePoint) => {
         void this.openKnowledgePointEvidence(sourceFile, point);
       },
-      onGenerateQuiz: (point: KnowledgePoint) => void this.quizController.generateKnowledgePointQuiz(sourceFile, point)
+      onGenerateQuiz: (point: KnowledgePoint) => void this.quizController.generateKnowledgePointQuiz(sourceFile, point),
+      renderMarkdown: (parent: HTMLElement, markdown: string) => void this.renderMarkdownSummary(parent, markdown, sourceFile.path, {
+        compact: true,
+        style: { color: "#526056", fontSize: "12px", lineHeight: "20px" }
+      })
     };
 
     renderKnowledgePointsOverview(root, {
@@ -608,12 +624,11 @@ export class KnowFlowSidebarView extends ItemView {
     if (this.quizOpenPath === file.path || this.quizController.isQuizPending(file.path)) return;
     this.quizOpenPath = file.path;
     try {
-      const loaded = await this.plugin.quizNotes.loadQuestions(file.path);
-      if (!loaded || loaded.questions.length === 0) {
+      const loaded = await this.plugin.quizNotes.loadReviewQuestions(file.path);
+      if (!loaded) {
         this.render();
         await this.quizController.generateQuiz(file);
-        const created = await this.plugin.quizNotes.loadQuestions(file.path);
-        if (!created || created.questions.length === 0) return;
+        if (!await this.plugin.quizNotes.loadReviewQuestions(file.path)) return;
       }
       if (!this.quizRequestStillCurrent(file.path)) return;
       this.quizResults = { filePath: file.path };
@@ -632,6 +647,7 @@ export class KnowFlowSidebarView extends ItemView {
       : null;
     renderQuizTestView(root, {
       session,
+      submitting: this.submittingQuizSessions.has(session),
       sourceLabel: reviewQuestion?.articleTitle,
       onOpenSource: reviewQuestion ? () => void this.openReviewSource(reviewQuestion.articlePath, reviewQuestion.question.sourceSection) : undefined,
       onBack: () => {
@@ -642,9 +658,7 @@ export class KnowFlowSidebarView extends ItemView {
         session.selectedKey = key;
         this.render();
       },
-      onSubmit: async () => {
-        await this.submitQuizAnswer(session);
-      },
+      onSubmit: () => void this.submitQuizAnswer(session),
       onNext: () => {
         session.index += 1;
         const review = session.reviewDate ? this.plugin.store.getDailyReviewSession(session.reviewDate) : null;
@@ -723,7 +737,7 @@ export class KnowFlowSidebarView extends ItemView {
           const svg = action.querySelector<SVGSVGElement>("svg");
           if (svg) Object.assign(svg.style, { height: "14px", width: "14px" });
         };
-        userAction(t("copyQuestion"), "copy", () => navigator.clipboard.writeText(message.content));
+        userAction(t("copyQuestion"), "copy", () => void this.copyChatText(message.content));
         userAction(t("editQuestion"), "square-pen", () => {
           this.openComposer(undefined, message.content);
         });
@@ -765,6 +779,18 @@ export class KnowFlowSidebarView extends ItemView {
         answer.textContent = message.content || t("waitingModel");
       }
 
+      const choices = message.status === "done" ? this.chatController.replyChoices(thread, message) : [];
+      if (choices.length) {
+        const choiceRow = row(assistant);
+        setStyles(choiceRow, { flexWrap: "wrap", gap: "8px", width: "100%" });
+        choices.forEach((choice, index) => {
+          // The reply text is what the user would type, so the existing parsers and write path handle it.
+          button(choiceRow, choice.label, () => {
+            void this.submitChat(choice.reply, this.plugin.router.getContext(), file instanceof TFile ? file : null);
+          }, index === 0);
+        });
+      }
+
       if (message.status === "pending" || message.status === "streaming") {
         this.streamingAnswerEl = answer;
         this.streamingReasoningEl = thinking;
@@ -793,7 +819,7 @@ export class KnowFlowSidebarView extends ItemView {
             }
           });
         }
-        chatAction(t("copyAnswer"), "copy", () => navigator.clipboard.writeText(message.content));
+        chatAction(t("copyAnswer"), "copy", () => void this.copyChatText(message.content));
         if (!message.kind) {
           chatAction(t("regenerate"), "refresh-cw", () => {
             const previous = this.chatController.findPreviousUserMessage(thread, message.id);
@@ -1205,18 +1231,35 @@ export class KnowFlowSidebarView extends ItemView {
   }
 
   private async submitQuizAnswer(session: QuizSession): Promise<void> {
+    if (session.submitted || this.submittingQuizSessions.has(session)) return;
     if (!session.selectedKey) {
       new Notice(t("chooseAnswer"));
       return;
     }
-    if (session.reviewDate && session.reviewQuestionKeys) {
-      const questionKey = session.reviewQuestionKeys[session.index];
-      await this.plugin.dailyReview.recordAnswer(session.reviewDate, questionKey, session.selectedKey);
-    } else {
-      await this.quizController.recordAnswer(session);
-    }
-    session.submitted = true;
+    this.submittingQuizSessions.add(session);
     this.render();
+    try {
+      if (session.reviewDate && session.reviewQuestionKeys) {
+        const questionKey = session.reviewQuestionKeys[session.index];
+        await this.plugin.dailyReview.recordAnswer(session.reviewDate, questionKey, session.selectedKey);
+      } else {
+        await this.quizController.recordAnswer(session);
+      }
+      session.submitted = true;
+    } catch (error) {
+      new Notice(t("saveAnswerFailed", { message: error instanceof Error ? error.message : String(error) }), 8000);
+    } finally {
+      this.submittingQuizSessions.delete(session);
+      if (this.quizSession === session) this.render();
+    }
+  }
+
+  private async copyChatText(content: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch (error) {
+      new Notice(t("copyFailed", { message: error instanceof Error ? error.message : String(error) }), 8000);
+    }
   }
 
   private getSummaryViewModel(file: TFile): NoteSummary | null {
@@ -1277,9 +1320,7 @@ export class KnowFlowSidebarView extends ItemView {
         scopePath,
         total: files.length,
         learned,
-        unread: Math.max(files.length - learned, 0),
-        reviewDue: 0,
-        weakPoints: 0
+        unread: Math.max(files.length - learned, 0)
       },
       categoryStats: ARTICLE_CATEGORIES
         .map((name) => categories.get(name)!)
@@ -1326,7 +1367,9 @@ export class KnowFlowSidebarView extends ItemView {
   }
 
   private getFrontmatterCategory(frontmatter: Record<string, unknown> | undefined): string | null {
-    const value = frontmatter?.["分类"];
+    // Older notes keep 分类 as a one-item list; both forms mean the same category.
+    const raw = frontmatter?.["分类"];
+    const value = Array.isArray(raw) ? raw.find((item) => typeof item === "string" && item.trim()) : raw;
     return typeof value === "string" && value.trim() ? value.trim() : null;
   }
 
@@ -1419,12 +1462,18 @@ export class KnowFlowSidebarView extends ItemView {
     });
   }
 
-  private async renderMarkdownSummary(parent: HTMLElement, markdown: string, sourcePath: string): Promise<void> {
+  private async renderMarkdownSummary(
+    parent: HTMLElement,
+    markdown: string,
+    sourcePath: string,
+    options: { style?: Partial<CSSStyleDeclaration>; compact?: boolean } = {}
+  ): Promise<void> {
     const container = parent.createDiv({ cls: "kf-markdown-summary markdown-rendered" });
     setStyles(container, {
       color: "var(--text-muted)",
       fontSize: "13px",
-      lineHeight: "1.5"
+      lineHeight: "1.5",
+      ...options.style
     });
     await MarkdownRenderer.render(this.app, markdown, container, sourcePath, this);
     container.querySelectorAll("p").forEach((el) => {
@@ -1447,6 +1496,10 @@ export class KnowFlowSidebarView extends ItemView {
         margin: "8px 0 4px"
       });
     });
+    if (options.compact) {
+      const last = container.lastElementChild;
+      if (last instanceof HTMLElement) setStyles(last, { marginBottom: "0" });
+    }
   }
 
 }
@@ -1545,13 +1598,6 @@ function startOfLocalWeek(date: Date): Date {
   start.setDate(start.getDate() - diff);
   start.setHours(0, 0, 0, 0);
   return start;
-}
-
-function localDateKey(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
 }
 
 function dailyTaskPlanKey(date: string, scopePath: string): string {

@@ -1,5 +1,4 @@
-import { TFile } from "obsidian";
-import type { App } from "obsidian";
+import type { App, TFile } from "obsidian";
 import { applyLearningCompletionFrontmatter } from "../clipping/frontmatter-rules";
 import { NoteOperationCoordinator } from "../core/note-operation-coordinator";
 
@@ -10,10 +9,8 @@ export class ArticleLearningService {
   ) {}
 
   async markComplete(file: TFile, learningDate: string): Promise<void> {
-    await this.noteOperations.runExclusive(file.path, async () => {
-      const content = await this.app.vault.read(file);
-      const next = applyLearningCompletionFrontmatter(content, learningDate);
-      if (next !== content) await this.app.vault.modify(file, next);
-    });
+    await this.noteOperations.runExclusive(file.path, () =>
+      this.app.vault.process(file, (current) => applyLearningCompletionFrontmatter(current, learningDate))
+    );
   }
 }

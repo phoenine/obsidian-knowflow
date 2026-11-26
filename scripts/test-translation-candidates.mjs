@@ -152,12 +152,15 @@ const decoratedEnglish = [
   "---", "简要描述: 这是一篇英文文章", "---", "",
   "> [!summary]- AI 摘要", "> 这是插件生成的中文摘要。", "",
   english, "", `- ${projectLink}`, "",
-  "```ts", "// 代码中的中文不参与判定", "const x = 'value';", "```", "",
-  "## 知识骨架", "插件生成的中文知识骨架。"
+  "```ts", "// 代码中的中文不参与判定", "const x = 'value';", "```"
 ].join("\n");
 assert.equal(collectTranslationCandidates(decoratedEnglish).length, 2, "generated Chinese and code must not block an English source");
 assert.equal(collectTranslationCandidates(`${english}\n\n<!--\nThis hidden comment must never be translated by the plugin.\n-->\n\n    This indented code must also stay unchanged.`).length, 2);
-assert.equal(collectTranslationCandidates(`${english}\n\n## Knowledge Map\n\nThis generated English explanation must not become a translation candidate.`).length, 2);
+for (const title of ["知识骨架", "Knowledge Map"]) {
+  const prose = "The graph shows how events move through the queue.";
+  const section = `## ${title}\n\n${prose}\n\n\`\`\`mermaid\ngraph LR\nProducer --> Queue\n\`\`\``;
+  assert.deepEqual(collectTranslationCandidates(section).map(({ content }) => content), [prose]);
+}
 assert.equal(collectTranslationCandidates(`---\ndescription: This English metadata does not belong to the article.\n---\n\n${english}`).length, 2);
 assert.equal(collectTranslationCandidates(`${english}\n\n> [!note] 原文备注\n> 这段中文是原作者写的正文备注。`).length, 2, "callouts stay out of the translation candidates");
 assert.equal(collectTranslationCandidates(`${english}\n\n    - 这是原文中的嵌套中文列表，不能忽略。`).length, 3);

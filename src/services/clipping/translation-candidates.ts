@@ -33,7 +33,6 @@ export function collectParagraphCandidates(content: string): TranslationCandidat
   let inComment = false;
   const frontmatterEnd = lines[0] === "---" ? lines.indexOf("---", 1) : -1;
   let index = frontmatterEnd >= 0 ? frontmatterEnd + 1 : 0;
-  let inKnowledgeMap = false;
 
   while (index < lines.length) {
     if (protectedLines.has(index)) {
@@ -43,13 +42,6 @@ export function collectParagraphCandidates(content: string): TranslationCandidat
     if (inComment || (lines[index].includes("<!--") && !lines[index].includes(TRANSLATION_MARKER))) {
       const commentStart: number = inComment ? 0 : lines[index].indexOf("<!--") + 4;
       inComment = lines[index].indexOf("-->", commentStart) < 0;
-      index += 1;
-      continue;
-    }
-    if (/^##\s/.test(lines[index])) {
-      inKnowledgeMap = /^## (?:Knowledge Map|知识骨架)\s*$/i.test(lines[index]);
-    }
-    if (inKnowledgeMap) {
       index += 1;
       continue;
     }

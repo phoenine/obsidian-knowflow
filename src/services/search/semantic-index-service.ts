@@ -146,91 +146,98 @@ export class SemanticIndexService {
     if (this.building) throw new Error("Semantic index is already building.");
     this.building = true;
     try {
-      await this.mutationQueue;
-      const files = this.getArticleFiles().sort((left, right) => left.path.localeCompare(right.path));
-      const grouped = groupFilesByShard(files);
-      const key = currentModelKey(this.settings);
-      const build = await this.getOrCreateBuild(key);
-      const completed = new Map(build.shards.map((record) => [record.id, record]));
-      const records: PersistedShardRecord[] = [];
-      let dimension = 0;
-      let indexed = 0;
-
-      for (const [shardId, shardFiles] of grouped) {
-        const saved = completed.get(shardId);
-        const loaded = saved ? await this.loadShard(build.generation, saved, key) : null;
-        if (loaded && shardMatchesFiles(loaded, shardFiles)) {
-          const loadedDimension = loaded.articles.flatMap((article) => article.chunks)[0]?.embedding.length ?? 0;
-          dimension = mergeDimension(dimension, loadedDimension);
-          records.push(saved!);
-          indexed += shardFiles.length;
-          onProgress?.(indexed, files.length);
-          continue;
-        }
-        if (saved) await this.removeShardFiles(build.generation, saved);
-
-        const articles: ShardArticle[] = [];
-        for (const file of shardFiles) {
-          const path = file.path;
-          const mtime = file.stat.mtime;
-          const chunks = await this.embedFile(file);
-          if (file.path !== path || this.app.vault.getAbstractFileByPath(path) !== file) {
-            indexed += 1;
-            onProgress?.(indexed, files.length);
-            continue;
-          }
-          dimension = mergeDimension(dimension, chunks[0]?.embedding.length ?? 0);
-          articles.push({
-            path,
-            title: file.basename,
-            mtime,
-            chunks: chunks.map((chunk) => chunk.mtime === mtime ? chunk : { ...chunk, mtime })
-          });
-          indexed += 1;
-          onProgress?.(indexed, files.length);
-        }
-        const record = await this.writeShard(build.generation, shardId, key, articles, dimension);
-        records.push(record);
-        await this.app.vault.adapter.write(this.buildPointerPath, JSON.stringify({
-          version: 3, modelKey: key, generation: build.generation,
-          shards: records.slice().sort((left, right) => left.id.localeCompare(right.id))
-        } satisfies BuildPointer));
-      }
-
-      const previousGeneration = this.data.generation;
-      const next: PersistedSemanticIndexV3 = {
-        version: 3,
-        modelKey: key,
-        updatedAt: new Date().toISOString(),
-        generation: build.generation,
-        dimension,
-        shards: records.sort((left, right) => left.id.localeCompare(right.id))
-      };
-      await this.saveManifest(next);
-      this.data = next;
-      this.unhealthyShards.clear();
-      this.resetLoadedChunks();
-      await removeIfExists(this.app.vault.adapter, this.buildPointerPath);
-      if (previousGeneration && previousGeneration !== build.generation) {
-        await removeDirectoryIfExists(this.app.vault.adapter, this.generationPath(previousGeneration));
-      }
-      return this.getStats();
+      return await this.enqueueMutation(() => this.rebuildNow(onProgress));
     } finally {
       this.building = false;
     }
   }
 
+  private async rebuildNow(onProgress?: (indexed: number, total: number) => void): Promise<SemanticIndexStats> {
+    this.assertEnabled();
+    const files = this.getArticleFiles().sort((left, right) => left.path.localeCompare(right.path));
+    const grouped = groupFilesByShard(files);
+    const key = currentModelKey(this.settings);
+    const model = { ...this.settings.embeddingModel };
+    const build = await this.getOrCreateBuild(key);
+    const completed = new Map(build.shards.map((record) => [record.id, record]));
+    const records: PersistedShardRecord[] = [];
+    let dimension = 0;
+    let indexed = 0;
+
+    for (const [shardId, shardFiles] of grouped) {
+      const saved = completed.get(shardId);
+      const loaded = saved ? await this.loadShard(build.generation, saved, key) : null;
+      if (loaded && shardMatchesFiles(loaded, shardFiles)) {
+        const loadedDimension = loaded.articles.flatMap((article) => article.chunks)[0]?.embedding.length ?? 0;
+        dimension = mergeDimension(dimension, loadedDimension);
+        records.push(saved!);
+        indexed += shardFiles.length;
+        onProgress?.(indexed, files.length);
+        continue;
+      }
+      if (saved) await this.removeShardFiles(build.generation, saved);
+
+      const articles: ShardArticle[] = [];
+      for (const file of shardFiles) {
+        const path = file.path;
+        const mtime = file.stat.mtime;
+        const chunks = await this.embedFile(file, [], model);
+        if (file.path !== path || this.app.vault.getAbstractFileByPath(path) !== file) {
+          indexed += 1;
+          onProgress?.(indexed, files.length);
+          continue;
+        }
+        dimension = mergeDimension(dimension, chunks[0]?.embedding.length ?? 0);
+        articles.push({
+          path,
+          title: file.basename,
+          mtime,
+          chunks: chunks.map((chunk) => chunk.mtime === mtime ? chunk : { ...chunk, mtime })
+        });
+        indexed += 1;
+        onProgress?.(indexed, files.length);
+      }
+      const record = await this.writeShard(build.generation, shardId, key, articles, dimension);
+      records.push(record);
+      await this.app.vault.adapter.write(this.buildPointerPath, JSON.stringify({
+        version: 3, modelKey: key, generation: build.generation,
+        shards: records.slice().sort((left, right) => left.id.localeCompare(right.id))
+      } satisfies BuildPointer));
+    }
+
+    if (currentModelKey(this.settings) !== key) throw new Error("索引配置在构建期间已更改，请重新构建。");
+    const previousGeneration = this.data.generation;
+    const next: PersistedSemanticIndexV3 = {
+      version: 3,
+      modelKey: key,
+      updatedAt: new Date().toISOString(),
+      generation: build.generation,
+      dimension,
+      shards: records.sort((left, right) => left.id.localeCompare(right.id))
+    };
+    await this.saveManifest(next);
+    this.data = next;
+    this.unhealthyShards.clear();
+    this.resetLoadedChunks();
+    await removeIfExists(this.app.vault.adapter, this.buildPointerPath);
+    if (previousGeneration && previousGeneration !== build.generation) {
+      await removeDirectoryIfExists(this.app.vault.adapter, this.generationPath(previousGeneration));
+    }
+    return this.getStats();
+  }
+
   refreshFile(file: TFile): Promise<void> { return this.enqueueMutation(() => this.refreshFileNow(file)); }
 
   private async refreshFileNow(file: TFile): Promise<void> {
-    if (this.building || !this.data.generation || !this.isCompatible()) return;
+    if (!this.data.generation || !this.isCompatible()) return;
     if (!this.isArticle(file)) return this.removePathNow(file.path);
+    const model = { ...this.settings.embeddingModel };
     const { path } = file;
     const { mtime } = file.stat;
     const shardId = shardIdForPath(path);
     const loaded = await this.loadActiveShard(shardId);
     const previous = loaded.articles.find((article) => article.path === path);
-    const chunks = await this.embedFile(file, previous?.chunks);
+    const chunks = await this.embedFile(file, previous?.chunks, model);
     if (chunks.length === 0 && !previous?.chunks.length) return;
     this.assertDimension(chunks);
     if (file.path !== path || file.stat.mtime !== mtime) return;
@@ -359,7 +366,7 @@ export class SemanticIndexService {
     return passages.join("\n\n");
   }
 
-  private async embedFile(file: TFile, indexed: SemanticChunk[] = []): Promise<SemanticChunk[]> {
+  private async embedFile(file: TFile, indexed: SemanticChunk[] = [], model = { ...this.settings.embeddingModel }): Promise<SemanticChunk[]> {
     const mtime = file.stat.mtime;
     const markdown = await this.app.vault.cachedRead(file);
     const chunks = chunkArticleSummary(file.path, file.basename, markdown, mtime);
@@ -368,7 +375,7 @@ export class SemanticIndexService {
     }
     for (let start = 0; start < chunks.length; start += EMBEDDING_BATCH_SIZE) {
       const batch = chunks.slice(start, start + EMBEDDING_BATCH_SIZE);
-      const vectors = await this.transport.embed(this.settings.embeddingModel, batch.map((chunk) => chunk.content));
+      const vectors = await this.transport.embed(model, batch.map((chunk) => chunk.content));
       if (vectors.length !== batch.length) throw new Error("Embedding endpoint returned an unexpected number of vectors.");
       vectors.forEach((vector, index) => { batch[index].embedding = normalizeEmbedding(vector); });
     }

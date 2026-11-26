@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import * as esbuild from "esbuild";
 
 const { outputFiles } = await esbuild.build({
@@ -170,6 +171,23 @@ assert.doesNotMatch(contents.get(file), /---\r\n\r\n> \[!note\]/);
 assert.match(contents.get(file), /<https:\/\/example.com\/versions>/);
 assert.match(prepareArticleForAi(contents.get(file)), /默认版本是 v2/);
 assert.match(contents.get(file), /默认限制为 50/);
+
+{
+  const paragraph = "使用方案甲。可选方案乙。同段结尾保留。\r\n\r\n下一段。";
+  const target = await vault.create("Articles/Same paragraph.md", paragraph);
+  const [sourceUpdate] = review.updates;
+  const first = { ...sourceUpdate, before: "使用方案甲", after: "使用方案丙" };
+  const second = { ...sourceUpdate, before: "可选方案乙", after: "可选方案丁。" };
+  const grouped = { ...review, path: target.path, original: paragraph, updates: [first, second] };
+  await freshness.apply(target, grouped, new Set([0, 1]));
+  assert.match(contents.get(target), /^使用方案丙。可选方案丁。同段结尾保留。\r\n\r\n/);
+  assert.match(contents.get(target), /\r\n\r\n下一段。$/);
+  assert.equal([...contents.get(target).matchAll(/KnowFlow 知识更新/g)].length, 2);
+  contents.set(target, paragraph);
+  const conflicting = { ...grouped, updates: [first, { ...second, before: "方案甲。可选方案乙" }] };
+  await assert.rejects(freshness.apply(target, conflicting, new Set([0, 1])), /范围重叠/);
+  assert.equal(contents.get(target), paragraph);
+}
 assert.doesNotMatch(prepareArticleForAi(contents.get(file)), /KnowFlow 时效更新|默认版本是 v1/);
 
 const retired = await vault.create("Articles/Retired Tool.md", "Retired Tool 提供远程公开服务。此文介绍如何连接这项服务。");
@@ -209,7 +227,7 @@ globalThis.knowflowRequest = async ({ url, body, headers, method }) => {
   const { messages } = JSON.parse(body);
   if (messages[0].content.includes("全文分析")) {
     return toResponse({
-      purpose: "介绍如何连接服务", coreConclusion: "这项服务可以远程使用。", domains: ["Retired Tool"],
+      purpose: "介绍如何连接服务", coreConclusion: "这项服务可以远程使用。", coreClaimQuote: "Retired Tool 提供远程公开服务。", domains: ["Retired Tool"],
       claims: [{ quote: "Retired Tool 提供远程公开服务。", section: "导语", query: "Retired Tool 远程服务状态" }],
       discoveryQueries: []
     });
@@ -238,6 +256,116 @@ assert.match(retiredText, /此文介绍如何连接这项服务。/);
 assert.doesNotMatch(retiredText, /提供远程公开服务。此文/);
 assert.match(retiredText, /KnowFlow 知识更新/);
 assert.match(retiredText, /\*\*已删除\*\*/);
+
+// A source for a secondary claim does not make the core conclusion invalid: the judge's flag needs an accepted
+// update that says the content is outdated or wrong.
+{
+  const partial = await vault.create("Articles/Partial Sources.md", "默认版本是 v1，这是核心结论。\n\n次要说明：补充工具 X 支持 Y。");
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (url.endsWith("/search")) {
+      const { query } = JSON.parse(body);
+      if (!query.includes("补充")) return { status: 200, json: { results: [] } };
+      return { status: 200, json: { results: [{ url: "https://example.com/extra", title: "补充说明", date: "2026-11-01T00:00:00Z", content: "补充工具 X 已不再支持 Y。" }] } };
+    }
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        purpose: "说明默认版本", coreConclusion: "默认版本是 v1。", coreClaimQuote: "默认版本是 v1", domains: ["版本"],
+        claims: [
+          { quote: "默认版本是 v1", section: "导语", query: "默认版本 v1 现状" },
+          { quote: "补充工具 X 支持 Y", section: "导语", query: "补充工具 X 支持 Y" }
+        ],
+        discoveryQueries: []
+      });
+    }
+    const { sources } = JSON.parse(messages[1].content);
+    return toResponse({ coreStillHolds: false, items: [
+      null,
+      { quote: "补充工具 X 支持 Y", after: "补充工具 X 已不再支持 Y", section: "导语",
+        status: "已经失效", action: "修正", reason: "新版本已撤回支持。", sourceId: sources[0].id,
+        evidenceQuote: "补充工具 X 已不再支持 Y。" }
+    ] });
+  };
+  const partialReview = await freshness.check(partial, model, searchKey);
+  assert.equal(partialReview.verdict, "局部内容需要更新");
+  assert.equal(partialReview.updates.length, 1);
+}
+
+// An empty search result is not evidence. Without sources the model must not judge the core conclusion.
+{
+  const unsearched = await vault.create("Articles/No Results.md", "默认版本是 v1，这是文章的核心结论。\n\n另一段说明文字。");
+  const judgeRequests = [];
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (url.endsWith("/search")) return { status: 200, json: { results: [] } };
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        purpose: "说明默认版本", coreConclusion: "默认版本是 v1。", domains: ["版本"],
+        claims: [{ quote: "默认版本是 v1", section: "导语", query: "默认版本 v1 现状" }],
+        discoveryQueries: []
+      });
+    }
+    judgeRequests.push(messages);
+    return toResponse({ coreStillHolds: false, items: [] });
+  };
+  const empty = await freshness.check(unsearched, model, searchKey);
+  assert.equal(judgeRequests.length, 0, "no sources means the judge is never asked about the core conclusion");
+  assert.notEqual(empty.verdict, "核心结论需要重新审视");
+  assert.equal(empty.verdict, "暂时无法判断");
+  assert.deepEqual(empty.unverified.map((item) => item.reason), ["没有检索到可核对的公开资料。"]);
+  assert.equal(empty.updates.length, 0);
+}
+
+{
+  // Clipping passes its own instructions, but the article-translation skill (including a vault override) still applies.
+  const seen = [];
+  globalThis.knowflowRequest = async ({ body }) => {
+    seen.push(JSON.parse(body).messages[0].content);
+    return toResponse({ translations: [{ id: "translation-1", action: "skip" }] });
+  };
+  const translating = new AiService({ summaryModel: model, taskModel: model }, new SkillRunner({
+    read: async (name) => name === "article-translation" ? "自定义翻译规则：保留缩写。" : null
+  }));
+  const paragraphs = [{ id: "translation-1", type: "english-paragraph", startLine: 0, endLine: 0, content: "Distributed systems are difficult because components fail." }];
+  await translating.translateEnglishParagraphs("T", paragraphs, "剪藏整理规则：只整理结构。");
+  assert.ok(seen[0].includes("自定义翻译规则：保留缩写。"), "clipping translation must load the article-translation skill");
+  assert.ok(seen[0].includes("剪藏整理规则：只整理结构。"), "clipping instructions must still be sent");
+  assert.ok(seen[0].includes('"action": "skip"'), "the translation format must document the skip shape");
+  await translating.translateEnglishParagraphs("T", paragraphs);
+  assert.ok(seen[1].includes("自定义翻译规则：保留缩写。"));
+}
+
+{
+  // Formatting: clipping rules include the code reference only; the chat entry is limited to reformat-code.
+  const seen = [];
+  globalThis.knowflowRequest = async ({ body }) => {
+    seen.push(JSON.parse(body).messages[0].content);
+    return toResponse({ decisions: [{ id: "code-1", action: "keep" }] });
+  };
+  const formatting = new AiService({ summaryModel: model, taskModel: model }, runner);
+  const candidate = { id: "code-1", type: "fenced-code", content: "x = 1", before: "", after: "", needsReformat: false };
+  await formatting.confirmFormatting([candidate], "剪藏整理规则");
+  assert.ok(!seen[0].includes("标题结构与图注"), "headings are judged by their own request, not by code confirmation");
+  assert.ok(seen[0].includes("只有确认是网页行号时才去掉行首数字"), "clipping formatting must embed the code rules");
+  await formatting.confirmFormatting([candidate], "", "code-chat");
+  assert.ok(seen[1].includes("只允许返回 keep 或 reformat-code"), "chat formatting must be limited to reformat-code");
+  assert.ok(seen[1].includes("只有确认是网页行号时才去掉行首数字"), "chat formatting still follows the code rules");
+}
+
+{
+  // Heading structure: one request with the numbered body and the heading rules, without the clipping skill bundle.
+  const seen = [];
+  globalThis.knowflowRequest = async ({ body }) => {
+    seen.push(JSON.parse(body).messages);
+    return toResponse({ edits: [{ type: "format", line: 3, text: "背景", level: 2 }] });
+  };
+  const headings = new AiService({ summaryModel: model, taskModel: model }, runner);
+  const edits = await headings.restoreHeadingStructure("T", { mode: "full", text: "1|导语。\n3|背景\n5|正文。", tokens: 10, shown: new Map() });
+  assert.deepEqual(edits, [{ type: "format", line: 3, text: "背景", level: 2 }]);
+  assert.ok(seen[0][0].content.includes("标题结构与图注"), "the heading request embeds the heading rules");
+  assert.ok(!seen[0][0].content.includes("整理剪藏"), "the heading request does not resend the whole clipping skill");
+  assert.ok(seen[0][1].content.includes("3|背景"), "the numbered body is sent as is");
+}
 
 globalThis.knowflowRequest = async ({ url }) => {
   assert.equal(url, "https://api.deepseek.com/v1/tools/search", "Search page content needs no Fetch request");
@@ -282,7 +410,8 @@ assert.deepEqual(rankRelevantNotes(app, mixedSource, [], noteSearchSettings, 5).
   [matchingVersion.path, differentVersion.path], "matching the topic and version ranks before matching the topic alone");
 
 const ai = new AiService({ summaryModel: model }, runner);
-await vault.create("skills/article-summary/SKILL.md", '---\nname: "article-summary"\ndescription: "摘要规则"\n---\n\n为摘要突出部署前置条件。\n');
+const defaultSummaryGuidance = (await readFile(new URL("../skills/article-summary/references/output-quality.md", import.meta.url), "utf8")).trim();
+const prompts = [];
 const scenarios = Array.from({ length: 10 }, (_, index) =>
   [`## 场景 ${index + 1}`, "结论与测试条件。".repeat(150), `![${"图像说明".repeat(60)}](assets/figure-${index}.png)`].join("\n\n")
 ).join("\n\n");
@@ -299,13 +428,15 @@ assert.match(longSample.sections[0].content, /开头条件。[\s\S]*中间条件
 
 const summaryRequests = [];
 let omitLastSection = false;
+let returnPlainSummary = false;
 let emptySummaryResponses = 0;
 globalThis.knowflowRequest = async ({ body }) => {
   const { messages } = JSON.parse(body);
-  assert.ok(messages[0].content.includes("为摘要突出部署前置条件"));
   assert.ok(messages[0].content.includes("严格 JSON"));
-  assert.ok(messages[0].content.includes("## 核心观点\n- 第一个要点。\n- 第二个要点。"));
+  const prompt = messages[0].content;
+  prompts.push(prompt);
   const input = JSON.parse(messages[1].content);
+  assert.equal(prompt.includes("抽样时只概括可见片段"), input.inputKind === "按章抽样的原文");
   assert.ok(!Object.hasOwn(input.requiredJsonShape, "recommendedAction"));
   summaryRequests.push(input);
   const chapters = input.sections.map((_, index) => `${index + 1}. 说明场景 ${index + 1} 的条件与限制。`);
@@ -313,6 +444,7 @@ globalThis.knowflowRequest = async ({ body }) => {
     emptySummaryResponses -= 1;
     return toResponse({});
   }
+  if (returnPlainSummary) return toResponse({ summary: "升级前检查客户端版本。" });
   return toResponse({
     readingValue: 3, category: "知识积累",
     summary: ["## 核心观点\n- 默认版本已经更新\n- 总量限制保持不变",
@@ -322,12 +454,23 @@ globalThis.knowflowRequest = async ({ body }) => {
   });
 };
 const summary = await ai.summarize(file.path, file.basename, contents.get(file));
+assert.ok(prompts[0].includes(defaultSummaryGuidance), "the built-in request includes the summary quality reference");
 assert.equal(summary.briefDescription, undefined);
 assert.equal(summaryRequests[0].requiredJsonShape.reason, "推荐理由");
 assert.equal(summaryRequests[0].requiredJsonShape.readingValue, undefined);
 assert.match(summary.summary, /^## 核心观点\n- 默认版本已经更新/m);
 assert.match(summary.summary, /^## 章节梳理\n1\. 说明场景 1 的条件与限制。/m);
 assert.equal(summaryRequests[0].inputKind, "完整的清理后正文");
+await vault.create("skills/article-summary/SKILL.md", '---\nname: "article-summary"\ndescription: "摘要规则"\n---\n\n为摘要突出部署前置条件。\n');
+returnPlainSummary = true;
+summaryRequests.length = 0;
+const brief = await ai.summarize(file.path, file.basename, "升级前检查客户端版本。");
+assert.match(prompts.at(-1), /为摘要突出部署前置条件/);
+assert.ok(!prompts.at(-1).includes(defaultSummaryGuidance), "the Vault skill replaces built-in writing guidance");
+assert.equal(brief.summary, "升级前检查客户端版本。");
+assert.equal(brief.reason, "");
+assert.equal(summaryRequests.length, 1, "a plain paragraph is usable on the first response");
+returnPlainSummary = false;
 summaryRequests.length = 0;
 await ai.summarize(file.path, file.basename, veryLong);
 assert.equal(summaryRequests.length, 1);
@@ -364,6 +507,84 @@ try {
   assert.deepEqual(previews, ["核心观点", "核心观点\n\n- 一条", '核心观点\n\n- 一条"观点"。']);
   assert.equal(streamed.summary, previews.at(-1));
   assert.equal(streamed.briefDescription, undefined);
+
+  summaryRequests.length = 0;
+  let streamInput;
+  globalThis.fetch = async (_url, { body }) => {
+    streamInput = JSON.parse(body);
+    assert.equal(streamInput.stream, true);
+    throw new TypeError("Failed to fetch");
+  };
+  const fallback = await ai.summarizeStream(file.path, file.basename, scenarios, () => {});
+  assert.match(fallback.summary, /^## 核心观点\n- 默认版本已经更新/m);
+  assert.deepEqual(summaryRequests, [JSON.parse(streamInput.messages[1].content)]);
+
+  let failedStreams = 0;
+  summaryRequests.length = 0;
+  emptySummaryResponses = 1;
+  globalThis.fetch = async () => {
+    failedStreams += 1;
+    throw new TypeError("Failed to fetch");
+  };
+  const fallbackStatus = [];
+  await assert.rejects(ai.summarizeStream(file.path, file.basename, scenarios, ({ content }) => {
+    fallbackStatus.push(content);
+  }), /一次重试|重试后/);
+  assert.equal(failedStreams, 1, "a failed streaming request must not be repeated");
+  assert.equal(summaryRequests.length, 1, "an empty fallback must not trigger another request");
+  assert.match(fallbackStatus[0], /改用普通请求/);
+
+  let unusableStreams = 0;
+  summaryRequests.length = 0;
+  globalThis.fetch = async () => {
+    unusableStreams += 1;
+    const event = "data: " + JSON.stringify({ choices: [{ delta: { content: '{"reason":"只有推荐理由"}' } }] });
+    return new Response(event + "\n\ndata: [DONE]\n\n");
+  };
+  const retryStatus = [];
+  const retriedStream = await ai.summarizeStream(file.path, file.basename, scenarios, ({ content }) => retryStatus.push(content));
+  assert.match(retriedStream.summary, /^## 核心观点/m);
+  assert.equal(unusableStreams, 1);
+  assert.equal(summaryRequests.length, 1, "an unusable streamed response is retried using one non-streaming request");
+  assert.match(retryStatus[0], /重试一次/);
+
+  summaryRequests.length = 0;
+  const completeSummary = '## 核心观点\n- 结论包含"引号"。';
+  globalThis.fetch = async () => {
+    const content = `{"summary":${JSON.stringify(completeSummary)},"reason":"尚未写完`;
+    const event = "data: " + JSON.stringify({ choices: [{ delta: { content } }] }) + "\n\n";
+    let sent = false;
+    return new Response(new ReadableStream({
+      pull(controller) {
+        if (sent) return controller.error(new Error("Stream disconnected during reason"));
+        sent = true;
+        controller.enqueue(new TextEncoder().encode(event));
+      }
+    }));
+  };
+  const completedBeforeDisconnect = await ai.summarizeStream(file.path, file.basename, scenarios, () => {});
+  assert.equal(completedBeforeDisconnect.summary, completeSummary);
+  assert.equal(completedBeforeDisconnect.reason, "");
+  assert.deepEqual(summaryRequests, [], "a complete summary field survives a disconnect during the recommendation");
+
+  summaryRequests.length = 0;
+  globalThis.fetch = async () => {
+    const event = "data: " + JSON.stringify({ choices: [{ delta: { content: '{"summary":"已经开始' } }] }) + "\n\n";
+    let sent = false;
+    return new Response(new ReadableStream({
+      pull(controller) {
+        if (sent) return controller.error(new Error("Stream disconnected"));
+        sent = true;
+        controller.enqueue(new TextEncoder().encode(event));
+      }
+    }));
+  };
+  const partial = [];
+  await assert.rejects(ai.summarizeStream(file.path, file.basename, scenarios, ({ content }) => {
+    partial.push(content);
+  }), /Stream disconnected/);
+  assert.deepEqual(partial, ["已经开始"]);
+  assert.deepEqual(summaryRequests, [], "do not start a second request after a partial summary");
 } finally {
   globalThis.fetch = fetchBeforeSummary;
 }

@@ -2,6 +2,8 @@ import type { AiModelConfig, KnowledgePointGroup } from "../../types";
 import { AiTransport } from "./ai-transport";
 import { normalizeKnowledgePointGroups } from "../learning/knowledge-points";
 import { prepareArticleForAi } from "../clipping/managed-content";
+import { splitArticleSections } from "../learning/article-sections";
+import { normalizeQuote, sourceContainsQuote } from "../learning/source-quote";
 
 interface KnowledgePointsResponse {
   groups: unknown[];
@@ -38,11 +40,14 @@ export class KnowledgeAi {
         })
       }
     ]);
-    const article = prepareArticleForAi(content);
+    const sections = splitArticleSections(prepareArticleForAi(content));
     const groups = normalizeKnowledgePointGroups(payload)
       .map((group) => ({
         ...group,
-        points: group.points.filter((point) => sourceContainsQuote(article, point.evidence.excerpt))
+        points: group.points.flatMap((point): KnowledgePointGroup["points"] => {
+          const section = locateEvidenceSection(sections, point.evidence.excerpt, point.evidence.section);
+          return section ? [{ ...point, evidence: { section, excerpt: point.evidence.excerpt } }] : [];
+        })
       }))
       .filter((group) => group.points.length > 0);
     const ids = new Set(groups.flatMap((group) => group.points).map((point) => point.id));
@@ -57,14 +62,17 @@ export class KnowledgeAi {
   }
 }
 
-function sourceContainsQuote(content: string, quote: string): boolean {
-  const normalizedQuote = normalizeSourceText(quote);
-  return normalizedQuote.length >= 4 && normalizeSourceText(content).includes(normalizedQuote);
-}
-
-function normalizeSourceText(value: string): string {
-  return value
-    .replace(/[`*_~=<>{}\[\]()#>|]/g, "")
-    .replace(/\s+/g, "")
-    .toLocaleLowerCase();
+/**
+ * The excerpt must appear verbatim in the article. The section it is filed under is the section that really
+ * contains it, so a made-up or wrong section name cannot make an unsupported point look sourced.
+ */
+function locateEvidenceSection(
+  sections: Array<{ title: string; content: string }>,
+  excerpt: string,
+  claimedSection: string
+): string | undefined {
+  const matches = sections.filter((section) => sourceContainsQuote(section.content, excerpt));
+  if (matches.length === 0) return undefined;
+  const claimed = normalizeQuote(claimedSection);
+  return (matches.find((section) => normalizeQuote(section.title) === claimed) ?? matches[0]).title;
 }

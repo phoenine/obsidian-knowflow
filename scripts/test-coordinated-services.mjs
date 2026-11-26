@@ -11,6 +11,8 @@ await esbuild.build({
   entryPoints: [
     "src/services/clipping/clipping-pipeline.ts",
     "src/services/clipping/repair-validator.ts",
+    "src/services/core/note-operation-coordinator.ts",
+    "src/services/learning/article-learning-service.ts",
     "src/services/learning/quiz-note-service.ts"
   ],
   format: "esm",
@@ -22,10 +24,10 @@ await esbuild.build({
       build.onResolve({ filter: /^obsidian$/ }, () => ({ path: "obsidian", namespace: "stub-obsidian" }));
       build.onLoad({ filter: /.*/, namespace: "stub-obsidian" }, () => ({
         contents: [
-          "export class Notice {}",
+          "export class Notice { constructor(message) { globalThis.knowflowNotices?.push(message); } }",
           "export class TFile { static [Symbol.hasInstance](value) { return Boolean(value && typeof value.path === 'string' && typeof value.basename === 'string'); } }",
           "export class TFolder {}",
-          "export const parseYaml = (text) => { if (text === 'invalid: [') throw new Error('invalid YAML'); return {}; };",
+          "export const parseYaml = (text) => { if (text === 'invalid: [') throw new Error('invalid YAML'); return globalThis.knowflowParseYaml?.(text) ?? {}; };",
           "export const normalizePath = (value) => value.replace(/\\\\/g, '/');",
           "export const requestUrl = async (request) => globalThis.knowflowRequest?.(request) ?? ({ status: 500, text: '' });"
         ].join("\n"),
@@ -38,6 +40,8 @@ await esbuild.build({
 const { ClippingPipeline } = await import(pathToFileURL(join(tempDir, "clipping", "clipping-pipeline.js")).href);
 const { inspectClippingOutput } = await import(pathToFileURL(join(tempDir, "clipping", "repair-validator.js")).href);
 const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning", "quiz-note-service.js")).href);
+const { ArticleLearningService } = await import(pathToFileURL(join(tempDir, "learning", "article-learning-service.js")).href);
+const { NoteOperationCoordinator } = await import(pathToFileURL(join(tempDir, "core", "note-operation-coordinator.js")).href);
 
 {
   const previousImage = globalThis.Image;
@@ -211,12 +215,15 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
 }
 
 {
-  const body = "这篇笔记已经有足够长的正文，用来通过最短长度检查。\n\n记忆架构\n\n后面还有一段说明文字，避免整篇因为一次空回复而退回。";
+  const yaml = ["apiVersion: v1", "kind: Pod", "metadata:", "  name: nginx"].join("\n");
+  const body = `这篇笔记已经有足够长的正文，用来通过最短长度检查。\n\n记忆架构\n\n后面还有一段说明文字，避免整篇因为一次空回复而退回。\n\n${yaml}`;
   let written;
   let success = false;
   const progress = [];
   const previousWindow = globalThis.window;
   globalThis.window = { moment: () => ({ format: () => "2026-10-22" }) };
+  const notices = [];
+  globalThis.knowflowNotices = notices;
   try {
     const app = { vault: {
       read: async () => body,
@@ -225,6 +232,7 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
       adapter: { exists: async () => false }
     } };
     const ai = {
+      restoreHeadingStructure: async () => { throw new Error("AI response did not contain message content."); },
       confirmFormatting: async () => { throw new Error("AI response did not contain message content."); },
       translateEnglishParagraphs: async () => []
     };
@@ -235,14 +243,19 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
     await pipeline.process({ path: "Clippings/Memory.md", basename: "Memory" }, (...event) => progress.push(event));
     assert.equal(success, true);
     assert.ok(written.includes("记忆架构"));
-    const format = progress.find(([step, status]) => step === "文章样式梳理" && status === "completed");
-    assert.ok(format);
-    assert.ok(!String(format[2] ?? "").includes("未确认"));
+    assert.ok(written.includes(yaml), "a failed batch keeps its original text");
+    assert.ok(progress.some(([step, status]) => step === "文章样式梳理" && status === "completed"));
     assert.ok(progress.every(([, , info]) => !String(info ?? "").includes("未确认")));
+    assert.ok(progress.some(([step, status, info]) => step === "整理标题结构" && status === "skipped" && /模型调用失败/.test(info)));
     assert.ok(progress.some(([step, status]) => step === "补全 Frontmatter" && status === "completed"));
-    assert.ok(progress.some(([step, status, info]) => step === "格式化代码块" && status === "skipped" && info === "没有代码块"));
+    const code = progress.find(([step, status]) => step === "格式化代码块" && status === "skipped");
+    assert.match(code[2], /1 批模型确认失败/);
     assert.ok(progress.some(([step, status, info]) => step === "整理图片" && status === "skipped" && info === "图片无需整理"));
+    // Failed model calls are reported on the completion notice too, not only on the progress callback.
+    assert.equal(notices.length, 1);
+    assert.match(notices[0], /待检查：.*标题结构模型调用失败.*1 批模型确认失败/);
   } finally {
+    delete globalThis.knowflowNotices;
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
   }
@@ -250,14 +263,27 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
 
 {
   const titles = ["甲标题", "乙标题", "丙标题", "丁标题", "戊标题"];
+  const blocks = titles.map((_title, index) => ["apiVersion: v1", "kind: Pod", "metadata:", `  name: pod-${index}`].join("\n"));
   const body = [
     "这篇笔记已经有足够长的正文，用来通过最短长度检查。",
-    ...titles.flatMap((title) => ["", title, "", `${title}后面是一段说明，避免这行被收成标题。`])
+    "",
+    "一、背景",
+    "",
+    "背景说明。",
+    "",
+    "二、做法",
+    "",
+    "做法说明，下面列出两点：",
+    "",
+    "1) 先读原文",
+    "",
+    ...titles.flatMap((title, index) => ["", title, "", `${title}后面是一段说明。`, "", blocks[index]])
   ].join("\n");
   const previousWindow = globalThis.window;
   globalThis.window = { moment: () => ({ format: () => "2026-10-22" }) };
   let inFlight = 0;
   let maxInFlight = 0;
+  let headingInput;
   try {
     let written = "";
     const app = { vault: {
@@ -267,12 +293,21 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
       adapter: { exists: async () => false }
     } };
     const ai = {
+      restoreHeadingStructure: async (_title, input) => {
+        headingInput = input.text;
+        return input.text.split("\n").flatMap((row) => {
+          const [line, text] = row.split("|");
+          if (titles.includes(text)) return [{ type: "format", line: Number(line), text, level: 3 }];
+          if (text === "一、背景" || text === "二、做法") return [{ type: "format", line: Number(line), text, level: 2 }];
+          return [];
+        });
+      },
       confirmFormatting: async (batch) => {
         inFlight += 1;
         maxInFlight = Math.max(maxInFlight, inFlight);
         await new Promise((resolve) => setTimeout(resolve, 20));
         inFlight -= 1;
-        return batch.map((candidate) => ({ id: candidate.id, action: "heading", level: 2 }));
+        return batch.map((candidate) => ({ id: candidate.id, action: "wrap-code", language: "yaml" }));
       },
       translateEnglishParagraphs: async () => []
     };
@@ -281,8 +316,14 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
       setPipelineStatus: async (status) => { assert.fail(status.error); }
     }, ai, { runExclusive: async (_path, operation) => operation() });
     await pipeline.process({ path: "Clippings/Batches.md", basename: "Batches" });
+    assert.match(headingInput, /\|一、背景\n/, "Chinese section numbers are still visible when headings are judged");
+    assert.match(headingInput, /\|\[疑似代码\]/, "unfenced code is hidden from the heading step");
     assert.ok(maxInFlight > 1, "formatting batches should run together");
-    for (const title of titles) assert.ok(written.includes(`## ${title}`), title);
+    assert.ok(written.includes("## 背景\n"), "section numbers are stripped from headings");
+    assert.ok(written.includes("## 做法\n"));
+    assert.ok(written.includes("1. 先读原文"), "ordered markers are normalized after the heading step");
+    for (const title of titles) assert.ok(written.includes(`### ${title}`), title);
+    for (const block of blocks) assert.ok(written.includes("```yaml\n" + block + "\n```"));
   } finally {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
@@ -321,7 +362,7 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
     await pipeline.process({ path: "Clippings/Memory.md", basename: "Memory" }, (...event) => progress.push(event));
     assert.match(written, /简要描述: "说明事件日志和派生索引的分工。"/);
     assert.match(written, /阅读价值: 4/);
-    assert.match(written, /分类: 人工智能/);
+    assert.match(written, /分类:\n  - 人工智能/);
     assert.match(written, /  - agent-memory/);
     assert.equal(propertyCalls, 1);
     assert.ok(progress.some(([step, status, info]) => step === "补全 Frontmatter" && status === "completed" && String(info).includes("已更新简要描述、阅读价值、分类、标签")));
@@ -359,7 +400,7 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
     assert.match(written, /简要描述: "说明事件日志和派生索引的分工。"/);
     assert.doesNotMatch(written, /已有描述/);
     assert.match(written, /阅读价值: 5/);
-    assert.match(written, /分类: 人工智能/);
+    assert.match(written, /分类:\n  - 人工智能/);
     assert.match(written, /  - agent-memory/);
     assert.doesNotMatch(written, /知识积累/);
     assert.doesNotMatch(written, /  - kept/);
@@ -457,9 +498,11 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
       adapter: { exists: async () => false },
       createFolder: async () => {},
       read: async (file) => file === source ? current : "",
-      create: async () => {},
-      modify: async (file, next) => {
-        if (file === source) current = next;
+      create: async () => {
+        current += "\n创建题库期间的用户编辑。\n";
+      },
+      process: async (file, edit) => {
+        if (file === source) current = edit(current);
       },
       getAbstractFileByPath: () => null
     }
@@ -473,7 +516,22 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
   const service = new QuizNoteService(app, { archiveFolder: "Archives" }, coordinator);
   await service.saveQuiz(source, "AI", []);
   assert.ok(current.includes("排队期间的用户编辑。"));
+  assert.ok(current.includes("创建题库期间的用户编辑。"));
   assert.ok(current.includes("> [!question]- Quiz"));
+}
+
+{
+  const source = { path: "Articles/Learning.md", basename: "Learning" };
+  let current = "正文。";
+  const service = new ArticleLearningService({ vault: {
+    process: async (_file, edit) => {
+      current += "\n标记学习期间的用户编辑。";
+      current = edit(current);
+    }
+  } }, new NoteOperationCoordinator());
+  await service.markComplete(source, "2026-11-26");
+  assert.match(current, /学习日期: 2026-11-26/);
+  assert.match(current, /标记学习期间的用户编辑。/);
 }
 
 // The global review bank must discover legacy Quiz notes whose source is stored
@@ -552,17 +610,13 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
     "<!-- study-quiz:end -->",
     ""
   ].join("\n");
-  let tail = Promise.resolve();
-  const coordinator = {
-    runExclusive: (path, operation) => {
-      const run = tail.then(operation, operation);
-      tail = run.then(() => {}, () => {});
-      return run;
-    }
-  };
+  const source = { path: "Articles/Concurrent.md", basename: "Concurrent" };
+  const coordinator = new NoteOperationCoordinator();
   const app = {
     vault: {
-      getAbstractFileByPath: () => quiz,
+      getAbstractFileByPath: (path) => path === quiz.path ? quiz : source,
+      read: async (file) => file === source ? `> [!question]- Quiz\n> [[${quiz.path}]]\n` : content,
+      modify: async (_file, next) => { content = next; },
       process: async (_file, transform) => {
         const snapshot = content;
         await new Promise((resolve) => setTimeout(resolve, 20));
@@ -572,25 +626,49 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
     }
   };
   const service = new QuizNoteService(app, { archiveFolder: "Archives" }, coordinator);
-  const [first, second] = await Promise.all([
-    service.recordAnswer(quiz.path, 1, "A", "A", "第一题"),
-    service.recordAnswer(quiz.path, 2, "B", "B", "第二题")
-  ]);
-  assert.equal(first, true);
-  assert.equal(second, true);
-  assert.match(content, /- \[x\] A\. 甲 ✅/);
+  const RealDate = Date;
+  const previousZone = process.env.TZ;
+  process.env.TZ = "Asia/Shanghai";
+  globalThis.Date = class extends RealDate {
+    constructor(...args) { super(...(args.length ? args : ["2026-11-26T00:15:00+08:00"])); }
+  };
+  try {
+    const [first, quizPath, second] = await Promise.all([
+      service.recordAnswer(quiz.path, 1, "A", "A", "第一题"),
+      service.appendKnowledgePointQuiz(source, "AI", { id: "point" }, {
+        question: "追加的题目", options: [{ key: "A", content: "是" }, { key: "B", content: "否" }],
+        answerKey: "A", explanation: "说明", difficulty: 3
+      }),
+      service.recordAnswer(quiz.path, 2, "B", "B", "第二题")
+    ]);
+    assert.equal(first, true);
+    assert.equal(second, true);
+    assert.equal(quizPath, quiz.path);
+  } finally {
+    globalThis.Date = RealDate;
+    if (previousZone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousZone;
+  }
+  assert.match(content, /追加的题目/);
+  assert.match(content, /- \[x\] A\. 甲 ✅ 2026-11-26/);
   assert.match(content, /- \[x\] B\. 丁 ✅/);
 }
 
 {
   const listFence = ["    ```", "keep\tlist\ttab", "    ```"].join("\n");
-  const calloutFence = ["> ```", "> keep\tcallout\ttab", "> ```"].join("\n");
+  const calloutFence = ["> ```", "> keep\tcallout\ttab", "> 微信扫一扫", "> ```"].join("\n");
   const body = [
     "这篇笔记已经有足够长的正文，用来通过最短长度检查。",
     "",
     "1. 先看嵌套代码。",
     "",
     listFence,
+    "",
+    "微信扫一扫",
+    "",
+    "```yaml",
+    "root:./data",
+    "```",
     "",
     "> [!note] 说明",
     calloutFence,
@@ -599,6 +677,10 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
   ].join("\n");
   const previousWindow = globalThis.window;
   globalThis.window = { moment: () => ({ format: () => "2026-10-22" }) };
+  globalThis.knowflowParseYaml = (source) => {
+    if (source === "root:./data") throw new Error("invalid YAML");
+    return source === "root: ./data" ? { root: "./data" } : {};
+  };
   try {
     let written = "";
     const app = { vault: {
@@ -614,7 +696,10 @@ const { QuizNoteService } = await import(pathToFileURL(join(tempDir, "learning",
     await pipeline.process({ path: "Clippings/Fences.md", basename: "Fences" });
     assert.ok(written.includes(listFence), "an indented list fence must keep its tabs");
     assert.ok(written.includes(calloutFence), "a callout fence must keep its tabs");
+    assert.doesNotMatch(written, /^微信扫一扫$/m);
+    assert.match(written, /```yaml\nroot: \.\/data\n```/);
   } finally {
+    delete globalThis.knowflowParseYaml;
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
   }

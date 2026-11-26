@@ -89,15 +89,42 @@ function stripSummaryMetadata(summary: string): string {
 
 /** Keep merged chapter ranges, but use a real ordered-list marker so they stay aligned. */
 export function alignSummaryOutline(summary: string): string {
-  summary = stripSummaryMetadata(summary);
+  return emphasizeLeadIns(alignListMarkers(stripSummaryMetadata(summary)));
+}
+
+// A list item that opens with a short label, e.g. `- 核心判断：…` or `1. 定义与前提（1-2）：…`.
+// The label has no edge spaces and at most 12 characters once a trailing range such as （1-2） is set aside.
+// `https://` is not a label, so `:` needs a space after it.
+const LEAD_IN = /^(\s*(?:[-+*]|\d+\.)\s+)([^*：:\s](?:[^*：:\n]{0,18}[^*：:\s])?)(：|:(?=\s))(.*\S.*)$/;
+const LABEL_LIMIT = 12;
+
+function isShortLabel(label: string): boolean {
+  return label.replace(/[（(][^）)]*[）)]$/, "").length <= LABEL_LIMIT;
+}
+
+/**
+ * Bolds the label of each list item so the key point of every line can be scanned.
+ * Only the label is bolded, so the closing `**` sits after a word character and renders in every Markdown reader.
+ * Lines that already contain bold, and code blocks, are left alone.
+ */
+function emphasizeLeadIns(summary: string): string {
+  const lines = summary.split("\n");
+  const protectedLines = protectedLineIndices(protectedRanges(lines));
+  return lines.map((line, index) => {
+    if (protectedLines.has(index) || line.includes("**")) return line;
+    const match = LEAD_IN.exec(line);
+    return match && !/[`$\[\]<>_~\\]/.test(match[2]) && isShortLabel(match[2])
+      ? `${match[1]}**${match[2]}**${match[3]}${match[4]}`
+      : line;
+  }).join("\n");
+}
+
+function alignListMarkers(summary: string): string {
   let lastNumber = 0;
-  let inFence = false;
-  return summary.split("\n").map((line) => {
-    if (/^\s*(?:```|~~~)/.test(line)) {
-      inFence = !inFence;
-      return line;
-    }
-    if (inFence) return line;
+  const lines = summary.split("\n");
+  const protectedLines = protectedLineIndices(protectedRanges(lines));
+  return lines.map((line, index) => {
+    if (protectedLines.has(index)) return line;
     if (/^#{1,6}\s+/.test(line)) {
       lastNumber = 0;
       return line;

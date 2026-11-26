@@ -75,3 +75,13 @@ export function protectedLineIndices(ranges: ProtectedRange[]): Set<number> {
   }
   return indices;
 }
+
+export function inlineCodeClosingIndex(line: string, start: number, delimiter: string): number {
+  const runs = /`+|[\r\n\u2028\u2029]/g;
+  runs.lastIndex = start + delimiter.length;
+  for (let run = runs.exec(line); run; run = runs.exec(line)) {
+    if (run[0][0] !== "`") break;
+    if (run[0] === delimiter) return run.index;
+  }
+  return -1;
+}

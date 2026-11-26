@@ -3,7 +3,8 @@ import type { App } from "obsidian";
 import type { KnowledgePoint, KnowledgePointGroup, KnowledgePointStatus, KnowFlowSettings, QuizQuestion, QuizStats } from "../../types";
 import { mergeKnowledgePointGroups, parseKnowledgePoints, upsertKnowledgePoints } from "./knowledge-points";
 import { NoteOperationCoordinator } from "../core/note-operation-coordinator";
-import { appendQuizQuestion, applyQuizAnswer, buildQuizNoteContent, clearQuizAnswers, computeKnowledgePointStatuses, computeQuizStats, parseQuizCallout, parseQuizEntries, parseQuizNote, sanitizeQuizFileName, setExamPassed, updateQuizSourcePath, upsertQuizCallout, upsertQuizQuestions } from "./quiz-notes";
+import { localDateKey } from "../core/local-date";
+import { appendQuizQuestion, applyQuizAnswer, buildQuizNoteContent, clearQuizAnswers, computeKnowledgePointStatuses, computeQuizStats, parseQuizCallout, parseQuizEntries, sanitizeQuizFileName, setExamPassed, updateQuizSourcePath, upsertQuizCallout, upsertQuizQuestions } from "./quiz-notes";
 import type { ParsedQuizQuestion } from "./quiz-notes";
 
 /**
@@ -30,14 +31,13 @@ export class QuizNoteService {
     await this.ensureArchiveFolder();
     const sourceContent = await this.app.vault.read(sourceFile);
     const existingPath = parseQuizCallout(sourceContent);
-    const quizPath = existingPath && await this.app.vault.adapter.exists(existingPath)
+    const quizPath = existingPath && existingPath !== sourceFile.path && await this.app.vault.adapter.exists(existingPath)
       ? existingPath
       : await this.resolveNewQuizPath(sourceFile.basename, new Date());
 
     const existingFile = this.app.vault.getAbstractFileByPath(quizPath);
     if (existingFile instanceof TFile) {
-      const existingContent = await this.app.vault.read(existingFile);
-      await this.app.vault.modify(existingFile, setExamPassed(upsertQuizQuestions(existingContent, questions), false));
+      await this.updateQuizFile(existingFile, (current) => setExamPassed(upsertQuizQuestions(current, questions), false));
     } else {
       const content = buildQuizNoteContent(
         { sourcePath: sourceFile.path, category, createdAt: new Date().toISOString() },
@@ -46,21 +46,10 @@ export class QuizNoteService {
       await this.app.vault.create(quizPath, content);
     }
 
-    const nextSourceContent = upsertQuizCallout(sourceContent, quizPath);
-    if (nextSourceContent !== sourceContent) {
-      await this.app.vault.modify(sourceFile, nextSourceContent);
+    if (upsertQuizCallout(sourceContent, quizPath) !== sourceContent) {
+      await this.app.vault.process(sourceFile, (current) => upsertQuizCallout(current, quizPath));
     }
     return quizPath;
-  }
-
-  async loadQuestions(notePath: string): Promise<{ quizPath: string; questions: QuizQuestion[] } | null> {
-    const quizPath = await this.resolveQuizPath(notePath);
-    if (!quizPath) return null;
-    const file = this.app.vault.getAbstractFileByPath(quizPath);
-    if (!(file instanceof TFile)) return null;
-    const content = await this.app.vault.read(file);
-    const questions = parseQuizNote(content, notePath);
-    return questions.length > 0 ? { quizPath, questions } : null;
   }
 
   async loadReviewQuestions(notePath: string): Promise<{ quizPath: string; entries: ParsedQuizQuestion[] } | null> {
@@ -107,14 +96,6 @@ export class QuizNoteService {
     return computeQuizStats(content);
   }
 
-  async hasQuiz(notePath: string): Promise<boolean> {
-    const quizPath = await this.resolveQuizPath(notePath);
-    if (!quizPath) return false;
-    const file = this.app.vault.getAbstractFileByPath(quizPath);
-    if (!(file instanceof TFile)) return false;
-    return parseQuizNote(await this.app.vault.read(file), notePath).length > 0;
-  }
-
   async saveKnowledgePoints(
     sourceFile: TFile,
     category: string,
@@ -134,15 +115,16 @@ export class QuizNoteService {
     await this.ensureArchiveFolder();
     const sourceContent = await this.app.vault.read(sourceFile);
     const existingPath = parseQuizCallout(sourceContent);
-    const quizPath = existingPath && await this.app.vault.adapter.exists(existingPath)
+    const quizPath = existingPath && existingPath !== sourceFile.path && await this.app.vault.adapter.exists(existingPath)
       ? existingPath
       : await this.resolveNewQuizPath(sourceFile.basename, new Date());
     const existingFile = this.app.vault.getAbstractFileByPath(quizPath);
     let savedGroups = groups;
     if (existingFile instanceof TFile) {
-      const content = await this.app.vault.read(existingFile);
-      savedGroups = mergeKnowledgePointGroups(parseKnowledgePoints(content), groups);
-      await this.app.vault.modify(existingFile, upsertKnowledgePoints(content, savedGroups));
+      await this.updateQuizFile(existingFile, (current) => {
+        savedGroups = mergeKnowledgePointGroups(parseKnowledgePoints(current), groups);
+        return upsertKnowledgePoints(current, savedGroups);
+      });
     } else {
       const content = buildQuizNoteContent(
         { sourcePath: sourceFile.path, category, createdAt: new Date().toISOString() },
@@ -150,8 +132,9 @@ export class QuizNoteService {
       );
       await this.app.vault.create(quizPath, upsertKnowledgePoints(content, groups));
     }
-    const nextSourceContent = upsertQuizCallout(sourceContent, quizPath);
-    if (nextSourceContent !== sourceContent) await this.app.vault.modify(sourceFile, nextSourceContent);
+    if (upsertQuizCallout(sourceContent, quizPath) !== sourceContent) {
+      await this.app.vault.process(sourceFile, (current) => upsertQuizCallout(current, quizPath));
+    }
     return { quizPath, groups: savedGroups };
   }
 
@@ -182,9 +165,8 @@ export class QuizNoteService {
     }
     const file = this.app.vault.getAbstractFileByPath(quizPath);
     if (!(file instanceof TFile)) throw new Error(`Quiz note not found: ${quizPath}`);
-    const content = await this.app.vault.read(file);
-    await this.app.vault.modify(file, setExamPassed(
-      appendQuizQuestion(content, { ...question, knowledgePointId: point.id }),
+    await this.updateQuizFile(file, (current) => setExamPassed(
+      appendQuizQuestion(current, { ...question, knowledgePointId: point.id }),
       false
     ));
     return quizPath;
@@ -205,13 +187,8 @@ export class QuizNoteService {
   async clearAnswers(notePath: string): Promise<void> {
     const quizPath = await this.resolveQuizPath(notePath);
     if (!quizPath) return;
-    await this.noteOperations.runExclusive(notePath, async () => {
-      const file = this.app.vault.getAbstractFileByPath(quizPath);
-      if (!(file instanceof TFile)) return;
-      const content = await this.app.vault.read(file);
-      const cleared = clearQuizAnswers(content);
-      if (cleared !== content) await this.app.vault.modify(file, cleared);
-    });
+    const file = this.app.vault.getAbstractFileByPath(quizPath);
+    if (file instanceof TFile) await this.updateQuizFile(file, clearQuizAnswers);
   }
 
   /** `displayIndex` is 1-based, matching the question's position in the session. Returns whether the answer was correct. */
@@ -222,24 +199,26 @@ export class QuizNoteService {
     correctAnswerKey: string,
     expectedQuestion?: string
   ): Promise<boolean> {
-    return this.noteOperations.runExclusive(quizPath, async () => {
-      const file = this.app.vault.getAbstractFileByPath(quizPath);
-      if (!(file instanceof TFile)) throw new Error(`Quiz note not found: ${quizPath}`);
-      let correct = false;
-      await this.app.vault.process(file, (content) => {
-        if (expectedQuestion) {
-          const current = parseQuizEntries(content, "")[displayIndex - 1]?.question.question;
-          if (current !== expectedQuestion) throw new Error("题库内容已变化，请刷新今日复习后重试。");
-        }
-        correct = selectedKey === correctAnswerKey;
-        const date = new Date().toISOString().slice(0, 10);
-        const patched = applyQuizAnswer(content, displayIndex, selectedKey, correct, date);
-        const stats = computeQuizStats(patched);
-        const passed = stats.total > 0 && stats.answered === stats.total && stats.wrong === 0;
-        return setExamPassed(patched, passed);
-      });
-      return correct;
+    const file = this.app.vault.getAbstractFileByPath(quizPath);
+    if (!(file instanceof TFile)) throw new Error(`Quiz note not found: ${quizPath}`);
+    const correct = selectedKey === correctAnswerKey;
+    await this.updateQuizFile(file, (current) => {
+      if (expectedQuestion && parseQuizEntries(current, "")[displayIndex - 1]?.question.question !== expectedQuestion) {
+        throw new Error("题库内容已变化，请刷新后重试。");
+      }
+      const patched = applyQuizAnswer(current, displayIndex, selectedKey, correct, localDateKey(new Date()));
+      const stats = computeQuizStats(patched);
+      return setExamPassed(patched, stats.total > 0 && stats.answered === stats.total && stats.wrong === 0);
     });
+    return correct;
+  }
+
+  private async updateQuizFile(file: TFile, transform: (current: string) => string): Promise<void> {
+    const path = file.path;
+    await this.noteOperations.runExclusive(path, () => this.app.vault.process(file, (current) => {
+      if (file.path !== path) throw new Error(`Quiz note moved: ${path}`);
+      return transform(current);
+    }));
   }
 
   private async resolveNewQuizPath(title: string, date: Date): Promise<string> {
@@ -264,18 +243,15 @@ export class QuizNoteService {
   private async updateQuizSourceLink(quizPath: string, sourcePath: string): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(quizPath);
     if (!(file instanceof TFile)) return;
-    const content = await this.app.vault.read(file);
-    const next = updateQuizSourcePath(content, sourcePath);
-    if (next !== content) {
-      await this.app.vault.modify(file, next);
-    }
+    await this.updateQuizFile(file, (current) => updateQuizSourcePath(current, sourcePath));
   }
 
   private async resolveQuizPath(sourcePath: string): Promise<string | null> {
     const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
     if (!(sourceFile instanceof TFile)) return null;
     const sourceContent = await this.app.vault.read(sourceFile);
-    return parseQuizCallout(sourceContent);
+    const quizPath = parseQuizCallout(sourceContent);
+    return quizPath === sourcePath ? null : quizPath;
   }
 
   private archiveFolder(): string {

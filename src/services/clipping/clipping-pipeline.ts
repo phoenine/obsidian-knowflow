@@ -4,15 +4,14 @@ import { t } from "../../i18n";
 import type { KnowFlowSettings } from "../../types";
 import type { AiService } from "../ai/ai-service";
 import { protectedRanges } from "./protected-markdown";
-import { removeCodeWatermarkLines } from "./cleanup-rules";
+import { cleanupPromotionalNoise, removeCodeWatermarkLines } from "./cleanup-rules";
 import {
   applyFormattingEdits,
   batchFormattingCandidates,
   collectClippedCodeCandidates,
   collectCodeCandidates,
-  collectHeadingCandidates,
-  normalizeBodyHeadingLevels,
   normalizeOrphanBoldTriplet,
+  repairBoldFlankingLine,
   trimCodeFenceBody,
   type FormattingCandidate,
   type FormattingDecision
@@ -25,7 +24,7 @@ import { formatPromptBlocks, promptFenceStarts } from "./prompt-blocks";
 import { escapeLiteralHtmlTags } from "./literal-html";
 import { restoreDetachedLists } from "./detached-lists";
 import { repairTableDividers } from "./reading-structure";
-import { prettyJsonBlock, removeClipperFenceSpacing } from "./clipped-code";
+import { prettyJsonBlock, removeClipperFenceSpacing, repairClippedYaml } from "./clipped-code";
 import { planImageRepairs, saveImageRepairs } from "./repair-images";
 import { inspectClippingOutput } from "./repair-validator";
 import { KnowledgeStore } from "../core/store";
@@ -33,9 +32,10 @@ import {
   applyTranslationDecisions,
   planEnglishTranslation
 } from "./translation-candidates";
+import { applyHeadingEdits, buildHeadingInput, stripHeadingNumbers } from "./heading-structure";
 
-export const CLIPPING_PIPELINE_STEPS = ["文章样式梳理", "格式化代码块", "整理图片", "英文翻译", "补全 Frontmatter"] as const;
-const [formatStep, codeStep, imageStep, translationStep, propertyStep] = CLIPPING_PIPELINE_STEPS;
+export const CLIPPING_PIPELINE_STEPS = ["文章样式梳理", "整理标题结构", "格式化代码块", "整理图片", "英文翻译", "补全 Frontmatter"] as const;
+const [formatStep, headingStep, codeStep, imageStep, translationStep, propertyStep] = CLIPPING_PIPELINE_STEPS;
 const FORMAT_CONFIRM_CONCURRENCY = 3;
 
 export const ARTICLE_CATEGORIES = [
@@ -105,22 +105,30 @@ export class ClippingPipeline {
       }
       this.assertReadableBody(body);
       const prompts = formatPromptBlocks(body);
-      const literalHtml = escapeLiteralHtmlTags(prompts.content);
-      let formatted = normalizeBodyHeadingLevels(repairTableDividers(this.organizeMarkdownStyle(restoreDetachedLists(literalHtml.content))));
-      const autoWrapped = applyAutoCodeWraps(formatted);
-      formatted = autoWrapped.content;
-      const confirmation = await this.confirmCandidates(formatted, instructions);
-      formatted = confirmation.content;
-      const formatChanges = literalHtml.escaped + prompts.wrapped + autoWrapped.applied + confirmation.changed;
+      const cleanedBody = mapUnprotectedMarkdown(prompts.content, cleanupPromotionalNoise);
+      const literalHtml = escapeLiteralHtmlTags(cleanedBody);
+      let formatted = repairTableDividers(this.organizeMarkdownStyle(restoreDetachedLists(literalHtml.content)));
+      const removedNoise = prompts.content.split("\n").length - cleanedBody.split("\n").length;
+      const formatChanges = removedNoise + literalHtml.escaped + prompts.wrapped;
       await report(formatStep, "completed", formatChanges > 0 ? `修改了 ${formatChanges} 处` : undefined);
 
+      await report(headingStep);
+      const headings = await this.restoreHeadings(title, formatted);
+      // Ordered-list markers are normalized only now: `一、背景` must still look like a section when headings are judged.
+      formatted = this.normalizeOrderedListMarkers(stripHeadingNumbers(headings.content));
+      await report(headingStep, headings.applied > 0 ? "completed" : "skipped", headings.info);
+
       await report(codeStep);
-      const codeBlocks = this.formatCodeBlocks(formatted);
-      formatted = normalizeBodyHeadingLevels(codeBlocks.content);
+      const confirmation = await this.confirmCandidates(formatted, instructions);
+      const codeBlocks = this.formatCodeBlocks(confirmation.content);
+      formatted = codeBlocks.content;
       let text = this.normalizeFinalBody(formatted);
-      await report(codeStep, codeBlocks.changed > 0 ? "completed" : "skipped", codeBlocks.changed > 0
-        ? `修改了 ${codeBlocks.changed} 处`
-        : codeBlocks.seen > 0 ? "代码块无需修改" : "没有代码块");
+      const codeChanges = confirmation.changed + codeBlocks.changed;
+      const codeInfo = [
+        codeChanges > 0 ? `修改了 ${codeChanges} 处` : codeBlocks.seen > 0 ? "代码块无需修改" : "没有代码块",
+        ...confirmation.notes
+      ].join("；");
+      await report(codeStep, codeChanges > 0 ? "completed" : "skipped", codeInfo);
 
       await report(imageStep);
       const imageTask = planImageRepairs(this.app, sourcePath, text, clippingSourceUrl(frontmatter));
@@ -149,9 +157,7 @@ export class ClippingPipeline {
         await finishImagePlan();
         await report(translationStep);
         const translations = await this.ai.translateEnglishParagraphs(title, translationPlan.candidates, instructions);
-        text = this.normalizeFinalBody(normalizeBodyHeadingLevels(
-          applyTranslationDecisions(text, translationPlan.candidates, translations)
-        ));
+        text = this.normalizeFinalBody(applyTranslationDecisions(text, translationPlan.candidates, translations));
         await report(translationStep, translations.length ? "completed" : "skipped", translations.length ? undefined : "无可翻译正文");
         propertyTask = this.startNoteProperties(title, text);
       }
@@ -178,7 +184,10 @@ export class ClippingPipeline {
         const withFrontmatter = applyArticleFrontmatter(repaired.content, current, template, data);
         warnings = inspectClippingOutput(this.app, sourcePath, original, withFrontmatter, repaired.targets);
         if (imageWarnings) warnings.push(imageWarnings);
-        const properties = fillEmptyNoteProperties(withFrontmatter, proposal, { replaceExisting: true });
+        const properties = fillEmptyNoteProperties(withFrontmatter, proposal, {
+          replaceExisting: true,
+          keepExistingDescription: proposal?.descriptionRejected
+        });
         filled = properties.filled;
         if (properties.clearedDescription) warnings.push("简要描述未生成，已清空");
         return properties.content;
@@ -194,7 +203,10 @@ export class ClippingPipeline {
         .filter(Boolean).join("；") || undefined;
       await report(propertyStep, "completed", propertyInfo);
       const imageResult = repaired.restored ? t("imagesRestored", { count: repaired.restored }) : "";
-      const warningText = warnings.length ? t("checkWarnings", { warnings: warnings.join("；") }) : "";
+      // Model batches that failed, rewrites that were refused and code still collapsed must reach the user,
+      // otherwise "已整理" reads as "everything was checked".
+      const allWarnings = [...(headings.warning ? [headings.warning] : []), ...confirmation.notes, ...warnings];
+      const warningText = allWarnings.length ? t("checkWarnings", { warnings: allWarnings.join("；") }) : "";
       new Notice(t("organizedNotice", { images: imageResult, warnings: warningText }));
     } catch (error) {
       if (!noteWritten) await Promise.allSettled(createdAttachments.map((attachment) => this.app.vault.delete(attachment)));
@@ -271,14 +283,48 @@ export class ClippingPipeline {
     }
   }
 
+  private async restoreHeadings(
+    title: string,
+    content: string
+  ): Promise<{ content: string; applied: number; info?: string; warning?: string }> {
+    if (typeof this.ai.restoreHeadingStructure !== "function") return { content, applied: 0 };
+    const input = buildHeadingInput(content);
+    if ("skipped" in input) {
+      return { content, applied: 0, info: `${input.skipped}，标题保持原样`, warning: `标题结构未整理（${input.skipped}）` };
+    }
+    let edits: unknown[];
+    try {
+      edits = await this.ai.restoreHeadingStructure(title, input);
+    } catch {
+      return { content, applied: 0, info: "模型调用失败，标题保持原样", warning: "标题结构模型调用失败，已保留原标题" };
+    }
+    const result = applyHeadingEdits(content, input, edits);
+    if (result.discarded) {
+      return { content, applied: 0, info: `${result.discarded}，标题保持原样`, warning: `标题结构修改已放弃（${result.discarded}）` };
+    }
+    const info = [
+      result.applied > 0 ? `调整了 ${result.applied} 处标题` : "标题无需调整",
+      result.rejected > 0 ? `忽略 ${result.rejected} 条无法核对的修改` : ""
+    ].filter(Boolean).join("；");
+    return { content: result.content, applied: result.applied, info };
+  }
+
+  private normalizeOrderedListMarkers(content: string): string {
+    return mapUnprotectedMarkdown(content, (plain) => plain.split("\n").map((line) => line
+      .replace(/^(\s*)(\d+)[、)]\s+/g, "$1$2. ")
+      .replace(/^(\s*)([一二三四五六七八九十]+)[、.]\s+/g, (_match, indent, number) => `${indent}${chineseToArabic(number)}. `)
+    ).join("\n"));
+  }
+
   private async confirmCandidates(
     content: string,
     instructions: string
-  ): Promise<{ content: string; changed: number }> {
+  ): Promise<{ content: string; changed: number; notes: string[] }> {
     const candidates = collectUncertainCandidates(content);
-    if (candidates.length === 0) return { content, changed: 0 };
+    if (candidates.length === 0) return { content, changed: 0, notes: [] };
     const batches = batchFormattingCandidates(candidates, { maxChars: 3500, maxItems: 4 });
     const decisions: FormattingDecision[] = [];
+    let failedBatches = 0;
     let nextBatch = 0;
     const workers = Array.from({ length: Math.min(FORMAT_CONFIRM_CONCURRENCY, batches.length) }, async () => {
       while (nextBatch < batches.length) {
@@ -287,13 +333,20 @@ export class ClippingPipeline {
         try {
           decisions.push(...await this.ai.confirmFormatting(batch, instructions));
         } catch {
-          // A failed batch keeps its original text and does not surface an unconfirmed count.
+          // A failed batch keeps its original text; it is reported below so it is not mistaken for "nothing to fix".
+          failedBatches += 1;
         }
       }
     });
     await Promise.all(workers);
     const edited = applyFormattingEdits(content, candidates, decisions);
-    return { content: edited.content, changed: edited.applied };
+    const stillMangled = collectCodeCandidates(edited.content).fencedCode.filter((candidate) => candidate.needsReformat).length;
+    const notes = [
+      failedBatches ? `${failedBatches} 批模型确认失败` : "",
+      edited.rejectedReformats ? `${edited.rejectedReformats} 处代码重排无法确认会保留代码行为，已保留原文` : "",
+      stillMangled ? `${stillMangled} 个代码块疑似仍被压成一行` : ""
+    ].filter(Boolean);
+    return { content: edited.content, changed: edited.applied, notes };
   }
 
   private organizeMarkdownStyle(content: string): string {
@@ -311,9 +364,7 @@ export class ClippingPipeline {
           .replace(/[ \t]+$/g, "");
         // Clean trailing ** from heading lines (orphan bold artifact)
         next = next.replace(/^(#{1,6}\s+.*?)\s*\*\*\s*$/g, "$1");
-        next = next.replace(/^(\s*)(\d+)[、)]\s+/g, "$1$2. ");
-        next = next.replace(/^(\s*)([一二三四五六七八九十]+)[、.]\s+/g, (_match, indent, number) =>
-          `${indent}${chineseToArabic(number)}. `);
+        next = repairBoldFlankingLine(next);
         next = next.replace(/^\s+\|(\s*:?-{3,}:?\s*\|.*)$/g, "|$1");
         return next;
       }).join("\n");
@@ -334,9 +385,12 @@ export class ClippingPipeline {
       if (rawLanguage.trim().split(/\s+/).length > 1) continue;
       seen += 1;
       const language = rawLanguage.trim().split(/\s+/)[0] ?? "";
-      const cleaned = prettyJsonBlock(removeClipperFenceSpacing(removeCodeWatermarkLines(raw)
+      const unmarked = removeCodeWatermarkLines(raw)
         .replace(/^\s*(体验AI代码助手|代码解读复制代码)\s*$/gm, "")
-        .replace(/^\s*(In \[\d+\]:|Out\[\d+\]:)\s*$/gm, ""), language), language);
+        .replace(/^\s*(In \[\d+\]:|Out\[\d+\]:)\s*$/gm, "");
+      const cleaned = /^(?:yaml|yml)$/i.test(language)
+        ? repairClippedYaml(unmarked, parseYaml)
+        : prettyJsonBlock(removeClipperFenceSpacing(unmarked, language), language);
       if (cleaned === raw) continue;
       lines.splice(start + 1, end - start - 1, ...trimCodeFenceBody(cleaned).split("\n"));
       changed += 1;
@@ -362,26 +416,14 @@ export class ClippingPipeline {
   }
 }
 
-function applyAutoCodeWraps(content: string): { content: string; applied: number } {
-  const auto = collectCodeCandidates(content).possibleCode.filter((candidate) => candidate.autoLanguage);
-  if (auto.length === 0) return { content, applied: 0 };
-  const decisions: FormattingDecision[] = auto.map((candidate) => ({
-    id: candidate.id,
-    action: "wrap-code",
-    language: candidate.autoLanguage
-  }));
-  return applyFormattingEdits(content, auto, decisions);
-}
-
 function collectUncertainCandidates(content: string): FormattingCandidate[] {
-  const headings = collectHeadingCandidates(content).map((candidate, index) => ({ ...candidate, id: `heading-${index + 1}` }));
   const code = collectCodeCandidates(content);
+  // High-confidence unfenced code is confirmed by the model too; `autoLanguage` is only a hint.
   const possible = code.possibleCode
-    .filter((candidate) => !candidate.autoLanguage)
     .map((candidate, index) => ({ ...candidate, id: `code-${index + 1}` }));
   const fenced = code.fencedCode.map((candidate, index) => ({ ...candidate, id: `fence-${index + 1}` }));
   const clipped = collectClippedCodeCandidates(content).map((candidate, index) => ({ ...candidate, id: `clip-${index + 1}` }));
-  return [...headings, ...possible, ...fenced, ...clipped];
+  return [...possible, ...fenced, ...clipped];
 }
 
 function clippingSourceUrl(frontmatter: string | null): string | undefined {

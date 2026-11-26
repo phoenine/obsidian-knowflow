@@ -4,6 +4,8 @@
 
 > Turn notes into knowledge.
 
+KnowFlow is an Obsidian plugin for studying web clippings and Markdown notes. Use your configured AI model to organize clippings, summarize articles, and generate practice quizzes. Track your progress and revisit saved questions in daily reviews.
+
 KnowFlow 是一款 AI 驱动的 Obsidian 学习助手，用于把 Vault 中的网页剪藏和文章转化为可整理、可学习、可测试、可复习的知识资产。
 
 它关注的不是单次摘要，而是一条完整的学习闭环：
@@ -74,10 +76,10 @@ KnowFlow 可以处理当前打开的 Markdown 剪藏，并尽量以小范围修�
 
 ### 文章维护
 
-`clipping-update` 的交付是整篇笔记的阅读体验。网页剪藏进入 Obsidian 后，标题、段落、列表、对比结构和可复制示例可能被压缩或变形。插件先恢复已经能确定的结构，再让模型结合候选上下文确认拿不准的标题和代码，保留原意，让读者能浏览、比较和复制。整理后的正文应能直接作为 AI Summary 的输入，复用已有的清理结果。
+`clipping-update` 的交付是整篇笔记的阅读体验。网页剪藏进入 Obsidian 后，标题、段落、列表、对比结构和可复制示例可能被压缩或变形。插件恢复这些内容的阅读结构，保留原意，让读者能浏览、比较和复制。整理后的正文可直接作为 AI Summary 的输入。
 
-- **内置 Skills**。规则存于项目的 [skills 目录](skills/README.md)，构建时随插件打包。整理时插件先处理已经能确定的结构，再把拿不准的标题和代码按每批最多 4 条交给模型确认或保留。插件负责校验和写入。Vault 里的 `skills/<名称>/SKILL.md` 会替换同名内置规则；只有 `clipping-update` 是把 Vault 规则或旧的 `clipping-repair` 接在内置规则后面。
-- **生成文章摘要**。每次读取当前笔记一次，短文使用清理后的全文，长文在本地按章抽取片段，一次发给模型。卡片流式展示摘要正文，完成后按核心观点和章节梳理渲染，并按阅读评分显示推荐动作。模型没有返回摘要内容时，使用相同输入重试一次。保存时把摘要和可用的摘要属性合并到最新笔记，保留生成期间的正文编辑。
+- **内置 Skills**。规则存于项目的 [skills 目录](skills/README.md)，构建时随插件打包。整理时插件先处理能确定的结构，再让模型结合整篇正文判断标题层级。需要确认的代码候选单独分批发送，每批最多 4 条。插件负责校验和写入。Vault 里的 `skills/<名称>/SKILL.md` 会替换同名内置规则。`clipping-update` 会把 Vault 规则或旧的 `clipping-repair` 接在内置规则后面。
+- **生成文章摘要**。短文使用清理后的全文，长文在本地按章抽取片段。卡片流式展示文章的核心观点，按需梳理值得单独理解的机制、方法或证据。流式请求在收到内容前失败，或没有返回可用摘要时，用相同输入补发一次普通请求。保存时保留生成期间的正文编辑。
 - **文章知识检查**。打开文章后，在 KnowFlow 对话中输入「检查当前文章是否过时」。Chat model 按章节阅读全文，用 [DeepSeek Search](https://api-docs.deepseek.com/guides/search/) 核对已有说法，并查找会影响理解的遗漏进展。报告只列出可以更新的条目，并询问是否更新原文。回复「更新」后，修改写入对应章节，增加的内容用 `> [!note]` 标出。回复「应用第 2 条」只写入选中的项，回复「不用」则保持原文。「检查并更新」同样先列出建议，确认后才写入。DeepSeek Search 可复用已配置的官方 API Key，也可在 `Settings → AI Models → DeepSeek Search → Configure` 设置独立密钥。搜索及必要的网页抓取按接口请求计费。
 - **相关文章**。Relevant Notes 先过滤弱语义匹配，再合并具体标题术语的匹配结果，最多展示五篇。共同标签只参与排序。每篇显示可点击的标题、加入 Chat 按钮和最多两行的「简要描述」。
 

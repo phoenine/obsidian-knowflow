@@ -57,6 +57,7 @@ interface Claim {
 interface Analysis {
   purpose: string;
   coreConclusion: string;
+  coreClaimQuote: string;
   claims: Claim[];
   discoveryQueries: string[];
 }
@@ -111,17 +112,22 @@ export class ArticleFreshness {
         evidence.set(query, foundGroups[index].map((item) => ({ ...item, id: nextSourceId++ })));
       }
 
-      const covered = analysis.claims.filter((claim) => evidence.has(claim.query));
+      // A query only counts as covered when it returned sources; an empty result is not evidence either way.
+      const hasSources = (query: string): boolean => (evidence.get(query)?.length ?? 0) > 0;
+      const covered = analysis.claims.filter((claim) => hasSources(claim.query));
       const incomplete = [...new Set(analysis.claims.filter((claim) => pending.has(claim.query)).map((claim) => claim.section))];
       const review: FreshnessReview = {
         path: file.path, original, checkedOn, coreConclusion: analysis.coreConclusion,
         verdict: "", incomplete, updates: [], held: [], unverified: []
       };
       for (const claim of analysis.claims) {
-        if (!pending.has(claim.query)) continue;
-        review.unverified.push({ section: claim.section, text: claim.quote, reason: "检索预算已用完，此章尚未完成。" });
+        if (pending.has(claim.query)) {
+          review.unverified.push({ section: claim.section, text: claim.quote, reason: "检索预算已用完，此章尚未完成。" });
+        } else if (!hasSources(claim.query)) {
+          review.unverified.push({ section: claim.section, text: claim.quote, reason: "没有检索到可核对的公开资料。" });
+        }
       }
-      if (!covered.length && !analysis.discoveryQueries.some((query) => evidence.has(query))) {
+      if (!covered.length && !analysis.discoveryQueries.some(hasSources)) {
         review.verdict = analysis.claims.length || analysis.discoveryQueries.length ? "暂时无法判断" : "暂无需要检查的高风险说法";
         return review;
       }
@@ -130,7 +136,8 @@ export class ArticleFreshness {
       if (noted) note?.("\n\n");
       const sources = [...evidence.values()].flat();
       const judged = await this.judge(transport, model, checkedOn, analysis, covered, evidence, note);
-      this.acceptJudgment(review, judged, prose, sources, incomplete);
+      const coreClaimQuote = covered.some((claim) => claim.quote === analysis.coreClaimQuote) ? analysis.coreClaimQuote : "";
+      this.acceptJudgment(review, judged, prose, sources, incomplete, coreClaimQuote);
       return review;
     });
   }
@@ -163,6 +170,7 @@ export class ArticleFreshness {
     const claims: Claim[] = [];
     let purpose = "";
     let coreConclusion = "";
+    let coreClaimQuote = "";
     const discoveryQueries: string[] = [];
     const batches = sectionBatches(article);
     for (const [index, batch] of batches.entries()) {
@@ -174,6 +182,7 @@ export class ArticleFreshness {
           "按 Skill 做全文分析。理解这一批正文的目的、核心观点和知识边界。",
           "提取所有具有实质性时效风险的说法，包括技术能力、限制、适用边界、方案优劣和行业判断。不要只找带有「目前、最新、唯一」的句子。原理、公式和历史叙述默认不提取。",
           "quote 必须是这一批正文中的连续原文。合并重复说法。没有符合条件的说法就返回空数组，不要凑数。",
+          "只有某条 claims.quote 直接支撑 coreConclusion 时，才把该条原文填入 coreClaimQuote。核心结论没有对应的待核验说法时留空。",
           "query 是验证这句说法的检索词，discoveryQueries 是发现该主题遗漏进展的检索词，各不超过 80 字，不要使用固定模板。只输出 JSON。"
         ].join("\n")
       }, {
@@ -181,7 +190,7 @@ export class ArticleFreshness {
         content: JSON.stringify({
           title, section: batch.title, article: batch.text,
           responseShape: {
-            purpose: "", coreConclusion: "", domains: ["领域"],
+            purpose: "", coreConclusion: "", coreClaimQuote: "", domains: ["领域"],
             claims: [{ quote: "", section: "", query: "" }],
             discoveryQueries: [""]
           }
@@ -189,7 +198,10 @@ export class ArticleFreshness {
       }], { onReasoning });
       if (!payload || !Array.isArray(payload.claims)) throw new Error("模型未返回有效的知识检查结果。");
       if (!purpose && typeof payload.purpose === "string") purpose = payload.purpose.slice(0, 300);
-      if (!coreConclusion && typeof payload.coreConclusion === "string") coreConclusion = payload.coreConclusion.slice(0, 300);
+      if (!coreConclusion && typeof payload.coreConclusion === "string" && payload.coreConclusion.trim()) {
+        coreConclusion = payload.coreConclusion.slice(0, 300);
+        coreClaimQuote = typeof payload.coreClaimQuote === "string" ? payload.coreClaimQuote.trim() : "";
+      }
       for (const item of payload.claims) {
         const quote = typeof item?.quote === "string" ? item.quote.trim() : "";
         const query = cleanQuery(item?.query);
@@ -204,7 +216,7 @@ export class ArticleFreshness {
         }
       }
     }
-    return { purpose, coreConclusion, claims, discoveryQueries: discoveryQueries.slice(0, 2) };
+    return { purpose, coreConclusion, coreClaimQuote, claims, discoveryQueries: discoveryQueries.slice(0, 2) };
   }
 
   private async judge(
@@ -231,6 +243,7 @@ export class ArticleFreshness {
         checkedOn,
         purpose: analysis.purpose,
         coreConclusion: analysis.coreConclusion,
+        coreClaimQuote: analysis.coreClaimQuote,
         claims: claims.map((claim) => ({ ...claim, sources: evidence.get(claim.query) ?? [] })),
         discovery: analysis.discoveryQueries.flatMap((query) => evidence.get(query) ?? []),
         sources,
@@ -251,10 +264,12 @@ export class ArticleFreshness {
     judged: { coreStillHolds?: unknown; items?: unknown },
     prose: string,
     sources: PublicEvidence[],
-    incomplete: string[]
+    incomplete: string[],
+    coreClaimQuote: string
   ): void {
     if (!Array.isArray(judged.items)) throw new Error("模型未返回有效的知识判断。");
     for (const item of judged.items) {
+      if (!item || typeof item !== "object") continue;
       const record = item as {
         quote?: unknown; section?: unknown; status?: unknown; action?: unknown;
         before?: unknown; after?: unknown; reason?: unknown; sourceId?: unknown; evidenceQuote?: unknown;
@@ -268,7 +283,10 @@ export class ArticleFreshness {
       const section = typeof record.section === "string" && record.section.trim() ? record.section.trim() : "正文";
       const source = citedSource(sources, record);
       if (status === "仍然成立" && quote && located(prose, quote)) {
-        review.held.push({ section, text: quote });
+        if (source) review.held.push({ section, text: quote });
+        else if (!review.unverified.some((entry) => entry.text === quote)) {
+          review.unverified.push({ section, text: quote, reason: "没有可以核对的引用依据。" });
+        }
         continue;
       }
       if (status === "证据不足") {
@@ -283,7 +301,7 @@ export class ArticleFreshness {
       if ((action === "修正" || action === "替换") && !hasSupportedNumericChanges(anchor, after, source.quote)) continue;
       review.updates.push({ status, action, section, before: anchor, after, reason, source });
     }
-    review.verdict = verdictOf(review, judged.coreStillHolds, incomplete);
+    review.verdict = verdictOf(review, judged.coreStillHolds, incomplete, coreClaimQuote);
   }
 }
 
@@ -380,38 +398,55 @@ function hasSupportedNumericChanges(before: string, after: string, evidence: str
   return [...values(after)].every((number) => original.has(number) || cited.has(number));
 }
 
-function verdictOf(review: FreshnessReview, coreStillHolds: unknown, incomplete: string[]): string {
+function verdictOf(review: FreshnessReview, coreStillHolds: unknown, incomplete: string[], coreClaimQuote: string): string {
   if (incomplete.length || review.unverified.some((item) => item.reason.includes("尚未完成"))) return "暂时无法判断";
-  if (coreStillHolds === false) return "核心结论需要重新审视";
+  // The model's own "core no longer holds" flag is not enough: it must be backed by an accepted update that
+  // says the content is outdated or wrong, and that update already carries a checked source.
+  const invalidated = review.updates.some((item) =>
+    item.before === coreClaimQuote && (item.status === "已经失效" || item.status === "原文有误"));
+  if (coreStillHolds === false && invalidated) return "核心结论需要重新审视";
   if (review.updates.length) return "局部内容需要更新";
+  if (review.unverified.length) return "暂时无法判断";
   if (review.held.length) return "未发现明显过时内容";
-  if (!review.unverified.length) return "暂无需要检查的高风险说法";
-  return "暂时无法判断";
+  return "暂无需要检查的高风险说法";
 }
 
 function applyUpdates(content: string, updates: FreshnessUpdate[], checkedOn: string): string {
   const newline = content.includes("\r\n") ? "\r\n" : "\n";
-  const spans = updates.map((update) => {
+  const changes: Array<{ start: number; end: number; text: string }> = [];
+  const notesByOffset = new Map<number, string[]>();
+  for (const update of updates) {
     const start = content.indexOf(update.before);
     if (start < 0 || start !== content.lastIndexOf(update.before)) {
       throw new Error("文章已修改或移动，请重新检查后再应用。");
     }
-    const note = `${newline}${newline}${knowledgeNote(update, checkedOn, newline)}`;
-    if (update.action === "补充") {
-      const at = paragraphBreak(content, start, newline);
-      return { start: at, end: at, text: note };
-    }
     const matched = start + update.before.length;
-    const end = paragraphBreak(content, matched, newline);
-    const punctuation = /^[。！？.!?]/.test(content.slice(matched)) ? content.slice(matched, matched + 1) : "";
-    const between = content.slice(matched + punctuation.length, end);
-    const text = update.action === "删除"
-      ? `${between}${note}`
-      : `${emphasizeArticleProse(update.after)}${punctuation}${between}${note}`;
-    return { start, end, text };
-  }).sort((left, right) => right.start - left.start);
+    const offset = paragraphBreak(content, matched, newline);
+    const notes = notesByOffset.get(offset) ?? [];
+    notes.push(knowledgeNote(update, checkedOn, newline));
+    notesByOffset.set(offset, notes);
+
+    if (update.action !== "补充") {
+      const punctuation = /^[。！？.!?]/.test(content.slice(matched)) ? content[matched] : "";
+      const text = update.action === "删除" ? "" : emphasizeArticleProse(update.after);
+      const suffix = text && !/[。！？.!?](?:\*\*)?$/.test(text) ? punctuation : "";
+      changes.push({ start, end: matched + punctuation.length, text: text + suffix });
+    }
+  }
+  changes.sort((left, right) => left.start - right.start);
+  for (let index = 1; index < changes.length; index += 1) {
+    if (changes[index].start < changes[index - 1].end) {
+      throw new Error("选中的更新范围重叠，请分别应用。");
+    }
+  }
+  for (const [offset, notes] of notesByOffset) {
+    const enclosing = changes.find((change) => change.start < offset && offset < change.end);
+    if (enclosing) throw new Error("选中的更新范围重叠，请分别应用。");
+    changes.push({ start: offset, end: offset, text: newline.repeat(2) + notes.join(newline.repeat(2)) });
+  }
+  changes.sort((left, right) => right.start - left.start || right.end - left.end);
   let updated = content;
-  for (const span of spans) updated = updated.slice(0, span.start) + span.text + updated.slice(span.end);
+  for (const change of changes) updated = updated.slice(0, change.start) + change.text + updated.slice(change.end);
   return updated;
 }
 

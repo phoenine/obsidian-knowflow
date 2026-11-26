@@ -62,12 +62,3 @@ export function assessUnfencedCode(lines: string[], previousLine: string): Unfen
 
   return { confidence: "unknown", suggestedLanguage: "", reason: "Not enough code signals" };
 }
-
-/**
- * Wrap unfenced code lines in a markdown code fence.
- * Used when assessUnfencedCode returns HIGH confidence.
- */
-export function wrapCodeFence(lines: string[], language: string): string[] {
-  if (!language) return lines;
-  return [`\`\`\`${language}`, ...lines, "```"];
-}

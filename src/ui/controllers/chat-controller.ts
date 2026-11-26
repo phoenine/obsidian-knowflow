@@ -4,7 +4,9 @@ import type KnowFlowPlugin from "../../main";
 import type { ChatMessage, ChatThread, ChatUsage, ViewContext } from "../../types";
 import { prepareArticleForAi } from "../../services/clipping/managed-content";
 import { parseArticleUpdateReply, parseFreshnessRequest, renderFreshnessApplied, renderFreshnessReview } from "../../services/chat/freshness-chat";
+import { CODE_COMMENT_INSTRUCTION, locateCodeBlocks, parseCodeFormatApply, parseCodeFormatRequest, renderCodeFormatReview } from "../../services/chat/code-format-chat";
 import type { FreshnessReview } from "../../services/learning/article-freshness";
+import { applyFormattingEdits, batchFormattingCandidates, isSafeCodeReformat, sameCodeIgnoringComments, trimCodeFenceBody, type FormattingCandidate, type FormattingDecision } from "../../services/clipping/formatting-candidates";
 import { resolveDeepSeekSearchKey } from "../../services/search/public-evidence";
 import { t } from "../../i18n";
 
@@ -14,9 +16,21 @@ interface PendingFreshnessReview {
   messageId: string;
 }
 
+interface PendingCodeFormat {
+  file: TFile;
+  /** Note text when the preview was built. The write is refused if it changed. */
+  snapshot: string;
+  candidates: FormattingCandidate[];
+  items: Array<{ decision: FormattingDecision; section: string; language: string; content: string }>;
+  /** The request asked for comments; only used to pick the empty-result message. */
+  comments: boolean;
+  messageId: string;
+}
+
 export class ChatController {
   activeThread: ChatThread | null = null;
   private pendingFreshness = new WeakMap<ChatThread, PendingFreshnessReview>();
+  private pendingCodeFormat = new WeakMap<ChatThread, PendingCodeFormat>();
 
   constructor(
     private app: App,
@@ -64,12 +78,14 @@ export class ChatController {
 
     let requestUsage = emptyChatUsage();
     try {
-      const result = handlers.replay ? null : await this.handleFreshness(question, thread, file, assistantMessage, () => {
+      const refreshMessage = () => {
         if (this.activeThread === thread) handlers.onContent(assistantMessage);
-      }, (delta) => {
-        assistantMessage.reasoning += delta;
-        if (this.activeThread === thread) handlers.onReasoning(assistantMessage);
-      });
+      };
+      const result = handlers.replay ? null
+        : (await this.handleFreshness(question, thread, file, assistantMessage, refreshMessage, (delta) => {
+          assistantMessage.reasoning += delta;
+          if (this.activeThread === thread) handlers.onReasoning(assistantMessage);
+        })) ?? await this.handleCodeFormat(question, thread, file, assistantMessage, refreshMessage);
       if (result !== null) {
         assistantMessage.content = result;
       } else {
@@ -162,6 +178,9 @@ export class ChatController {
     const reviewIsCurrent = Boolean(pending && thread.messages.at(-3)?.id === pending.messageId);
     const reply = reviewIsCurrent && pending && file && pending.file === file && pending.review.path === file.path
       ? parseArticleUpdateReply(question) : null;
+    // "应用全部" / "应用第 1 个" may be meant for a code-format preview. Let that handler take it
+    // before this one marks the message as an article-freshness message.
+    if (request?.kind === "apply" && !pending && this.codeFormatReviewIsCurrent(thread, file)) return null;
     if (!request && !reply) {
       if (pending) this.pendingFreshness.delete(thread);
       return null;
@@ -218,6 +237,40 @@ export class ChatController {
     return renderFreshnessReview(file.basename, review);
   }
 
+  /**
+   * Buttons for a review that is waiting for a reply. The button text is sent
+   * as the reply, so it goes through the same parser as typed text.
+   * Only the last message can offer buttons; anything said after it closes them.
+   */
+  replyChoices(thread: ChatThread, message: ChatMessage): Array<{ label: string; reply: string }> {
+    if (thread.messages.at(-1) !== message) return [];
+    if (this.pendingFreshness.get(thread)?.messageId === message.id) {
+      return [
+        { label: t("freshnessUpdateChoice"), reply: "更新" },
+        { label: t("freshnessKeepChoice"), reply: "不用" }
+      ];
+    }
+    const pending = this.pendingCodeFormat.get(thread);
+    if (pending?.messageId !== message.id) return [];
+    if (pending.items.length === 1) {
+      return [
+        { label: t("freshnessUpdateChoice"), reply: "更新" },
+        { label: t("freshnessKeepChoice"), reply: "不用" }
+      ];
+    }
+    return [
+      { label: t("codeFormatChoiceAll"), reply: "应用全部" },
+      ...pending.items.map((_, index) => ({ label: t("codeFormatChoiceOne", { n: index + 1 }), reply: `应用第 ${index + 1} 个` })),
+      { label: t("freshnessKeepChoice"), reply: "不用" }
+    ];
+  }
+
+  /** A preview is waiting for the reply to come right after it. */
+  private codeFormatReviewIsCurrent(thread: ChatThread, file: TFile | null): boolean {
+    const pending = this.pendingCodeFormat.get(thread);
+    return Boolean(pending && file && pending.file === file && thread.messages.at(-3)?.id === pending.messageId);
+  }
+
   private async applyFreshnessUpdates(
     file: TFile,
     thread: ChatThread,
@@ -229,6 +282,110 @@ export class ChatController {
     await this.plugin.freshness.apply(file, review, selected);
     this.pendingFreshness.delete(thread);
     return renderFreshnessApplied(selected.size, review.updates.length - selected.size);
+  }
+
+  /**
+   * "格式化第 2.4 节的代码块" / "格式化文章中的代码块": the model checks only the named
+   * blocks, and nothing is written until the user confirms in the same chat.
+   */
+  private async handleCodeFormat(
+    question: string,
+    thread: ChatThread,
+    file: TFile | null,
+    message: ChatMessage,
+    refreshMessage: () => void
+  ): Promise<string | null> {
+    const pending = this.pendingCodeFormat.get(thread);
+    const reviewIsCurrent = this.codeFormatReviewIsCurrent(thread, file);
+    const reply = reviewIsCurrent ? parseArticleUpdateReply(question) : null;
+    const chosen = reviewIsCurrent ? parseCodeFormatApply(question) : null;
+    const scope = parseCodeFormatRequest(question);
+    if (!scope && !reply && !chosen) {
+      if (pending) this.pendingCodeFormat.delete(thread);
+      return null;
+    }
+
+    const progress = (stage: string) => {
+      message.content = stage;
+      refreshMessage();
+    };
+    if (reply === "decline" && pending) {
+      this.pendingCodeFormat.delete(thread);
+      return t("freshnessUnchanged");
+    }
+    if (reply === "accept" && pending) {
+      return this.applyCodeFormat(thread, pending, new Set(pending.items.map((_, index) => index)), progress);
+    }
+    if (chosen && pending) {
+      const numbers = chosen === "all" ? pending.items.map((_, index) => index) : chosen.map((number) => number - 1);
+      if (numbers.some((index) => index < 0 || index >= pending.items.length)) {
+        return t("codeFormatBadNumber", { count: pending.items.length });
+      }
+      return this.applyCodeFormat(thread, pending, new Set(numbers), progress);
+    }
+    if (!scope) return null;
+
+    this.pendingCodeFormat.delete(thread);
+    if (!file || file.extension !== "md" || file.path !== thread.filePath
+      || this.app.vault.getAbstractFileByPath(file.path) !== file) {
+      return t("openArticleFirst");
+    }
+    const content = await this.app.vault.read(file);
+    const located = locateCodeBlocks(content, scope);
+    if (located.error === "section") return t("codeFormatNoSection", { section: scope.section ?? "" });
+    if (located.error === "index") return t("codeFormatNoIndex", { index: scope.index ?? 0 });
+    if (!located.blocks.length) return t("codeFormatEmpty");
+
+    const candidates = located.blocks.map(({ candidate }) => candidate);
+    const comments = Boolean(scope.comments);
+    progress(t("codeFormatChecking", { count: candidates.length }));
+    const decisions: FormattingDecision[] = [];
+    for (const batch of batchFormattingCandidates(candidates, { maxChars: 8000, maxItems: 10 })) {
+      decisions.push(...await this.plugin.ai.confirmFormatting(batch, comments ? CODE_COMMENT_INSTRUCTION : "", "code-chat"));
+    }
+
+    const items: PendingCodeFormat["items"] = [];
+    for (const decision of decisions) {
+      if (decision.action !== "reformat-code") continue;
+      const block = located.blocks.find(({ candidate }) => candidate.id === decision.id);
+      if (!block || typeof decision.content !== "string") continue;
+      const body = trimCodeFenceBody(decision.content);
+      // Pure formatting moves whitespace only and keeps the fence's own language. A comment request may
+      // only add comments, so the code itself must still match once comments are ignored.
+      const sameCode = comments
+        ? sameCodeIgnoringComments(block.candidate.content, body)
+        : isSafeCodeReformat(block.candidate, body);
+      if (!sameCode) continue;
+      const language = comments
+        ? decision.language || block.candidate.fenceLanguage || "text"
+        : block.candidate.fenceLanguage || decision.language || "text";
+      const normalized: FormattingDecision = { ...decision, language, content: body };
+      // Structural check (non-empty, no stray fence, has a language). The preview is what the user confirms.
+      if (applyFormattingEdits(content, [block.candidate], [normalized], { trustReformat: true }).applied !== 1) continue;
+      items.push({ decision: normalized, section: block.section, language, content: body });
+    }
+    if (!items.length) return t(comments ? "codeFormatNoComment" : "codeFormatNone");
+
+    this.pendingCodeFormat.set(thread, { file, snapshot: content, candidates, items, comments, messageId: message.id });
+    return renderCodeFormatReview(items.map(({ section, language, content: body }) => ({ section, language, content: body })));
+  }
+
+  private async applyCodeFormat(
+    thread: ChatThread,
+    pending: PendingCodeFormat,
+    selected: Set<number>,
+    progress: (stage: string) => void
+  ): Promise<string> {
+    this.pendingCodeFormat.delete(thread);
+    if (await this.app.vault.read(pending.file) !== pending.snapshot) return t("codeFormatChanged");
+    const decisions = pending.items.filter((_, index) => selected.has(index)).map((item) => item.decision);
+    const edited = applyFormattingEdits(pending.snapshot, pending.candidates, decisions, { trustReformat: true });
+    progress(t("updatingArticle"));
+    await this.app.vault.process(pending.file, (latest) => {
+      if (latest !== pending.snapshot) throw new Error(t("codeFormatChanged"));
+      return edited.content;
+    });
+    return t("codeFormatApplied", { count: edited.applied });
   }
 
   findPreviousUserMessage(thread: ChatThread, assistantId: string): ChatMessage | null {
@@ -245,6 +402,9 @@ export class ChatController {
     const count = thread.messages[index + 1]?.role === "assistant" ? 2 : 1;
     if (this.pendingFreshness.get(thread)?.messageId === thread.messages[index + 1]?.id) {
       this.pendingFreshness.delete(thread);
+    }
+    if (this.pendingCodeFormat.get(thread)?.messageId === thread.messages[index + 1]?.id) {
+      this.pendingCodeFormat.delete(thread);
     }
     thread.messages.splice(index, count);
     thread.updatedAt = new Date().toISOString();
