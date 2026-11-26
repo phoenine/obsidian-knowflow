@@ -3,6 +3,7 @@ import { readLegacyRepairSkill } from "../clipping/repair-skill";
 import articleFreshness from "../../../skills/article-freshness/SKILL.md" with { type: "text" };
 import articleQuiz from "../../../skills/article-quiz/SKILL.md" with { type: "text" };
 import articleSummary from "../../../skills/article-summary/SKILL.md" with { type: "text" };
+import articleSummaryQuality from "../../../skills/article-summary/references/output-quality.md" with { type: "text" };
 import articleTranslation from "../../../skills/article-translation/SKILL.md" with { type: "text" };
 import clippingUpdate from "../../../skills/clipping-update/SKILL.md" with { type: "text" };
 import knowledgePoints from "../../../skills/knowledge-points/SKILL.md" with { type: "text" };
@@ -11,7 +12,7 @@ import obsidianRenderIntegrity from "../../../skills/obsidian-render-integrity/S
 
 const BUILTIN_SKILLS = {
   "clipping-update": [clippingUpdate, obsidianMarkdown, obsidianRenderIntegrity].map(skillBody).join("\n\n"),
-  "article-summary": skillBody(articleSummary),
+  "article-summary": [articleSummary, articleSummaryQuality].map(skillBody).join("\n\n"),
   "article-translation": skillBody(articleTranslation),
   "knowledge-points": skillBody(knowledgePoints),
   "article-quiz": skillBody(articleQuiz),

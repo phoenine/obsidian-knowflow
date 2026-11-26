@@ -61,7 +61,9 @@ assert.equal(estimateChatUsage([{ content: "123456" }], "123").totalTokens, 3);
     "> [!summary]- AI 摘要",
     "> 旧摘要不应发送。",
     "",
-    "## Knowledge Map",
+    "## 知识骨架",
+    "",
+    "用队列连接生产者和消费者。",
     "",
     "```mermaid",
     "graph LR",
@@ -93,7 +95,8 @@ assert.equal(estimateChatUsage([{ content: "123456" }], "123").totalTokens, 3);
   assert.ok(source.includes("Original sentence.（内联中文翻译。）"));
   assert.ok(!source.includes("knowflow-translation"));
   assert.ok(!source.includes("旧摘要不应发送。"));
-  assert.ok(!source.includes("graph LR"));
+  assert.ok(source.includes("## 知识骨架\n\n用队列连接生产者和消费者。"));
+  assert.ok(source.includes("```mermaid\ngraph LR\n```"));
   assert.ok(!source.includes("Test Quiz"));
   assert.ok(messages.slice(2).reduce((total, message) => total + message.content.length, 0) <= 12000);
   assert.ok(!messages.some((message) => message.content.startsWith("19-")), "errored assistant output must be excluded");

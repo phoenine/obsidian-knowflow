@@ -24,7 +24,6 @@ const {
   applyFormattingDecisions,
   applyFormattingEdits,
   batchFormattingCandidates,
-  collectHeadingCandidates,
   collectCodeCandidates,
   collectClippedCodeCandidates,
   sameCodeTokens,
@@ -33,7 +32,6 @@ const {
   contradictsPythonLabel,
   introducesRestrictedBreak,
   sameCodeIgnoringComments,
-  normalizeBodyHeadingLevels,
   repairBoldFlankingLine,
   preferTextLanguage,
   stripSequentialLineNumbers,
@@ -166,106 +164,6 @@ const { escapeLiteralHtmlTags } = await import(pathToFileURL(join(tempDir, "lite
   assert.equal(repair("**标题：**[[笔记]]"), "**标题：**[[笔记]]", "wikilink starts with punctuation, already valid");
 }
 
-assert.equal(
-  normalizeBodyHeadingLevels("## 1. 简介\n\n### 二、 实现\n\n## 2026 年趋势\n\n## 3 种方法"),
-  "## 简介\n\n### 实现\n\n## 2026 年趋势\n\n## 3 种方法"
-);
-assert.equal(
-  normalizeBodyHeadingLevels("## 1.  一、业务背景：\n\n### 1.1.  提示词与 Skill 优化：从取得收益到提升放缓\n\n## 2.  二、认识 Jev："),
-  "## 业务背景：\n\n### 提示词与 Skill 优化：从取得收益到提升放缓\n\n## 认识 Jev："
-);
-assert.equal(
-  normalizeBodyHeadingLevels("# 一级标题\n\n## 二级标题"),
-  "## 一级标题\n\n### 二级标题",
-  "body H1 must be demoted so the article title remains the only H1"
-);
-assert.equal(
-  normalizeBodyHeadingLevels([
-    "```markdown",
-    "## Code example heading",
-    "```",
-    "",
-    "### Actual body heading",
-    "",
-    "#### Actual child heading"
-  ].join("\n")),
-  [
-    "```markdown",
-    "## Code example heading",
-    "```",
-    "",
-    "## Actual body heading",
-    "",
-    "### Actual child heading"
-  ].join("\n"),
-  "heading levels inside fenced code must not block promotion of body H3 headings"
-);
-assert.equal(
-  normalizeBodyHeadingLevels("### 开头缺少父标题\n\n## 后续顶层标题"),
-  "## 开头缺少父标题\n\n## 后续顶层标题",
-  "the first real body heading must be H2 even when a later H2 exists"
-);
-assert.equal(
-  normalizeBodyHeadingLevels("## 顶层标题\n\n#### 跳级子标题\n\n##### 下一级标题"),
-  "## 顶层标题\n\n### 跳级子标题\n\n#### 下一级标题",
-  "heading depth must not jump by more than one level"
-);
-
-{
-  const article = [
-    "正文介绍。",
-    "",
-    "产品经理不该按人头配齐",
-    "",
-    "这里解释产品经理的职责。"
-  ].join("\n");
-  const candidates = collectHeadingCandidates(article);
-  const heading = candidates.find((candidate) => candidate.type === "possible-heading");
-  assert.ok(heading);
-  const formatted = applyFormattingDecisions(article, candidates, [
-    { id: heading.id, action: "heading", level: 2 }
-  ]);
-  assert.ok(formatted.includes("## 产品经理不该按人头配齐"));
-}
-
-{
-  const article = [
-    "上一段正文。",
-    "",
-    "**人可以懒到什么地步**",
-    "",
-    "这里解释全自动工作流。"
-  ].join("\n");
-  const candidates = collectHeadingCandidates(article);
-  const heading = candidates.find((candidate) => candidate.type === "possible-heading");
-  assert.ok(heading);
-  assert.equal(heading.content, "**人可以懒到什么地步**");
-  assert.equal(heading.analysisContent, "人可以懒到什么地步");
-
-  const formatted = applyFormattingDecisions(article, candidates, [
-    { id: heading.id, action: "heading", level: 2 }
-  ]);
-  assert.ok(formatted.includes("## 人可以懒到什么地步"));
-
-  const changedArticle = article.replace("**人可以懒到什么地步**", "**已被用户修改**");
-  assert.equal(
-    applyFormattingDecisions(changedArticle, candidates, [{ id: heading.id, action: "heading", level: 2 }]),
-    changedArticle,
-    "stale heading candidates must not modify changed source"
-  );
-}
-
-{
-  const article = [
-    "## 1. 产品经理不该按人头配齐",
-    "",
-    "正文保持不变。"
-  ].join("\n");
-  const candidates = collectHeadingCandidates(article);
-  assert.equal(applyFormattingDecisions(article, candidates, []), article);
-  assert.ok(article.startsWith("## 1. "));
-}
-
 {
   const article = [
     "配置如下：",
@@ -284,19 +182,6 @@ assert.equal(
     { id: code.id, action: "wrap-code", language: "yaml" }
   ]);
   assert.ok(formatted.includes("```yaml\napiVersion: v1\nkind: Pod\nmetadata:\n  name: nginx\n```"));
-}
-
-{
-  const article = [
-    "> [!summary]- AI 摘要",
-    "> 核心观点",
-    "> - 保留摘要内容",
-    "",
-    "> [!question]- Quiz",
-    "> [[Quiz/测试题]]"
-  ].join("\n");
-  const candidates = collectHeadingCandidates(article);
-  assert.equal(applyFormattingDecisions(article, candidates, []), article);
 }
 
 assert.equal(
@@ -610,7 +495,7 @@ assert.equal(
 {
   const candidates = Array.from({ length: 40 }, (_, index) => ({
     id: `long-${index}`,
-    type: "possible-heading",
+    type: "possible-code",
     startLine: index,
     endLine: index,
     content: `${index}-${"候选内容".repeat(180)}`,
@@ -630,7 +515,7 @@ assert.equal(
   const article = "English paragraph.\n\n中文译文。\n<!-- knowflow-translation -->";
   const { possibleCode, fencedCode } = collectCodeCandidates(article);
   assert.ok(
-    [...collectHeadingCandidates(article), ...possibleCode, ...fencedCode]
+    [...possibleCode, ...fencedCode]
       .every((candidate) => !candidate.content.includes("knowflow-translation")),
     "managed translation markers must never become formatting candidates"
   );
@@ -790,9 +675,7 @@ assert.equal(
     "~~~markdown", "```", "", "内层示例", "", "# 示例标题", "```", "~~~", "",
     "%%", "", "私有批注", "", "%%", "", "这是正文标题", ""
   ].join("\n");
-  assert.deepEqual(collectHeadingCandidates(nested).map(({ content }) => content), ["这是正文标题"]);
   assert.equal(collectCodeCandidates(nested).fencedCode.length, 0);
-  assert.equal(normalizeBodyHeadingLevels(nested), nested);
 
 }
 

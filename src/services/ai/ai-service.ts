@@ -5,6 +5,8 @@ import { buildChatRequestMessages } from "../chat/chat-context";
 import { findPublicEvidence } from "../search/public-evidence";
 import { requestFormattingDecisions, type FormattingScope } from "./formatting-ai";
 import type { FormattingCandidate, FormattingDecision } from "../clipping/formatting-candidates";
+import type { HeadingInput } from "../clipping/heading-structure";
+import { requestHeadingEdits } from "./heading-ai";
 import { KnowledgeAi } from "./knowledge-ai";
 import type { TranslationCandidate, TranslationDecision } from "../clipping/translation-candidates";
 import { generateArticleSummary, type SummaryDelta } from "./summary-ai";
@@ -175,6 +177,10 @@ export class AiService {
     scope?: FormattingScope
   ): Promise<FormattingDecision[]> {
     return requestFormattingDecisions(this.settings.taskModel, candidates, instructions, scope);
+  }
+
+  restoreHeadingStructure(title: string, input: HeadingInput): Promise<unknown[]> {
+    return requestHeadingEdits(this.settings.taskModel, title, input);
   }
 
   proposeNoteProperties(title: string, content: string, categories: string[]): Promise<NotePropertyProposal> {

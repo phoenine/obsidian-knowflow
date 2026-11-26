@@ -1,4 +1,4 @@
-export type FormattingCandidateType = "possible-heading" | "possible-code" | "fenced-code";
+export type FormattingCandidateType = "possible-code" | "fenced-code";
 
 export interface FormattingCandidate {
   id: string;
@@ -22,7 +22,7 @@ export interface FormattingCandidate {
 
 export interface FormattingDecision {
   id: string;
-  action: "keep" | "heading" | "wrap-code" | "set-code-language" | "reformat-code" | "strip-line-numbers";
+  action: "keep" | "wrap-code" | "set-code-language" | "reformat-code" | "strip-line-numbers";
   level?: number;
   language?: string;
   /** Reformatted fence body (no opening/closing fences). */
@@ -158,20 +158,6 @@ export function applyFormattingEdits(
       applied += 1;
       continue;
     }
-
-    if (candidate.type === "possible-heading" && decision.action === "heading") {
-      const level = decision.level === 3 || decision.level === 4 ? decision.level : 2;
-      const heading = stripHeadingNumberPrefix(candidate.content
-        .split("\n")
-        .map((line) => line.trim().replace(/^\*\*(.+)\*\*$/, "$1"))
-        .filter(Boolean)
-        .join(" "));
-      if (!heading) continue;
-      const next = `${"#".repeat(level)} ${heading}`;
-      if (current === next) continue;
-      lines.splice(candidate.startLine, candidate.endLine - candidate.startLine + 1, next);
-      applied += 1;
-    }
   }
 
   return { content: lines.join("\n"), applied, rejectedReformats };
@@ -228,53 +214,6 @@ function isProtectedMarkdownLine(line: string): boolean {
   const trimmed = line.trim();
   return /^(#{1,6}\s|>|!\[|\[!\[|<!--|[-*+]\s|\d+[.)]\s|\|)/.test(trimmed)
     || /^-{3,}$/.test(trimmed);
-}
-
-function isPossibleHeadingStart(lines: string[], index: number): boolean {
-  const line = lines[index].trim();
-  if (!line || line.length > 70 || isProtectedMarkdownLine(line)) return false;
-  if (/^https?:\/\//i.test(line) || /[。！？；;]$/.test(line)) return false;
-
-  const blankBefore = index === 0 || !lines[index - 1].trim();
-  const blankAfter = index === lines.length - 1 || !lines[index + 1].trim();
-
-  // 相邻短行合并为 multi-line 候选
-  if (blankBefore && !blankAfter) {
-    const next = lines[index + 1].trim();
-    if (next && next.length <= 70 && !isProtectedMarkdownLine(lines[index + 1])
-        && !/[。！？；;]$/.test(next) && !/^https?:\/\//i.test(next)) {
-      const afterNext = index + 2 >= lines.length || !lines[index + 2].trim();
-      if (afterNext) return true;
-    }
-  }
-
-  return blankBefore && blankAfter;
-}
-
-function possibleHeadingRange(lines: string[], index: number): { start: number; end: number } {
-  const current = lines[index].trim();
-
-  // 数字前缀格式（如 "1. 标题" 或 "一、" 的变形）
-  if (/^\d{1,2}[.)、]?$/.test(current)) {
-    let next = index + 1;
-    while (next < lines.length && !lines[next].trim()) next += 1;
-    if (next < lines.length && lines[next].trim().length <= 70 && !isProtectedMarkdownLine(lines[next])) {
-      return { start: index, end: next };
-    }
-  }
-
-  // 相邻双行短文本合并
-  const blankAfter = index === lines.length - 1 || !lines[index + 1].trim();
-  if (!blankAfter) {
-    const nextLine = lines[index + 1].trim();
-    if (nextLine && nextLine.length <= 70 && !isProtectedMarkdownLine(lines[index + 1])
-        && !/[。！？；;]$/.test(nextLine) && !/^https?:\/\//i.test(nextLine)) {
-      const afterNext = index + 2 >= lines.length || !lines[index + 2].trim();
-      if (afterNext) return { start: index, end: index + 1 };
-    }
-  }
-
-  return { start: index, end: index };
 }
 
 function normalizeLanguage(value: string | undefined): string {
@@ -498,56 +437,6 @@ function makeFencedCodeCandidate(
   return candidate;
 }
 
-/**
- * Strip bold markers and trim. Returns empty string if the result is
- * a pure number or empty — these should not be sent to the LLM.
- */
-function normalizeCandidateContent(text: string): string {
-  const normalized = text
-    .replace(/^\*{1,2}|\*{1,2}$/g, "")
-    .trim();
-  if (!normalized) return "";
-  // Pure numbers
-  if (/^\d{1,3}[.)、]?$/.test(normalized)) return "";
-  return normalized;
-}
-
-export function collectHeadingCandidates(content: string): FormattingCandidate[] {
-  const lines = content.split("\n");
-  const protectedLines = protectedLineIndices(protectedRanges(lines));
-  const candidates: FormattingCandidate[] = [];
-  let index = 0;
-  while (index < lines.length) {
-    if (protectedLines.has(index) || !isPossibleHeadingStart(lines, index)) {
-      index += 1;
-      continue;
-    }
-    const range = possibleHeadingRange(lines, index);
-    if (protectedLines.has(range.end)) {
-      index = range.end + 1;
-      continue;
-    }
-    const rawContent = lines.slice(range.start, range.end + 1).join("\n");
-    const normalized = normalizeCandidateContent(rawContent);
-    if (!normalized) {
-      index = range.end + 1;
-      continue;
-    }
-    const candidate = makeCandidate(
-      candidates.length,
-      "possible-heading",
-      range.start,
-      range.end,
-      rawContent,
-      lines
-    );
-    candidate.analysisContent = normalized;
-    candidates.push(candidate);
-    index = range.end + 1;
-  }
-  return candidates;
-}
-
 export function collectCodeCandidates(content: string): {
   possibleCode: FormattingCandidate[];
   fencedCode: FormattingCandidate[];
@@ -709,38 +598,6 @@ function repairBoldFlankingText(text: string, outerBefore?: string, outerAfter?:
     const closing = needsCloseFix ? " " : "";
     return `${opening}**${inner}**${closing}`;
   });
-}
-
-/**
- * Treat the article title as the implicit H1: anchor the first body heading at
- * H2, preserve relative depth, and close downward level gaps. Fenced code is
- * excluded because Markdown and shell examples commonly contain lines
- * beginning with #/## that are not document headings.
- */
-export function normalizeBodyHeadingLevels(content: string): string {
-  const lines = content.split("\n");
-  const protectedLines = protectedLineIndices(protectedRanges(lines));
-  const headings: Array<{ index: number; indent: string; markers: string }> = [];
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (protectedLines.has(index)) continue;
-    const match = /^(\s{0,3})(#{1,6})(?:[ \t]+|$)/.exec(line);
-    if (match) headings.push({ index, indent: match[1], markers: match[2] });
-  }
-
-  if (headings.length === 0) return content;
-  const shift = headings[0].markers.length - 2;
-  let previousLevel = 1;
-  for (const heading of headings) {
-    const shiftedLevel = Math.max(2, Math.min(6, heading.markers.length - shift));
-    const newLevel = Math.min(shiftedLevel, previousLevel + 1);
-    const text = lines[heading.index].slice(heading.indent.length + heading.markers.length).trim();
-    const title = stripHeadingNumberPrefix(text);
-    lines[heading.index] = `${heading.indent}${"#".repeat(newLevel)} ${title || text}`.trimEnd();
-    previousLevel = newLevel;
-  }
-  return lines.join("\n");
 }
 
 const HEADING_NUMBER_PREFIX = /(?:(?:\d+(?:\.\d+)*\\?[.．、)）](?![\d.])|[一二三四五六七八九十百]+[.．、)）]|第[\d一二三四五六七八九十百]+[章节篇][：:、. \t])[ \t]*)/;

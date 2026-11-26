@@ -10,8 +10,6 @@ import {
   batchFormattingCandidates,
   collectClippedCodeCandidates,
   collectCodeCandidates,
-  collectHeadingCandidates,
-  normalizeBodyHeadingLevels,
   normalizeOrphanBoldTriplet,
   repairBoldFlankingLine,
   trimCodeFenceBody,
@@ -34,9 +32,10 @@ import {
   applyTranslationDecisions,
   planEnglishTranslation
 } from "./translation-candidates";
+import { applyHeadingEdits, buildHeadingInput, stripHeadingNumbers } from "./heading-structure";
 
-export const CLIPPING_PIPELINE_STEPS = ["文章样式梳理", "格式化代码块", "整理图片", "英文翻译", "补全 Frontmatter"] as const;
-const [formatStep, codeStep, imageStep, translationStep, propertyStep] = CLIPPING_PIPELINE_STEPS;
+export const CLIPPING_PIPELINE_STEPS = ["文章样式梳理", "整理标题结构", "格式化代码块", "整理图片", "英文翻译", "补全 Frontmatter"] as const;
+const [formatStep, headingStep, codeStep, imageStep, translationStep, propertyStep] = CLIPPING_PIPELINE_STEPS;
 const FORMAT_CONFIRM_CONCURRENCY = 3;
 
 export const ARTICLE_CATEGORIES = [
@@ -108,21 +107,28 @@ export class ClippingPipeline {
       const prompts = formatPromptBlocks(body);
       const cleanedBody = mapUnprotectedMarkdown(prompts.content, cleanupPromotionalNoise);
       const literalHtml = escapeLiteralHtmlTags(cleanedBody);
-      let formatted = normalizeBodyHeadingLevels(repairTableDividers(this.organizeMarkdownStyle(restoreDetachedLists(literalHtml.content))));
-      const confirmation = await this.confirmCandidates(formatted, instructions);
-      formatted = confirmation.content;
+      let formatted = repairTableDividers(this.organizeMarkdownStyle(restoreDetachedLists(literalHtml.content)));
       const removedNoise = prompts.content.split("\n").length - cleanedBody.split("\n").length;
-      const formatChanges = removedNoise + literalHtml.escaped + prompts.wrapped + confirmation.changed;
-      const formatInfo = [formatChanges > 0 ? `修改了 ${formatChanges} 处` : "", ...confirmation.notes].filter(Boolean).join("；");
-      await report(formatStep, "completed", formatInfo || undefined);
+      const formatChanges = removedNoise + literalHtml.escaped + prompts.wrapped;
+      await report(formatStep, "completed", formatChanges > 0 ? `修改了 ${formatChanges} 处` : undefined);
+
+      await report(headingStep);
+      const headings = await this.restoreHeadings(title, formatted);
+      // Ordered-list markers are normalized only now: `一、背景` must still look like a section when headings are judged.
+      formatted = this.normalizeOrderedListMarkers(stripHeadingNumbers(headings.content));
+      await report(headingStep, headings.applied > 0 ? "completed" : "skipped", headings.info);
 
       await report(codeStep);
-      const codeBlocks = this.formatCodeBlocks(formatted);
-      formatted = normalizeBodyHeadingLevels(codeBlocks.content);
+      const confirmation = await this.confirmCandidates(formatted, instructions);
+      const codeBlocks = this.formatCodeBlocks(confirmation.content);
+      formatted = codeBlocks.content;
       let text = this.normalizeFinalBody(formatted);
-      await report(codeStep, codeBlocks.changed > 0 ? "completed" : "skipped", codeBlocks.changed > 0
-        ? `修改了 ${codeBlocks.changed} 处`
-        : codeBlocks.seen > 0 ? "代码块无需修改" : "没有代码块");
+      const codeChanges = confirmation.changed + codeBlocks.changed;
+      const codeInfo = [
+        codeChanges > 0 ? `修改了 ${codeChanges} 处` : codeBlocks.seen > 0 ? "代码块无需修改" : "没有代码块",
+        ...confirmation.notes
+      ].join("；");
+      await report(codeStep, codeChanges > 0 ? "completed" : "skipped", codeInfo);
 
       await report(imageStep);
       const imageTask = planImageRepairs(this.app, sourcePath, text, clippingSourceUrl(frontmatter));
@@ -151,9 +157,7 @@ export class ClippingPipeline {
         await finishImagePlan();
         await report(translationStep);
         const translations = await this.ai.translateEnglishParagraphs(title, translationPlan.candidates, instructions);
-        text = this.normalizeFinalBody(normalizeBodyHeadingLevels(
-          applyTranslationDecisions(text, translationPlan.candidates, translations)
-        ));
+        text = this.normalizeFinalBody(applyTranslationDecisions(text, translationPlan.candidates, translations));
         await report(translationStep, translations.length ? "completed" : "skipped", translations.length ? undefined : "无可翻译正文");
         propertyTask = this.startNoteProperties(title, text);
       }
@@ -201,7 +205,7 @@ export class ClippingPipeline {
       const imageResult = repaired.restored ? t("imagesRestored", { count: repaired.restored }) : "";
       // Model batches that failed, rewrites that were refused and code still collapsed must reach the user,
       // otherwise "已整理" reads as "everything was checked".
-      const allWarnings = [...confirmation.notes, ...warnings];
+      const allWarnings = [...(headings.warning ? [headings.warning] : []), ...confirmation.notes, ...warnings];
       const warningText = allWarnings.length ? t("checkWarnings", { warnings: allWarnings.join("；") }) : "";
       new Notice(t("organizedNotice", { images: imageResult, warnings: warningText }));
     } catch (error) {
@@ -279,6 +283,39 @@ export class ClippingPipeline {
     }
   }
 
+  private async restoreHeadings(
+    title: string,
+    content: string
+  ): Promise<{ content: string; applied: number; info?: string; warning?: string }> {
+    if (typeof this.ai.restoreHeadingStructure !== "function") return { content, applied: 0 };
+    const input = buildHeadingInput(content);
+    if ("skipped" in input) {
+      return { content, applied: 0, info: `${input.skipped}，标题保持原样`, warning: `标题结构未整理（${input.skipped}）` };
+    }
+    let edits: unknown[];
+    try {
+      edits = await this.ai.restoreHeadingStructure(title, input);
+    } catch {
+      return { content, applied: 0, info: "模型调用失败，标题保持原样", warning: "标题结构模型调用失败，已保留原标题" };
+    }
+    const result = applyHeadingEdits(content, input, edits);
+    if (result.discarded) {
+      return { content, applied: 0, info: `${result.discarded}，标题保持原样`, warning: `标题结构修改已放弃（${result.discarded}）` };
+    }
+    const info = [
+      result.applied > 0 ? `调整了 ${result.applied} 处标题` : "标题无需调整",
+      result.rejected > 0 ? `忽略 ${result.rejected} 条无法核对的修改` : ""
+    ].filter(Boolean).join("；");
+    return { content: result.content, applied: result.applied, info };
+  }
+
+  private normalizeOrderedListMarkers(content: string): string {
+    return mapUnprotectedMarkdown(content, (plain) => plain.split("\n").map((line) => line
+      .replace(/^(\s*)(\d+)[、)]\s+/g, "$1$2. ")
+      .replace(/^(\s*)([一二三四五六七八九十]+)[、.]\s+/g, (_match, indent, number) => `${indent}${chineseToArabic(number)}. `)
+    ).join("\n"));
+  }
+
   private async confirmCandidates(
     content: string,
     instructions: string
@@ -328,9 +365,6 @@ export class ClippingPipeline {
         // Clean trailing ** from heading lines (orphan bold artifact)
         next = next.replace(/^(#{1,6}\s+.*?)\s*\*\*\s*$/g, "$1");
         next = repairBoldFlankingLine(next);
-        next = next.replace(/^(\s*)(\d+)[、)]\s+/g, "$1$2. ");
-        next = next.replace(/^(\s*)([一二三四五六七八九十]+)[、.]\s+/g, (_match, indent, number) =>
-          `${indent}${chineseToArabic(number)}. `);
         next = next.replace(/^\s+\|(\s*:?-{3,}:?\s*\|.*)$/g, "|$1");
         return next;
       }).join("\n");
@@ -383,14 +417,13 @@ export class ClippingPipeline {
 }
 
 function collectUncertainCandidates(content: string): FormattingCandidate[] {
-  const headings = collectHeadingCandidates(content).map((candidate, index) => ({ ...candidate, id: `heading-${index + 1}` }));
   const code = collectCodeCandidates(content);
   // High-confidence unfenced code is confirmed by the model too; `autoLanguage` is only a hint.
   const possible = code.possibleCode
     .map((candidate, index) => ({ ...candidate, id: `code-${index + 1}` }));
   const fenced = code.fencedCode.map((candidate, index) => ({ ...candidate, id: `fence-${index + 1}` }));
   const clipped = collectClippedCodeCandidates(content).map((candidate, index) => ({ ...candidate, id: `clip-${index + 1}` }));
-  return [...headings, ...possible, ...fenced, ...clipped];
+  return [...possible, ...fenced, ...clipped];
 }
 
 function clippingSourceUrl(frontmatter: string | null): string | undefined {

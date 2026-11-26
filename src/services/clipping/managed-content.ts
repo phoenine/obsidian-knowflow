@@ -4,14 +4,10 @@ const LEGACY_RELATED_LINKS_TITLE = "> [!info]- KnowFlow 相关文章";
 const FRONTMATTER = /^(?:\uFEFF)?---[ \t]*\r?\n(?:[^\n]*\n)*?---[ \t]*(?:\r?\n|$)/;
 
 export function prepareArticleForAi(content: string): string {
-  return stripManagedArticleSections(content)
+  return removeManagedCallouts(stripFrontmatter(content))
     .replace(/[ \t]*<!-- knowflow-translation -->[ \t]*/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-}
-
-export function stripManagedArticleSections(content: string): string {
-  return removeKnowledgeMapSection(removeManagedCallouts(stripFrontmatter(content)));
 }
 
 export function stripFrontmatter(content: string): string {
@@ -38,12 +34,5 @@ function removeManagedCallouts(content: string): string {
     index += 1;
   }
   return result.join("\n");
-}
-
-function removeKnowledgeMapSection(content: string): string {
-  return content.replace(
-    /^## (?:Knowledge Map|知识骨架)\s*\n[\s\S]*?(?=^##\s|(?![\s\S]))/gim,
-    ""
-  );
 }
 

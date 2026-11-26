@@ -47,9 +47,11 @@ const { QuizAi } = await import(pathToFileURL(join(tempDir, "quiz-ai.js")).href)
     "",
     "## Knowledge Map",
     "",
+    "The graph shows how events move through the queue.",
+    "",
     "```mermaid",
     "mindmap",
-    "  root((忽略))",
+    "  root((Queue))",
     "```",
     "",
     "## 普通章节",
@@ -58,7 +60,8 @@ const { QuizAi } = await import(pathToFileURL(join(tempDir, "quiz-ai.js")).href)
   ].join("\n");
 
   const sections = prepareQuizSections(article);
-  assert.deepEqual(sections.map((section) => section.title), ["导语", "核心章节", "普通章节"]);
+  assert.deepEqual(sections.map((section) => section.title), ["导语", "核心章节", "Knowledge Map", "普通章节"]);
+  assert.ok(sections[2].content.includes("The graph shows how events move through the queue."));
   const core = sections.find((section) => section.title === "核心章节");
   assert.ok(core.content.includes("## 代码中的标题"), "H2 inside fenced code must not split sections");
   assert.deepEqual(

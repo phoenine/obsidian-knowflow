@@ -215,7 +215,8 @@ const { NoteOperationCoordinator } = await import(pathToFileURL(join(tempDir, "c
 }
 
 {
-  const body = "这篇笔记已经有足够长的正文，用来通过最短长度检查。\n\n记忆架构\n\n后面还有一段说明文字，避免整篇因为一次空回复而退回。";
+  const yaml = ["apiVersion: v1", "kind: Pod", "metadata:", "  name: nginx"].join("\n");
+  const body = `这篇笔记已经有足够长的正文，用来通过最短长度检查。\n\n记忆架构\n\n后面还有一段说明文字，避免整篇因为一次空回复而退回。\n\n${yaml}`;
   let written;
   let success = false;
   const progress = [];
@@ -231,6 +232,7 @@ const { NoteOperationCoordinator } = await import(pathToFileURL(join(tempDir, "c
       adapter: { exists: async () => false }
     } };
     const ai = {
+      restoreHeadingStructure: async () => { throw new Error("AI response did not contain message content."); },
       confirmFormatting: async () => { throw new Error("AI response did not contain message content."); },
       translateEnglishParagraphs: async () => []
     };
@@ -241,17 +243,17 @@ const { NoteOperationCoordinator } = await import(pathToFileURL(join(tempDir, "c
     await pipeline.process({ path: "Clippings/Memory.md", basename: "Memory" }, (...event) => progress.push(event));
     assert.equal(success, true);
     assert.ok(written.includes("记忆架构"));
-    const format = progress.find(([step, status]) => step === "文章样式梳理" && status === "completed");
-    assert.ok(format);
-    assert.ok(!String(format[2] ?? "").includes("未确认"));
+    assert.ok(written.includes(yaml), "a failed batch keeps its original text");
+    assert.ok(progress.some(([step, status]) => step === "文章样式梳理" && status === "completed"));
     assert.ok(progress.every(([, , info]) => !String(info ?? "").includes("未确认")));
+    assert.ok(progress.some(([step, status, info]) => step === "整理标题结构" && status === "skipped" && /模型调用失败/.test(info)));
     assert.ok(progress.some(([step, status]) => step === "补全 Frontmatter" && status === "completed"));
-    assert.ok(progress.some(([step, status, info]) => step === "格式化代码块" && status === "skipped" && info === "没有代码块"));
+    const code = progress.find(([step, status]) => step === "格式化代码块" && status === "skipped");
+    assert.match(code[2], /1 批模型确认失败/);
     assert.ok(progress.some(([step, status, info]) => step === "整理图片" && status === "skipped" && info === "图片无需整理"));
-    // The failed batch is reported on the completion notice too, not only on the progress callback.
-    assert.match(format[2], /1 批模型确认失败/);
+    // Failed model calls are reported on the completion notice too, not only on the progress callback.
     assert.equal(notices.length, 1);
-    assert.match(notices[0], /待检查：.*1 批模型确认失败/);
+    assert.match(notices[0], /待检查：.*标题结构模型调用失败.*1 批模型确认失败/);
   } finally {
     delete globalThis.knowflowNotices;
     if (previousWindow === undefined) delete globalThis.window;
@@ -261,14 +263,27 @@ const { NoteOperationCoordinator } = await import(pathToFileURL(join(tempDir, "c
 
 {
   const titles = ["甲标题", "乙标题", "丙标题", "丁标题", "戊标题"];
+  const blocks = titles.map((_title, index) => ["apiVersion: v1", "kind: Pod", "metadata:", `  name: pod-${index}`].join("\n"));
   const body = [
     "这篇笔记已经有足够长的正文，用来通过最短长度检查。",
-    ...titles.flatMap((title) => ["", title, "", `${title}后面是一段说明，避免这行被收成标题。`])
+    "",
+    "一、背景",
+    "",
+    "背景说明。",
+    "",
+    "二、做法",
+    "",
+    "做法说明，下面列出两点：",
+    "",
+    "1) 先读原文",
+    "",
+    ...titles.flatMap((title, index) => ["", title, "", `${title}后面是一段说明。`, "", blocks[index]])
   ].join("\n");
   const previousWindow = globalThis.window;
   globalThis.window = { moment: () => ({ format: () => "2026-10-22" }) };
   let inFlight = 0;
   let maxInFlight = 0;
+  let headingInput;
   try {
     let written = "";
     const app = { vault: {
@@ -278,12 +293,21 @@ const { NoteOperationCoordinator } = await import(pathToFileURL(join(tempDir, "c
       adapter: { exists: async () => false }
     } };
     const ai = {
+      restoreHeadingStructure: async (_title, input) => {
+        headingInput = input.text;
+        return input.text.split("\n").flatMap((row) => {
+          const [line, text] = row.split("|");
+          if (titles.includes(text)) return [{ type: "format", line: Number(line), text, level: 3 }];
+          if (text === "一、背景" || text === "二、做法") return [{ type: "format", line: Number(line), text, level: 2 }];
+          return [];
+        });
+      },
       confirmFormatting: async (batch) => {
         inFlight += 1;
         maxInFlight = Math.max(maxInFlight, inFlight);
         await new Promise((resolve) => setTimeout(resolve, 20));
         inFlight -= 1;
-        return batch.map((candidate) => ({ id: candidate.id, action: "heading", level: 2 }));
+        return batch.map((candidate) => ({ id: candidate.id, action: "wrap-code", language: "yaml" }));
       },
       translateEnglishParagraphs: async () => []
     };
@@ -292,8 +316,14 @@ const { NoteOperationCoordinator } = await import(pathToFileURL(join(tempDir, "c
       setPipelineStatus: async (status) => { assert.fail(status.error); }
     }, ai, { runExclusive: async (_path, operation) => operation() });
     await pipeline.process({ path: "Clippings/Batches.md", basename: "Batches" });
+    assert.match(headingInput, /\|一、背景\n/, "Chinese section numbers are still visible when headings are judged");
+    assert.match(headingInput, /\|\[疑似代码\]/, "unfenced code is hidden from the heading step");
     assert.ok(maxInFlight > 1, "formatting batches should run together");
-    for (const title of titles) assert.ok(written.includes(`## ${title}`), title);
+    assert.ok(written.includes("## 背景\n"), "section numbers are stripped from headings");
+    assert.ok(written.includes("## 做法\n"));
+    assert.ok(written.includes("1. 先读原文"), "ordered markers are normalized after the heading step");
+    for (const title of titles) assert.ok(written.includes(`### ${title}`), title);
+    for (const block of blocks) assert.ok(written.includes("```yaml\n" + block + "\n```"));
   } finally {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
