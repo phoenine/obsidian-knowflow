@@ -8,6 +8,8 @@ export interface NotePropertyProposal {
   readingValue?: number;
   category?: string;
   tags?: string[];
+  /** The model returned a description, but it failed the catalog rules. Existing text is kept in that case. */
+  descriptionRejected?: boolean;
 }
 
 export async function requestNoteProperties(
@@ -35,7 +37,7 @@ export async function requestNoteProperties(
         requiredJsonShape: {
           briefDescription: "一句书面中文，写明对象、做法和解决的问题",
           readingValue: "1-5 integer",
-          category: categories,
+          category: "从 categories 中选一个字符串",
           tags: ["主题标签"]
         }
       })
@@ -45,12 +47,20 @@ export async function requestNoteProperties(
 }
 
 export function readNoteProperties(payload: unknown, categories: string[]): NotePropertyProposal {
-  const response = payload && typeof payload === "object" && !Array.isArray(payload)
-    ? payload as Record<string, unknown>
-    : {};
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { descriptionRejected: true };
+  }
+  const response = payload as Record<string, unknown>;
   const description = catalogDescription(response.briefDescription);
+  // Any non-empty answer that is not an acceptable description (too short, a number, an object) counts as
+  // rejected, so the existing 简要描述 is kept instead of being cleared.
+  const rawDescription = response.briefDescription;
+  const descriptionRejected = !description
+    && (typeof rawDescription === "string" ? oneLine(rawDescription) !== "" : rawDescription != null);
   const rating = typeof response.readingValue === "number" ? String(response.readingValue) : oneLine(response.readingValue);
-  const category = oneLine(response.category);
+  // The prompt asks for one category string. A one-item array is accepted; several candidates are ambiguous and ignored.
+  const categoryValues = Array.isArray(response.category) ? response.category : [response.category];
+  const category = categoryValues.length === 1 ? oneLine(categoryValues[0]) : "";
   const tagValues = Array.isArray(response.tags) ? response.tags : [];
   const tags = Array.from(new Set(tagValues.map((tag) => oneLine(tag).replace(/^#+/, "").replace(/\s+/g, "-"))
     .filter((tag) => /^[\p{L}\p{N}_/-]+$/u.test(tag) && /\p{L}/u.test(tag)))).slice(0, 6);
@@ -58,7 +68,8 @@ export function readNoteProperties(payload: unknown, categories: string[]): Note
     description: description || undefined,
     readingValue: /^[1-5]$/.test(rating) ? Number(rating) : undefined,
     category: categories.includes(category) ? category : undefined,
-    tags: tags.length ? tags : undefined
+    tags: tags.length ? tags : undefined,
+    ...(descriptionRejected ? { descriptionRejected: true } : {})
   };
 }
 

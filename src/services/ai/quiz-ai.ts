@@ -3,6 +3,7 @@ import { AiTransport } from "./ai-transport";
 import type { ChatRequestMessage } from "../chat/chat-context";
 import { batchQuizSections, getQuizFocusTargets, getQuizQuestionLimit, prepareQuizSections } from "../learning/quiz-generation";
 import type { QuizFocusType, QuizSourceSection } from "../learning/quiz-generation";
+import { sourceContainsQuote } from "../learning/source-quote";
 
 interface RatedQuizQuestion {
   focusType: QuizFocusType;
@@ -235,12 +236,19 @@ function normalizeKnowledgePointQuiz(
 function normalizeQuizOptions(value: unknown): QuizOption[] {
   const candidates: unknown[] = Array.isArray(value) ? value : [];
   const options: QuizOption[] = [];
-  const keys = new Set<string>();
+  const contentByKey = new Map<string, string>();
   for (const option of candidates) {
     if (!isRecord(option) || typeof option.key !== "string" || !["A", "B", "C", "D"].includes(option.key)) continue;
-    if (keys.has(option.key) || typeof option.content !== "string" || !option.content.trim()) continue;
-    keys.add(option.key);
-    options.push({ key: option.key, content: option.content.trim() });
+    if (typeof option.content !== "string" || !option.content.trim()) continue;
+    const content = option.content.trim();
+    const existing = contentByKey.get(option.key);
+    if (existing !== undefined) {
+      // The same letter with different text makes the answer ambiguous: the whole question is rejected.
+      if (existing !== content) return [];
+      continue;
+    }
+    contentByKey.set(option.key, content);
+    options.push({ key: option.key, content });
   }
   return options;
 }
@@ -289,11 +297,6 @@ function selectQuizQuestions(
 
 function isQuizFocusType(value: unknown): value is QuizFocusType {
   return ["concept", "principle", "comparison", "application", "pitfall"].includes(String(value));
-}
-
-function sourceContainsQuote(content: string, quote: string): boolean {
-  if (content.includes(quote)) return true;
-  return normalizeSourceText(content).includes(normalizeSourceText(quote));
 }
 
 function normalizeSourceText(value: string): string {

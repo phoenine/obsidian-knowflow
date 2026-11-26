@@ -10,6 +10,8 @@ interface TaskOverviewViewProps {
   tasks: DailyTask[];
   review: DailyReviewSession | null;
   loading: boolean;
+  taskError?: string;
+  reviewError?: string;
   weeklyLearned: number;
   weeklyReviewCount: number;
   weeklyReviewAccuracy: number | null;
@@ -19,6 +21,7 @@ interface TaskOverviewViewProps {
   onCompleteTask: (task: DailyTask) => void;
   onRefreshTask: (task: DailyTask) => void;
   onSkipTask: (task: DailyTask) => void;
+  onRetryTasks: () => void;
   onRefreshReview: () => void;
   onStartReview: () => void;
 }
@@ -165,11 +168,11 @@ function renderTodayCard(parent: HTMLElement, props: TodayCardProps): void {
 
   if (props.loading) {
     stateMessage(card, t("generatingReview"));
-  } else if (totalTasks === 0) {
+  } else if (totalTasks === 0 && !props.taskError && !props.reviewError) {
     stateMessage(card, props.review && props.review.bankSize > 0
       ? t("noDueReview")
       : t("noLearningItems"));
-  } else {
+  } else if (totalTasks > 0) {
     const taskRows = props.tasks.map((task) => taskRow(card, task, props));
     if (props.review && props.review.questions.length > 0) {
       taskRows.push(reviewTaskRow(card, props.review, props));
@@ -194,6 +197,14 @@ function renderTodayCard(parent: HTMLElement, props: TodayCardProps): void {
       });
     }
   }
+  if (props.taskError) renderLoadError(card, props.taskError, props.onRetryTasks);
+  if (props.reviewError) renderLoadError(card, props.reviewError, props.onRefreshReview);
+}
+
+function renderLoadError(parent: HTMLElement, message: string, retry: () => void): void {
+  const status = parent.createDiv({ attr: { role: "status" } });
+  stateMessage(status, message);
+  status.createEl("button", { text: t("retry") }).addEventListener("click", retry);
 }
 
 function reviewTaskRow(parent: HTMLElement, review: DailyReviewSession, props: TaskOverviewViewProps): HTMLElement {

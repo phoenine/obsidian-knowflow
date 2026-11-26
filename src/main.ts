@@ -181,7 +181,7 @@ export default class KnowFlowPlugin extends Plugin {
 
   private scheduleSemanticRefresh(file: TFile): void {
     if (!this.app.workspace.layoutReady) return;
-    const indexed = this.semanticIndex.hasCompatibleIndex() && this.isArticlePath(file);
+    const indexed = this.isArticlePath(file) && (this.semanticIndex.isBuilding() || this.semanticIndex.hasCompatibleIndex());
     if (!indexed && !this.app.workspace.getLeavesOfType(KNOWFLOW_VIEW_TYPE).some(({ view }) =>
       view instanceof KnowFlowSidebarView && view.tracksRelatedNote(file)
     )) return;
@@ -189,7 +189,7 @@ export default class KnowFlowPlugin extends Plugin {
     if (previous !== undefined) window.clearTimeout(previous);
     const timer = window.setTimeout(() => {
       this.semanticRefreshTimers.delete(file.path);
-      if (!this.semanticIndex.hasCompatibleIndex() || !this.isArticlePath(file)) {
+      if (!this.isArticlePath(file) || (!this.semanticIndex.isBuilding() && !this.semanticIndex.hasCompatibleIndex())) {
         this.refreshView();
         return;
       }

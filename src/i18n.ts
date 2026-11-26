@@ -296,6 +296,22 @@ const zh = {
   freshnessUnchanged: "原文保持不变。",
   freshnessNoPending: "本对话没有可应用的修订。请先说「检查当前文章是否过时」。",
   freshnessBadIndex: "当前有 {count} 条更新。请输入列表里的编号。",
+  freshnessUpdateChoice: "更新",
+  freshnessKeepChoice: "不用",
+  codeFormatBody: "正文",
+  codeFormatNone: "这些代码块格式正常，原文保持不变。",
+  codeFormatEmpty: "这篇文章里没有需要检查的代码块。",
+  codeFormatNoSection: "没有找到和「{section}」匹配的章节。请用章节标题里的关键词。",
+  codeFormatNoIndex: "这里没有第 {index} 个代码块。",
+  codeFormatChecking: "正在检查 {count} 个代码块",
+  codeFormatAsk: "要写回哪些代码块？回复「更新」写入全部，回复「应用第 1 个」只写选中的，回复「不用」保持原文。",
+  codeFormatAskOne: "要写回这个代码块吗？回复「更新」写入，回复「不用」保持原文。",
+  codeFormatNoComment: "模型没有返回加好注释的代码，原文保持不变。",
+  codeFormatChoiceAll: "全部更新",
+  codeFormatChoiceOne: "应用第 {n} 个",
+  codeFormatApplied: "已写入 {count} 个代码块。",
+  codeFormatChanged: "文章在确认前被修改了，请重新检查代码块。",
+  codeFormatBadNumber: "请输入预览里的编号，共 {count} 个。",
   readingArticle: "正在读取文章",
   updatingArticle: "正在更新原文",
   nothingToSave: "当前没有可保存的对话。",
@@ -617,6 +633,22 @@ const en: Record<MessageKey, string> = {
   freshnessUnchanged: "The note was left unchanged.",
   freshnessNoPending: "This chat has no revisions to apply. Check whether the article is outdated first.",
   freshnessBadIndex: "There are {count} updates. Enter a number from the list.",
+  freshnessUpdateChoice: "Update",
+  freshnessKeepChoice: "Keep original",
+  codeFormatBody: "Body",
+  codeFormatNone: "These code blocks are already well formatted, so the note is unchanged.",
+  codeFormatEmpty: "No code blocks to check in this note.",
+  codeFormatNoSection: "No section matches \"{section}\". Use a keyword from the heading.",
+  codeFormatNoIndex: "There is no code block number {index} here.",
+  codeFormatChecking: "Checking {count} code blocks",
+  codeFormatAsk: "Write which code blocks back? Reply \"update\" for all, \"apply 1\" for one, or \"no\" to leave the note unchanged.",
+  codeFormatAskOne: "Write this code block back? Reply \"update\" to write it, or \"no\" to leave the note unchanged.",
+  codeFormatNoComment: "The model did not return commented code, so the note is unchanged.",
+  codeFormatChoiceAll: "Update all",
+  codeFormatChoiceOne: "Apply item {n}",
+  codeFormatApplied: "Wrote {count} code blocks.",
+  codeFormatChanged: "The note changed before confirmation. Check the code blocks again.",
+  codeFormatBadNumber: "Enter a number from the preview: {count} in total.",
   readingArticle: "Reading the article",
   updatingArticle: "Updating the article",
   nothingToSave: "There is no conversation to save.",
@@ -643,10 +675,6 @@ let current: AppLanguage = "zh";
 
 export function setAppLanguage(language: AppLanguage): void {
   current = language === "en" ? "en" : "zh";
-}
-
-export function appLanguage(): AppLanguage {
-  return current;
 }
 
 export function t(key: MessageKey, vars?: Vars): string {

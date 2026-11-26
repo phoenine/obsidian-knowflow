@@ -139,7 +139,8 @@ export class QuizController {
       session.quizPath,
       session.index + 1,
       session.selectedKey,
-      question.answerKey
+      question.answerKey,
+      question.question
     );
     this.invalidate(session.filePath);
   }

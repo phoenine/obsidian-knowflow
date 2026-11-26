@@ -116,7 +116,7 @@ const preservedH1 = applyArticleFrontmatter("# 原始一级标题\n\n正文", or
 assert.ok(preservedH1.includes("\n# 原始一级标题\n"), "article frontmatter updates must not rewrite body headings");
 
 const movedCategory = updateFrontmatterCategory(frontmatterUpdated, "知识积累");
-assert.ok(movedCategory.includes("分类: 知识积累"));
+assert.ok(movedCategory.includes("分类:\n  - 知识积累"), "分类 is written as a list, matching the vault property type");
 assert.ok(movedCategory.includes("description: |\n  第一行\n  第二行"));
 
 // applySummaryFrontmatter writes only the four note-property keys and leaves
@@ -142,7 +142,7 @@ assert.ok(movedCategory.includes("description: |\n  第一行\n  第二行"));
 
   assert.ok(withSummary.includes("简要描述: \"新的描述: 保留冒号\""));
   assert.ok(withSummary.includes("阅读价值: 4"));
-  assert.ok(withSummary.includes("分类: 系统架构"), "applySummaryFrontmatter overwrites 分类 with the AI's suggestion");
+  assert.ok(withSummary.includes("分类:\n  - 系统架构"), "applySummaryFrontmatter overwrites 分类 with the AI's suggestion, as a list");
   assert.ok(withSummary.includes("tags:\n  - 架构\n  - 系统设计"));
   assert.ok(withSummary.includes("创建日期: 2026-08-01"), "fields it doesn't own must be untouched");
   assert.ok(withSummary.includes("学习状态:\n  - 学习中"), "fields it doesn't own must be untouched");

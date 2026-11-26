@@ -8,7 +8,10 @@ import * as esbuild from "esbuild";
 const tempDir = await mkdtemp(join(tmpdir(), "knowflow-knowledge-points-"));
 await esbuild.build({
   bundle: true,
-  entryPoints: ["src/services/learning/knowledge-points.ts"],
+  entryPoints: {
+    "knowledge-points": "src/services/learning/knowledge-points.ts",
+    "knowledge-ai": "src/services/ai/knowledge-ai.ts"
+  },
   format: "esm",
   outdir: tempDir,
   platform: "node"
@@ -16,6 +19,7 @@ await esbuild.build({
 const { buildKnowledgePointsBlock, mergeKnowledgePointGroups, normalizeKnowledgePointGroups, parseKnowledgePoints, upsertKnowledgePoints } = await import(
   pathToFileURL(join(tempDir, "knowledge-points.js")).href
 );
+const { KnowledgeAi } = await import(pathToFileURL(join(tempDir, "knowledge-ai.js")).href);
 
 const groups = normalizeKnowledgePointGroups({
   groups: [
@@ -92,6 +96,47 @@ assert.ok(!refreshed.includes("Hook 是工具调用链路中的同步检查点")
 assert.ok(refreshed.includes("## 1. 已有题目"), "refreshing knowledge points must preserve quiz questions");
 
 assert.deepEqual(parseKnowledgePoints("# 普通笔记"), []);
+
+{
+  const article = "## 重试\n\n当 attempts <= limit 时继续重试。\n\n## 其他\n\n别的内容。";
+  const generate = (excerpt, section) => new KnowledgeAi({
+    requestJson: async () => ({ groups: [{ title: "组", points: [{
+      slug: "retry", title: "重试条件", type: "机制", explanation: "说明",
+      evidence: { section, excerpt }, question: "为什么？", relations: { dependsOn: [], extends: [] }
+    }] }] })
+  }).generateKnowledgePoints({}, "文章", article);
+  const verbatim = await generate("当 attempts <= limit 时继续重试", "重试");
+  assert.equal(verbatim[0].points[0].evidence.section, "重试");
+  // A wrong or invented section name must not leave the point looking sourced; the section is corrected to the real one.
+  assert.equal((await generate("当 attempts <= limit 时继续重试", "其他")).at(0).points[0].evidence.section, "重试");
+  assert.equal((await generate("当 attempts <= limit 时继续重试", "不存在的章节")).at(0).points[0].evidence.section, "重试");
+  // `<=` and `<` are different claims.
+  await assert.rejects(generate("当 attempts < limit 时继续重试", "重试"), /valid knowledge points/);
+  // A quote made only of markup cannot pass.
+  await assert.rejects(generate("**", "重试"), /valid knowledge points/);
+  // Spaced `==` is a comparison, not a highlight marker, so dropping it cannot make a quote match.
+  const comparison = "## 重试\n\n当 count == limit 时停止重试。\n早期代码使用 a==b==c 或 `a * b * c`。\n使用 git checkout 切换分支。";
+  const compare = (excerpt) => new KnowledgeAi({
+    requestJson: async () => ({ groups: [{ title: "组", points: [{
+      slug: "stop", title: "停止条件", type: "机制", explanation: "说明",
+      evidence: { section: "重试", excerpt }, question: "为什么？", relations: { dependsOn: [], extends: [] }
+    }] }] })
+  }).generateKnowledgePoints({}, "文章", comparison);
+  await assert.rejects(compare("当 count limit 时停止重试"), /valid knowledge points/);
+  await assert.rejects(compare("早期代码使用 abc"), /valid knowledge points/);
+  await assert.rejects(compare("a b c"), /valid knowledge points/);
+  await assert.rejects(compare("使用 gitcheckout 切换分支"), /valid knowledge points/);
+  assert.equal((await compare("a * b * c")).at(0).points.length, 1);
+  assert.equal((await compare("当 count == limit 时停止重试")).at(0).points.length, 1);
+  // A highlight that wraps the text is still matched.
+  const highlighted = new KnowledgeAi({
+    requestJson: async () => ({ groups: [{ title: "组", points: [{
+      slug: "mark", title: "高亮", type: "机制", explanation: "说明",
+      evidence: { section: "重试", excerpt: "停止重试" }, question: "为什么？", relations: { dependsOn: [], extends: [] }
+    }] }] })
+  }).generateKnowledgePoints({}, "文章", "## 重试\n\n==停止重试==。");
+  assert.equal((await highlighted).at(0).points.length, 1);
+}
 
 await rm(tempDir, { recursive: true, force: true });
 console.log("knowledge point tests passed");

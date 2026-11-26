@@ -44,7 +44,7 @@ const app = {
 };
 let saved = null;
 const store = {
-  getDailyReviewSession: () => saved,
+  getDailyReviewSession: (date) => saved?.date === date ? saved : null,
   saveDailyReviewSession: async (session) => { saved = structuredClone(session); },
   recordDailyReviewAnswer: async (date, answer) => {
     saved.answers[answer.questionKey] = answer;
@@ -97,6 +97,25 @@ assert.equal(updated.completedAt !== null, true, "answering the final question m
 assert.equal(writes[0][4], unchanged.questions[0].question.question, "write-back must verify the source question did not change");
 const locked = await service.ensureSession("2026-08-12", 10, true);
 assert.deepEqual(locked.answers, updated.answers, "refresh must not replace a started session");
+
+{
+  const date = "2026-08-13";
+  const before = await service.ensureSession(date, 10, true);
+  const load = quizNotes.listReviewQuestions;
+  let releaseScan;
+  let scanStarted;
+  const started = new Promise((resolve) => { scanStarted = resolve; });
+  quizNotes.listReviewQuestions = async () => {
+    await new Promise((resolve) => { releaseScan = resolve; scanStarted(); });
+    return load();
+  };
+  const refresh = service.ensureSession(date, 10, true);
+  await started;
+  const answered = await service.recordAnswer(date, before.questions[0].key, "A");
+  releaseScan();
+  assert.deepEqual((await refresh).answers, answered.answers, "refresh must retain answers submitted during the question-bank scan");
+  quizNotes.listReviewQuestions = load;
+}
 
 await rm(tempDir, { recursive: true, force: true });
 console.log("daily review service tests passed");

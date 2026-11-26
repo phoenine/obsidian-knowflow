@@ -4,7 +4,7 @@ import { t } from "../../i18n";
 import type { KnowFlowSettings } from "../../types";
 import type { AiService } from "../ai/ai-service";
 import { protectedRanges } from "./protected-markdown";
-import { removeCodeWatermarkLines } from "./cleanup-rules";
+import { cleanupPromotionalNoise, removeCodeWatermarkLines } from "./cleanup-rules";
 import {
   applyFormattingEdits,
   batchFormattingCandidates,
@@ -26,7 +26,7 @@ import { formatPromptBlocks, promptFenceStarts } from "./prompt-blocks";
 import { escapeLiteralHtmlTags } from "./literal-html";
 import { restoreDetachedLists } from "./detached-lists";
 import { repairTableDividers } from "./reading-structure";
-import { prettyJsonBlock, removeClipperFenceSpacing } from "./clipped-code";
+import { prettyJsonBlock, removeClipperFenceSpacing, repairClippedYaml } from "./clipped-code";
 import { planImageRepairs, saveImageRepairs } from "./repair-images";
 import { inspectClippingOutput } from "./repair-validator";
 import { KnowledgeStore } from "../core/store";
@@ -106,14 +106,15 @@ export class ClippingPipeline {
       }
       this.assertReadableBody(body);
       const prompts = formatPromptBlocks(body);
-      const literalHtml = escapeLiteralHtmlTags(prompts.content);
+      const cleanedBody = mapUnprotectedMarkdown(prompts.content, cleanupPromotionalNoise);
+      const literalHtml = escapeLiteralHtmlTags(cleanedBody);
       let formatted = normalizeBodyHeadingLevels(repairTableDividers(this.organizeMarkdownStyle(restoreDetachedLists(literalHtml.content))));
-      const autoWrapped = applyAutoCodeWraps(formatted);
-      formatted = autoWrapped.content;
       const confirmation = await this.confirmCandidates(formatted, instructions);
       formatted = confirmation.content;
-      const formatChanges = literalHtml.escaped + prompts.wrapped + autoWrapped.applied + confirmation.changed;
-      await report(formatStep, "completed", formatChanges > 0 ? `修改了 ${formatChanges} 处` : undefined);
+      const removedNoise = prompts.content.split("\n").length - cleanedBody.split("\n").length;
+      const formatChanges = removedNoise + literalHtml.escaped + prompts.wrapped + confirmation.changed;
+      const formatInfo = [formatChanges > 0 ? `修改了 ${formatChanges} 处` : "", ...confirmation.notes].filter(Boolean).join("；");
+      await report(formatStep, "completed", formatInfo || undefined);
 
       await report(codeStep);
       const codeBlocks = this.formatCodeBlocks(formatted);
@@ -179,7 +180,10 @@ export class ClippingPipeline {
         const withFrontmatter = applyArticleFrontmatter(repaired.content, current, template, data);
         warnings = inspectClippingOutput(this.app, sourcePath, original, withFrontmatter, repaired.targets);
         if (imageWarnings) warnings.push(imageWarnings);
-        const properties = fillEmptyNoteProperties(withFrontmatter, proposal, { replaceExisting: true });
+        const properties = fillEmptyNoteProperties(withFrontmatter, proposal, {
+          replaceExisting: true,
+          keepExistingDescription: proposal?.descriptionRejected
+        });
         filled = properties.filled;
         if (properties.clearedDescription) warnings.push("简要描述未生成，已清空");
         return properties.content;
@@ -195,7 +199,10 @@ export class ClippingPipeline {
         .filter(Boolean).join("；") || undefined;
       await report(propertyStep, "completed", propertyInfo);
       const imageResult = repaired.restored ? t("imagesRestored", { count: repaired.restored }) : "";
-      const warningText = warnings.length ? t("checkWarnings", { warnings: warnings.join("；") }) : "";
+      // Model batches that failed, rewrites that were refused and code still collapsed must reach the user,
+      // otherwise "已整理" reads as "everything was checked".
+      const allWarnings = [...confirmation.notes, ...warnings];
+      const warningText = allWarnings.length ? t("checkWarnings", { warnings: allWarnings.join("；") }) : "";
       new Notice(t("organizedNotice", { images: imageResult, warnings: warningText }));
     } catch (error) {
       if (!noteWritten) await Promise.allSettled(createdAttachments.map((attachment) => this.app.vault.delete(attachment)));
@@ -275,11 +282,12 @@ export class ClippingPipeline {
   private async confirmCandidates(
     content: string,
     instructions: string
-  ): Promise<{ content: string; changed: number }> {
+  ): Promise<{ content: string; changed: number; notes: string[] }> {
     const candidates = collectUncertainCandidates(content);
-    if (candidates.length === 0) return { content, changed: 0 };
+    if (candidates.length === 0) return { content, changed: 0, notes: [] };
     const batches = batchFormattingCandidates(candidates, { maxChars: 3500, maxItems: 4 });
     const decisions: FormattingDecision[] = [];
+    let failedBatches = 0;
     let nextBatch = 0;
     const workers = Array.from({ length: Math.min(FORMAT_CONFIRM_CONCURRENCY, batches.length) }, async () => {
       while (nextBatch < batches.length) {
@@ -288,13 +296,20 @@ export class ClippingPipeline {
         try {
           decisions.push(...await this.ai.confirmFormatting(batch, instructions));
         } catch {
-          // A failed batch keeps its original text and does not surface an unconfirmed count.
+          // A failed batch keeps its original text; it is reported below so it is not mistaken for "nothing to fix".
+          failedBatches += 1;
         }
       }
     });
     await Promise.all(workers);
     const edited = applyFormattingEdits(content, candidates, decisions);
-    return { content: edited.content, changed: edited.applied };
+    const stillMangled = collectCodeCandidates(edited.content).fencedCode.filter((candidate) => candidate.needsReformat).length;
+    const notes = [
+      failedBatches ? `${failedBatches} 批模型确认失败` : "",
+      edited.rejectedReformats ? `${edited.rejectedReformats} 处代码重排无法确认会保留代码行为，已保留原文` : "",
+      stillMangled ? `${stillMangled} 个代码块疑似仍被压成一行` : ""
+    ].filter(Boolean);
+    return { content: edited.content, changed: edited.applied, notes };
   }
 
   private organizeMarkdownStyle(content: string): string {
@@ -336,9 +351,12 @@ export class ClippingPipeline {
       if (rawLanguage.trim().split(/\s+/).length > 1) continue;
       seen += 1;
       const language = rawLanguage.trim().split(/\s+/)[0] ?? "";
-      const cleaned = prettyJsonBlock(removeClipperFenceSpacing(removeCodeWatermarkLines(raw)
+      const unmarked = removeCodeWatermarkLines(raw)
         .replace(/^\s*(体验AI代码助手|代码解读复制代码)\s*$/gm, "")
-        .replace(/^\s*(In \[\d+\]:|Out\[\d+\]:)\s*$/gm, ""), language), language);
+        .replace(/^\s*(In \[\d+\]:|Out\[\d+\]:)\s*$/gm, "");
+      const cleaned = /^(?:yaml|yml)$/i.test(language)
+        ? repairClippedYaml(unmarked, parseYaml)
+        : prettyJsonBlock(removeClipperFenceSpacing(unmarked, language), language);
       if (cleaned === raw) continue;
       lines.splice(start + 1, end - start - 1, ...trimCodeFenceBody(cleaned).split("\n"));
       changed += 1;
@@ -364,22 +382,11 @@ export class ClippingPipeline {
   }
 }
 
-function applyAutoCodeWraps(content: string): { content: string; applied: number } {
-  const auto = collectCodeCandidates(content).possibleCode.filter((candidate) => candidate.autoLanguage);
-  if (auto.length === 0) return { content, applied: 0 };
-  const decisions: FormattingDecision[] = auto.map((candidate) => ({
-    id: candidate.id,
-    action: "wrap-code",
-    language: candidate.autoLanguage
-  }));
-  return applyFormattingEdits(content, auto, decisions);
-}
-
 function collectUncertainCandidates(content: string): FormattingCandidate[] {
   const headings = collectHeadingCandidates(content).map((candidate, index) => ({ ...candidate, id: `heading-${index + 1}` }));
   const code = collectCodeCandidates(content);
+  // High-confidence unfenced code is confirmed by the model too; `autoLanguage` is only a hint.
   const possible = code.possibleCode
-    .filter((candidate) => !candidate.autoLanguage)
     .map((candidate, index) => ({ ...candidate, id: `code-${index + 1}` }));
   const fenced = code.fencedCode.map((candidate, index) => ({ ...candidate, id: `fence-${index + 1}` }));
   const clipped = collectClippedCodeCandidates(content).map((candidate, index) => ({ ...candidate, id: `clip-${index + 1}` }));

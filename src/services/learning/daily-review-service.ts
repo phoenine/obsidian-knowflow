@@ -1,12 +1,15 @@
 import type { App, TFile } from "obsidian";
 import type { DailyReviewSession, KnowFlowSettings } from "../../types";
 import type { KnowledgeStore } from "../core/store";
+import { NoteOperationCoordinator } from "../core/note-operation-coordinator";
 import type { QuizNoteService } from "./quiz-note-service";
 import { selectDailyReviewQuestions, toEligibleReviewQuestion } from "./daily-review";
 
 const GENERATOR_VERSION = 1;
 
 export class DailyReviewService {
+  private readonly sessions = new NoteOperationCoordinator();
+
   constructor(
     private app: App,
     private store: KnowledgeStore,
@@ -32,21 +35,26 @@ export class DailyReviewService {
     if (existing && Object.keys(existing.answers).length > 0) return existing;
 
     const bank = await this.loadQuestionBank(date);
-    const questions = selectDailyReviewQuestions(bank.eligible, bank.total, questionCap, {
-      pinnedKeys: force ? existing?.questions.filter((question) => question.priority === "wrong").map((question) => question.key) : []
+    return this.sessions.runExclusive(date, async () => {
+      const current = this.store.getDailyReviewSession(date);
+      if (current && Object.keys(current.answers).length > 0) return current;
+      if (!force && current?.generatorVersion === GENERATOR_VERSION && current.questionCap === questionCap) return current;
+      const questions = selectDailyReviewQuestions(bank.eligible, bank.total, questionCap, {
+        pinnedKeys: force ? current?.questions.filter((question) => question.priority === "wrong").map((question) => question.key) : []
+      });
+      const session: DailyReviewSession = {
+        generatorVersion: GENERATOR_VERSION,
+        date,
+        generatedAt: new Date().toISOString(),
+        questionCap,
+        bankSize: bank.total,
+        questions,
+        answers: {},
+        completedAt: null
+      };
+      await this.store.saveDailyReviewSession(session);
+      return session;
     });
-    const session: DailyReviewSession = {
-      generatorVersion: GENERATOR_VERSION,
-      date,
-      generatedAt: new Date().toISOString(),
-      questionCap,
-      bankSize: bank.total,
-      questions,
-      answers: {},
-      completedAt: null
-    };
-    await this.store.saveDailyReviewSession(session);
-    return session;
   }
 
   async recordAnswer(
@@ -54,24 +62,26 @@ export class DailyReviewService {
     questionKey: string,
     selectedKey: string
   ): Promise<DailyReviewSession> {
-    const session = this.store.getDailyReviewSession(date);
-    const selected = session?.questions.find((question) => question.key === questionKey);
-    if (!session || !selected) throw new Error("今日复习题目不存在，请刷新后重试。");
-    const correct = await this.quizNotes.recordAnswer(
-      selected.quizPath,
-      selected.displayIndex,
-      selectedKey,
-      selected.question.answerKey,
-      selected.question.question
-    );
-    const updated = await this.store.recordDailyReviewAnswer(date, {
-      questionKey,
-      selectedKey,
-      correct,
-      answeredAt: new Date().toISOString()
+    return this.sessions.runExclusive(date, async () => {
+      const session = this.store.getDailyReviewSession(date);
+      const selected = session?.questions.find((question) => question.key === questionKey);
+      if (!selected) throw new Error("今日复习题目不存在，请刷新后重试。");
+      const correct = await this.quizNotes.recordAnswer(
+        selected.quizPath,
+        selected.displayIndex,
+        selectedKey,
+        selected.question.answerKey,
+        selected.question.question
+      );
+      const updated = await this.store.recordDailyReviewAnswer(date, {
+        questionKey,
+        selectedKey,
+        correct,
+        answeredAt: new Date().toISOString()
+      });
+      if (!updated) throw new Error("今日复习进度保存失败。");
+      return updated;
     });
-    if (!updated) throw new Error("今日复习进度保存失败。");
-    return updated;
   }
 
   private async loadQuestionBank(reviewDate: string): Promise<{

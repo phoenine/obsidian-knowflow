@@ -71,21 +71,17 @@ export function applySummaryFrontmatter(content: string, data: Partial<SummaryFr
   return `---\n${next.trim()}\n---\n${body}`;
 }
 
-export function hasEmptyNoteProperties(frontmatter: string | null): boolean {
-  return isEmptyDescription(frontmatter) || isEmptyReadingValue(frontmatter)
-    || isEmptyCategory(frontmatter) || isEmptyTags(frontmatter);
-}
-
 /**
  * Fills 简要描述、阅读价值、分类 and tags.
  * During 整理, `replaceExisting` writes the new values over the old ones.
- * A completed pass with no 简要描述 clears that field. A missing proposal keeps it.
+ * A completed pass with no 简要描述 clears that field. A missing proposal keeps it,
+ * and so does a pass whose description was produced but rejected by the catalog rules.
  * The other three stay when this pass has no new value.
  */
 export function fillEmptyNoteProperties(
   content: string,
   proposal: Partial<SummaryFrontmatterData> | undefined,
-  options?: { replaceExisting?: boolean }
+  options?: { replaceExisting?: boolean; keepExistingDescription?: boolean }
 ): { content: string; filled: string[]; clearedDescription: boolean } {
   const frontmatter = splitFrontmatter(content).frontmatter;
   const data: Partial<SummaryFrontmatterData> = {};
@@ -97,7 +93,7 @@ export function fillEmptyNoteProperties(
     if (proposal.description) {
       data.description = proposal.description;
       filled.push("简要描述");
-    } else if (!isEmptyDescription(frontmatter)) {
+    } else if (!isEmptyDescription(frontmatter) && !options?.keepExistingDescription) {
       data.description = "";
       clearedDescription = true;
     }
@@ -258,6 +254,8 @@ function formatFrontmatterField(key: string, value: string | string[]): string[]
     return [`${key}:${first ? ` ${first}` : ""}`, ...rest];
   }
   if (key === "tags" && !value.trim()) return ["tags:"];
+  // 分类 is a list property throughout the vault; a scalar here would flip Obsidian's inferred type.
+  if (key === "分类") return value.trim() ? [`${key}:`, `  - ${value.trim()}`] : [`${key}:`];
   return [value.trim() ? `${key}: ${value}` : `${key}:`];
 }
 

@@ -21,15 +21,6 @@ export function stripFrontmatter(content: string): string {
     .replace(/^\uFEFF/, "");
 }
 
-export function insertArticleCallout(content: string, lines: string[]): string {
-  const newline = content.includes("\r\n") ? "\r\n" : "\n";
-  const frontmatter = FRONTMATTER.exec(content)?.[0] ?? (content.startsWith("\uFEFF") ? "\uFEFF" : "");
-  const prefix = frontmatter.length > 1
-    ? frontmatter + (frontmatter.endsWith("\n") ? newline : newline.repeat(2))
-    : frontmatter;
-  return prefix + lines.join(newline) + newline.repeat(2) + content.slice(frontmatter.length);
-}
-
 function removeManagedCallouts(content: string): string {
   const lines = content.split("\n");
   const protectedLines = protectedLineIndices(protectedRanges(lines));

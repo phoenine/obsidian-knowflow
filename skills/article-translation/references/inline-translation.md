@@ -6,9 +6,14 @@
 
 ```json
 {
-  "translations": [{ "id": "translation-1", "translation": "让故障显式可见。" }]
+  "translations": [
+    { "id": "translation-1", "translation": "让故障显式可见。" },
+    { "id": "translation-2", "action": "skip" }
+  ]
 }
 ```
+
+整段是中文、或已经带着中文译文的候选返回 `{ "id": "...", "action": "skip" }`，不写译文。每个候选 ID 只返回一次。
 
 ## 笔记中的结果
 

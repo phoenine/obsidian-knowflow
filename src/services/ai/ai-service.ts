@@ -3,7 +3,7 @@ import { AiTransport } from "./ai-transport";
 import { estimateChatUsage } from "../chat/chat-stream";
 import { buildChatRequestMessages } from "../chat/chat-context";
 import { findPublicEvidence } from "../search/public-evidence";
-import { requestFormattingDecisions } from "./formatting-ai";
+import { requestFormattingDecisions, type FormattingScope } from "./formatting-ai";
 import type { FormattingCandidate, FormattingDecision } from "../clipping/formatting-candidates";
 import { KnowledgeAi } from "./knowledge-ai";
 import type { TranslationCandidate, TranslationDecision } from "../clipping/translation-candidates";
@@ -169,8 +169,12 @@ export class AiService {
     );
   }
 
-  confirmFormatting(candidates: FormattingCandidate[], instructions: string): Promise<FormattingDecision[]> {
-    return requestFormattingDecisions(this.settings.taskModel, candidates, instructions);
+  confirmFormatting(
+    candidates: FormattingCandidate[],
+    instructions: string,
+    scope?: FormattingScope
+  ): Promise<FormattingDecision[]> {
+    return requestFormattingDecisions(this.settings.taskModel, candidates, instructions, scope);
   }
 
   proposeNoteProperties(title: string, content: string, categories: string[]): Promise<NotePropertyProposal> {
@@ -184,7 +188,10 @@ export class AiService {
   ): Promise<TranslationDecision[]> {
     const translate = (skill: string) => new RepairAi(new AiTransport([skill, translationFormatRules.trim()].join("\n\n")))
       .translateEnglishParagraphs(this.settings.taskModel, title, candidates);
-    if (instructions?.trim()) return translate(instructions);
+    // Clipping passes its own skill text; the translation skill (including a vault override) must still apply.
+    if (instructions?.trim()) {
+      return this.skills.run("article-translation", (translationSkill) => translate([instructions, translationSkill].join("\n\n")));
+    }
     return this.skills.run("article-translation", translate);
   }
 }

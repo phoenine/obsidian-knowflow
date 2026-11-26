@@ -66,7 +66,7 @@ const baseData = { title: "标题", today: "2026-08-04" };
   const original = "\uFEFF---\n简要描述: \"包含---的属性\"\n分类: 旧分类\n---\n\n正文";
   const updated = updateFrontmatterCategory(original, "AI");
   assert.ok(updated.includes('简要描述: "包含---的属性"'));
-  assert.ok(updated.includes("分类: AI"));
+  assert.ok(updated.includes("分类:\n  - AI"), "plugin-written 分类 stays a list");
   assert.ok(updated.endsWith("\n\n正文"));
 }
 
@@ -143,7 +143,7 @@ const baseData = { title: "标题", today: "2026-08-04" };
   const result = applySummaryFrontmatter(inlineArray, { description: "描述", readingValue: 3, category: "AI", tags: ["AI", "效率"] });
   assert.ok(!result.includes("[foo, bar, baz]"), "old inline tags must be replaced, not preserved");
   assert.ok(result.includes("  - AI") && result.includes("  - 效率"), "AI tags must be written as a YAML list");
-  assert.ok(result.includes("分类: AI"), "applySummaryFrontmatter does overwrite 分类 with the AI's suggestion");
+  assert.ok(result.includes("分类:\n  - AI"), "applySummaryFrontmatter overwrites 分类 with the AI's suggestion, as a list");
 }
 
 {
@@ -182,7 +182,7 @@ const baseData = { title: "标题", today: "2026-08-04" };
   ].join("\n");
   const result = updateFrontmatterCategory(withTemplater, "新分类");
   assert.ok(result.includes("创建日期: <% tp.date.now(\"YYYY-MM-DD\") %>"), "Templater tag must be untouched");
-  assert.ok(result.includes("分类: 新分类"));
+  assert.ok(result.includes("分类:\n  - 新分类"));
 }
 
 {
@@ -196,7 +196,7 @@ const baseData = { title: "标题", today: "2026-08-04" };
   assert.deepEqual(filled.filled, ["简要描述", "阅读价值", "分类", "标签"]);
   assert.match(filled.content, /简要描述: "说明事件日志。"/);
   assert.match(filled.content, /阅读价值: 4/);
-  assert.match(filled.content, /分类: 人工智能/);
+  assert.match(filled.content, /分类:\n  - 人工智能/);
   assert.match(filled.content, /  - agent-memory/);
   assert.doesNotMatch(filled.content, /clippings/);
 
@@ -221,7 +221,7 @@ const baseData = { title: "标题", today: "2026-08-04" };
   assert.deepEqual(replaced.filled, ["简要描述", "阅读价值", "分类", "标签"]);
   assert.match(replaced.content, /简要描述: "新描述"/);
   assert.match(replaced.content, /阅读价值: 5/);
-  assert.match(replaced.content, /分类: 人工智能/);
+  assert.match(replaced.content, /分类:\n  - 人工智能/);
   assert.match(replaced.content, /  - agent-memory/);
   assert.doesNotMatch(replaced.content, /kept/);
 }
@@ -251,6 +251,29 @@ const accepted = readNoteProperties({
 assert.equal(accepted.description, "用事件日志保存原始记录，再用派生索引提供查询。");
 assert.equal(readNoteProperties({ briefDescription: "Agent就能做视频哎嘿。" }, categories).description, undefined);
 assert.equal(readNoteProperties({ briefDescription: "这篇文章太香了！" }, categories).description, undefined);
+// The model sometimes echoes the option list as an array; the one matching option must still be used.
+// Several candidates are ambiguous: the answer is invalid, not "the first match".
+assert.equal(readNoteProperties({ briefDescription: "用事件日志保存原始记录，再用派生索引提供查询。", category: ["人工智能", "知识积累"] }, categories).category, undefined);
+assert.equal(readNoteProperties({ category: ["不存在的分类"] }, categories).category, undefined);
+assert.equal(readNoteProperties({ category: ["知识积累"] }, categories).category, "知识积累");
+// A number is a wrong type, not an empty description, so the existing one is kept.
+const numeric = readNoteProperties({ briefDescription: 12345678901234567890, category: "技术" }, categories);
+assert.equal(numeric.descriptionRejected, true);
+assert.equal(fillEmptyNoteProperties("---\n简要描述: \"旧的有效描述\"\n---\n正文", numeric, { replaceExisting: true, keepExistingDescription: numeric.descriptionRejected }).clearedDescription, false);
+assert.equal(readNoteProperties({ briefDescription: "" }, categories).descriptionRejected, undefined, "an empty description is simply missing");
+assert.equal(readNoteProperties({ category: ["知识积累"] }, categories).category, "知识积累");
+assert.equal(readNoteProperties({ category: "知识积累" }, categories).category, "知识积累");
+// A rejected description is not an empty one: the existing 简要描述 must survive the rewrite.
+const rejected = readNoteProperties({ briefDescription: "这篇文章太香了！" }, categories);
+assert.equal(rejected.descriptionRejected, true);
+const existing = "---\n简要描述: \"旧的有效描述\"\n阅读价值: 3\n---\n正文";
+const keptByRejection = fillEmptyNoteProperties(existing, rejected, { replaceExisting: true, keepExistingDescription: rejected.descriptionRejected });
+assert.match(keptByRejection.content, /旧的有效描述/);
+assert.equal(keptByRejection.clearedDescription, false);
+// Nothing usable at all still clears the field, as the clipping rules say.
+const cleared = fillEmptyNoteProperties(existing, readNoteProperties({}, categories), { replaceExisting: true });
+assert.equal(cleared.clearedDescription, true);
+assert.doesNotMatch(cleared.content, /旧的有效描述/);
 
 await rm(tempDir, { recursive: true, force: true });
 console.log("frontmatter edge case tests passed");

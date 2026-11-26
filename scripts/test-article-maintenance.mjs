@@ -170,6 +170,23 @@ assert.doesNotMatch(contents.get(file), /---\r\n\r\n> \[!note\]/);
 assert.match(contents.get(file), /<https:\/\/example.com\/versions>/);
 assert.match(prepareArticleForAi(contents.get(file)), /默认版本是 v2/);
 assert.match(contents.get(file), /默认限制为 50/);
+
+{
+  const paragraph = "使用方案甲。可选方案乙。同段结尾保留。\r\n\r\n下一段。";
+  const target = await vault.create("Articles/Same paragraph.md", paragraph);
+  const [sourceUpdate] = review.updates;
+  const first = { ...sourceUpdate, before: "使用方案甲", after: "使用方案丙" };
+  const second = { ...sourceUpdate, before: "可选方案乙", after: "可选方案丁。" };
+  const grouped = { ...review, path: target.path, original: paragraph, updates: [first, second] };
+  await freshness.apply(target, grouped, new Set([0, 1]));
+  assert.match(contents.get(target), /^使用方案丙。可选方案丁。同段结尾保留。\r\n\r\n/);
+  assert.match(contents.get(target), /\r\n\r\n下一段。$/);
+  assert.equal([...contents.get(target).matchAll(/KnowFlow 知识更新/g)].length, 2);
+  contents.set(target, paragraph);
+  const conflicting = { ...grouped, updates: [first, { ...second, before: "方案甲。可选方案乙" }] };
+  await assert.rejects(freshness.apply(target, conflicting, new Set([0, 1])), /范围重叠/);
+  assert.equal(contents.get(target), paragraph);
+}
 assert.doesNotMatch(prepareArticleForAi(contents.get(file)), /KnowFlow 时效更新|默认版本是 v1/);
 
 const retired = await vault.create("Articles/Retired Tool.md", "Retired Tool 提供远程公开服务。此文介绍如何连接这项服务。");
@@ -209,7 +226,7 @@ globalThis.knowflowRequest = async ({ url, body, headers, method }) => {
   const { messages } = JSON.parse(body);
   if (messages[0].content.includes("全文分析")) {
     return toResponse({
-      purpose: "介绍如何连接服务", coreConclusion: "这项服务可以远程使用。", domains: ["Retired Tool"],
+      purpose: "介绍如何连接服务", coreConclusion: "这项服务可以远程使用。", coreClaimQuote: "Retired Tool 提供远程公开服务。", domains: ["Retired Tool"],
       claims: [{ quote: "Retired Tool 提供远程公开服务。", section: "导语", query: "Retired Tool 远程服务状态" }],
       discoveryQueries: []
     });
@@ -238,6 +255,102 @@ assert.match(retiredText, /此文介绍如何连接这项服务。/);
 assert.doesNotMatch(retiredText, /提供远程公开服务。此文/);
 assert.match(retiredText, /KnowFlow 知识更新/);
 assert.match(retiredText, /\*\*已删除\*\*/);
+
+// A source for a secondary claim does not make the core conclusion invalid: the judge's flag needs an accepted
+// update that says the content is outdated or wrong.
+{
+  const partial = await vault.create("Articles/Partial Sources.md", "默认版本是 v1，这是核心结论。\n\n次要说明：补充工具 X 支持 Y。");
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (url.endsWith("/search")) {
+      const { query } = JSON.parse(body);
+      if (!query.includes("补充")) return { status: 200, json: { results: [] } };
+      return { status: 200, json: { results: [{ url: "https://example.com/extra", title: "补充说明", date: "2026-11-01T00:00:00Z", content: "补充工具 X 已不再支持 Y。" }] } };
+    }
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        purpose: "说明默认版本", coreConclusion: "默认版本是 v1。", coreClaimQuote: "默认版本是 v1", domains: ["版本"],
+        claims: [
+          { quote: "默认版本是 v1", section: "导语", query: "默认版本 v1 现状" },
+          { quote: "补充工具 X 支持 Y", section: "导语", query: "补充工具 X 支持 Y" }
+        ],
+        discoveryQueries: []
+      });
+    }
+    const { sources } = JSON.parse(messages[1].content);
+    return toResponse({ coreStillHolds: false, items: [
+      null,
+      { quote: "补充工具 X 支持 Y", after: "补充工具 X 已不再支持 Y", section: "导语",
+        status: "已经失效", action: "修正", reason: "新版本已撤回支持。", sourceId: sources[0].id,
+        evidenceQuote: "补充工具 X 已不再支持 Y。" }
+    ] });
+  };
+  const partialReview = await freshness.check(partial, model, searchKey);
+  assert.equal(partialReview.verdict, "局部内容需要更新");
+  assert.equal(partialReview.updates.length, 1);
+}
+
+// An empty search result is not evidence. Without sources the model must not judge the core conclusion.
+{
+  const unsearched = await vault.create("Articles/No Results.md", "默认版本是 v1，这是文章的核心结论。\n\n另一段说明文字。");
+  const judgeRequests = [];
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (url.endsWith("/search")) return { status: 200, json: { results: [] } };
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        purpose: "说明默认版本", coreConclusion: "默认版本是 v1。", domains: ["版本"],
+        claims: [{ quote: "默认版本是 v1", section: "导语", query: "默认版本 v1 现状" }],
+        discoveryQueries: []
+      });
+    }
+    judgeRequests.push(messages);
+    return toResponse({ coreStillHolds: false, items: [] });
+  };
+  const empty = await freshness.check(unsearched, model, searchKey);
+  assert.equal(judgeRequests.length, 0, "no sources means the judge is never asked about the core conclusion");
+  assert.notEqual(empty.verdict, "核心结论需要重新审视");
+  assert.equal(empty.verdict, "暂时无法判断");
+  assert.deepEqual(empty.unverified.map((item) => item.reason), ["没有检索到可核对的公开资料。"]);
+  assert.equal(empty.updates.length, 0);
+}
+
+{
+  // Clipping passes its own instructions, but the article-translation skill (including a vault override) still applies.
+  const seen = [];
+  globalThis.knowflowRequest = async ({ body }) => {
+    seen.push(JSON.parse(body).messages[0].content);
+    return toResponse({ translations: [{ id: "translation-1", action: "skip" }] });
+  };
+  const translating = new AiService({ summaryModel: model, taskModel: model }, new SkillRunner({
+    read: async (name) => name === "article-translation" ? "自定义翻译规则：保留缩写。" : null
+  }));
+  const paragraphs = [{ id: "translation-1", type: "english-paragraph", startLine: 0, endLine: 0, content: "Distributed systems are difficult because components fail." }];
+  await translating.translateEnglishParagraphs("T", paragraphs, "剪藏整理规则：只整理结构。");
+  assert.ok(seen[0].includes("自定义翻译规则：保留缩写。"), "clipping translation must load the article-translation skill");
+  assert.ok(seen[0].includes("剪藏整理规则：只整理结构。"), "clipping instructions must still be sent");
+  assert.ok(seen[0].includes('"action": "skip"'), "the translation format must document the skip shape");
+  await translating.translateEnglishParagraphs("T", paragraphs);
+  assert.ok(seen[1].includes("自定义翻译规则：保留缩写。"));
+}
+
+{
+  // Formatting: clipping rules include the heading/code references; the chat entry is limited to reformat-code.
+  const seen = [];
+  globalThis.knowflowRequest = async ({ body }) => {
+    seen.push(JSON.parse(body).messages[0].content);
+    return toResponse({ decisions: [{ id: "code-1", action: "keep" }] });
+  };
+  const formatting = new AiService({ summaryModel: model, taskModel: model }, runner);
+  const candidate = { id: "code-1", type: "fenced-code", content: "x = 1", before: "", after: "", needsReformat: false };
+  await formatting.confirmFormatting([candidate], "剪藏整理规则");
+  assert.ok(seen[0].includes("裸序号或连行数字跟在独立短标题旁时"), "clipping formatting must embed the heading rules");
+  assert.ok(seen[0].includes("只有确认是网页行号时才去掉行首数字"), "clipping formatting must embed the code rules");
+  await formatting.confirmFormatting([candidate], "", "code-chat");
+  assert.ok(seen[1].includes("只允许返回 keep 或 reformat-code"), "chat formatting must be limited to reformat-code");
+  assert.ok(!seen[1].includes("heading 只用于独立短标题"), "chat formatting must not offer heading or language actions");
+  assert.ok(seen[1].includes("只有确认是网页行号时才去掉行首数字"), "chat formatting still follows the code rules");
+}
 
 globalThis.knowflowRequest = async ({ url }) => {
   assert.equal(url, "https://api.deepseek.com/v1/tools/search", "Search page content needs no Fetch request");
@@ -304,7 +417,8 @@ globalThis.knowflowRequest = async ({ body }) => {
   const { messages } = JSON.parse(body);
   assert.ok(messages[0].content.includes("为摘要突出部署前置条件"));
   assert.ok(messages[0].content.includes("严格 JSON"));
-  assert.ok(messages[0].content.includes("## 核心观点\n- 第一个要点。\n- 第二个要点。"));
+  assert.ok(messages[0].content.includes("## 核心观点\n- **第一个关键词**：第一个要点。\n- **第二个关键词**：第二个要点。"));
+  assert.ok(messages[0].content.includes("不超过 60 个中文字符"), "summary prompt sets a length limit per point");
   const input = JSON.parse(messages[1].content);
   assert.ok(!Object.hasOwn(input.requiredJsonShape, "recommendedAction"));
   summaryRequests.push(input);

@@ -22,16 +22,20 @@ await esbuild.build({
 });
 const {
   applyFormattingDecisions,
+  applyFormattingEdits,
   batchFormattingCandidates,
   collectHeadingCandidates,
   collectCodeCandidates,
   collectClippedCodeCandidates,
-  hasSameNonWhitespaceContent,
+  sameCodeTokens,
+  isSafeCodeReformat,
   needsCodeReformat,
+  contradictsPythonLabel,
+  introducesRestrictedBreak,
+  sameCodeIgnoringComments,
   normalizeBodyHeadingLevels,
   repairBoldFlankingLine,
   preferTextLanguage,
-  restoreClippedShellContinuations,
   stripSequentialLineNumbers,
   trimCodeFenceBody
 } = await import(pathToFileURL(join(tempDir, "formatting-candidates.js")).href);
@@ -142,6 +146,24 @@ const { escapeLiteralHtmlTags } = await import(pathToFileURL(join(tempDir, "lite
   assert.equal(repair("`**a：**b` 和 **c：**d"), "`**a：**b` 和 **c：** d", "inline code is preserved");
   assert.equal(repair("***粗斜：***字"), "***粗斜：***字");
   assert.equal(repair("**：**字"), "**：** 字");
+
+  // Not prose: link targets, longer code spans, wikilinks, HTML, URLs and inline math keep every byte.
+  assert.equal(repair("[文档](https://example.com/a**b-**c)"), "[文档](https://example.com/a**b-**c)", "link target");
+  assert.equal(repair("![图](https://example.com/a**b-**c.png)"), "![图](https://example.com/a**b-**c.png)", "image target");
+  assert.equal(repair("[文档](<https://example.com/a**b-**c>)"), "[文档](<https://example.com/a**b-**c>)", "angle-bracket link target");
+  assert.equal(repair("[文档](https://example.com/a_(b)**x：**y)"), "[文档](https://example.com/a_(b)**x：**y)", "link target with parentheses");
+  assert.equal(repair("``code ` **x：**y``"), "``code ` **x：**y``", "double-backtick code span containing a backtick");
+  assert.equal(repair("``a`` 和 **c：**d"), "``a`` 和 **c：** d", "prose after a code span is still repaired");
+  assert.equal(repair("[[a**b-**c]]"), "[[a**b-**c]]", "wikilink");
+  assert.equal(repair("<span data-x=\"**a：**b\">字</span>"), "<span data-x=\"**a：**b\">字</span>", "html attribute");
+  assert.equal(repair("见 https://example.com/a**b-**c 说明"), "见 https://example.com/a**b-**c 说明", "bare URL");
+  assert.equal(repair("公式 $a**b：**c$ 结束"), "公式 $a**b：**c$ 结束", "inline math");
+
+  // Prose around those spans is still repaired, and a literal next to the closing ** counts as the neighbour.
+  assert.equal(repair("**标题：**正文 [链接](https://x.cn/a**b-**c)"), "**标题：** 正文 [链接](https://x.cn/a**b-**c)");
+  assert.equal(repair("**标题：**https://example.com"), "**标题：** https://example.com");
+  assert.equal(repair("**标题：**`code`"), "**标题：**`code`", "code span after punctuation is already valid flanking");
+  assert.equal(repair("**标题：**[[笔记]]"), "**标题：**[[笔记]]", "wikilink starts with punctuation, already valid");
 }
 
 assert.equal(
@@ -324,15 +346,41 @@ assert.equal(
   "Chinese YAML must remain eligible for language classification"
 );
 assert.equal(
-  hasSameNonWhitespaceContent("const value=1;", "const value = 1;"),
+  sameCodeTokens("const value=1;", "const value = 1;"),
   true,
   "whitespace-only formatting must be accepted"
 );
 assert.equal(
-  hasSameNonWhitespaceContent("const value=1;", "const value = 2;"),
+  sameCodeTokens("const value=1;", "const value = 2;"),
   false,
   "token changes must be rejected"
 );
+assert.equal(sameCodeTokens("cmd \\  --flag", "cmd \\\n  --flag"), true, "shell continuation may be split");
+assert.equal(sameCodeTokens("\\#define X", "#define X"), false, "a literal backslash cannot be dropped from an existing fence");
+
+{
+  const mangledPython = {
+    content: 'def add(size,con):    cho(1)    r.sendafter("Size: ",str(size))    r.sendafter("Content: ",con)',
+    fenceLanguage: "python"
+  };
+  const formattedPython = [
+    "def add(size,con):",
+    "    cho(1)",
+    '    r.sendafter("Size: ",str(size))',
+    '    r.sendafter("Content: ",con)'
+  ].join("\n");
+  assert.equal(isSafeCodeReformat(mangledPython, formattedPython), true, "model line breaks and indentation must be accepted");
+  assert.equal(
+    isSafeCodeReformat(mangledPython, formattedPython.replace('"Size: "', '"Size:"')),
+    false,
+    "spaces inside a quoted literal must be preserved"
+  );
+  assert.equal(
+    isSafeCodeReformat(mangledPython, formattedPython.replace("cho(1)", "cho(2)")),
+    false,
+    "changed code tokens must be rejected"
+  );
+}
 assert.equal(
   needsCodeReformat('node scripts/search.js search \\  --query "foo" \\  --confirm'),
   true,
@@ -343,6 +391,138 @@ assert.equal(
   false,
   "normal indented code should not need reformat"
 );
+assert.equal(
+  needsCodeReformat([
+    "from pwn import *",
+    "from hashlib import sha256",
+    "import base64",
+    `context.log_level='debug'${"    r.sendafter(\"Size: \",str(size));".repeat(6)}`
+  ].join("\n")),
+  true,
+  "a partly reformatted block with one collapsed line must still be flagged"
+);
+
+{
+  const article = ["```python", "def add(a,b):    return a+b    print(1)", "```"].join("\n");
+  const candidate = {
+    id: "fence-1", type: "fenced-code", startLine: 0, endLine: 2,
+    content: "def add(a,b):    return a+b    print(1)", before: "", after: "", fenceLanguage: "python",
+    needsReformat: true
+  };
+  const rejected = applyFormattingEdits(article, [candidate], [{
+    id: candidate.id,
+    action: "reformat-code",
+    language: "python",
+    content: "def add(a,b):\n    return a-b\n    print(1)"
+  }]);
+  assert.equal(rejected.content, article, "reformat that changes code must be rejected");
+  assert.equal(rejected.rejectedReformats, 1, "rejected reformats must be counted so the pipeline can report them");
+
+  // A block the program did not flag as collapsed is never rewritten, even by a well-formed decision.
+  const unflagged = { ...candidate, needsReformat: undefined };
+  const ignored = applyFormattingEdits(article, [unflagged], [{
+    id: candidate.id,
+    action: "reformat-code",
+    language: "python",
+    content: "def add(a,b):\n    return a+b\n    print(1)"
+  }]);
+  assert.equal(ignored.content, article, "reformat-code on an unflagged block must be ignored");
+  assert.equal(ignored.applied, 0);
+  assert.equal(ignored.rejectedReformats, 0, "ignoring an unflagged block is not a rejected rewrite");
+
+  // The same decision is applied once the block is flagged.
+  const accepted = applyFormattingEdits(article, [candidate], [{
+    id: candidate.id,
+    action: "reformat-code",
+    language: "python",
+    content: "def add(a,b):\n    return a+b\n    print(1)"
+  }]);
+  assert.equal(accepted.applied, 1);
+}
+
+{
+  const code = "function points() {\n  return 1; // " + "例子 ".repeat(90) + "\n}";
+  const article = ["```js", code, "```"].join("\n");
+  assert.equal(collectCodeCandidates(article).fencedCode.length, 0, "a long comment does not make valid JavaScript a reformat candidate");
+  const candidate = { id: "fence-1", type: "fenced-code", startLine: 0, endLine: 4, content: code, fenceLanguage: "js", needsReformat: true };
+  const edited = applyFormattingEdits(article, [candidate], [{
+    id: candidate.id, action: "reformat-code", language: "js", content: code.replace("return 1;", "return\n  1;")
+  }]);
+  assert.equal(edited.content, article);
+  assert.equal(edited.rejectedReformats, 1, "an incorrectly flagged fence must still reject changes in behavior");
+
+  const spaced = "def f(x):    return x +    1";
+  const python = ["```python", spaced, "```"].join("\n");
+  const split = applyFormattingEdits(python, [{ ...candidate, content: spaced, fenceLanguage: "python", endLine: 2 }], [{
+    id: candidate.id, action: "reformat-code", language: "python", content: "def f(x):\n    return x +\n    1"
+  }]);
+  assert.equal(split.content, python, "an aligned expression must not be split at an operator");
+}
+
+// Code a clipper flattened into one line (taken from a real clipping): newlines are gone, indentation is only a
+// run of spaces, and statements are glued together. Python gives no `;` or braces to go by.
+{
+  const flattened = [
+    'def validate_nat(value):    if type(value) is not int:        raise TypeError("元素必须是内置 int")    if value < 0:        raise ValueError("元素必须是非负整数")    return value',
+    'from functools import reducedef sum_even_squares_functional(values):    validate_list(values)    return reduce(        lambda total, square: total + square,        0,    )',
+    "# λ 核心：只有单参数 lambda。ZERO = lambda f: lambda x: xONE = lambda f: lambda x: f(x)TWO = lambda f: lambda x: f(f(x))",
+    "Y = λg. (λx. g (x x)) (λx. g (x x))Z = λg. (λx. g (λv. (x x) v))        (λx. g (λv. (x x) v))",
+    "M ::= x | λx.M | M N(λx.M) N → M[x := N]             β 归约λf. λx. f(f(x))                  Church 数字 2",
+    "TRUE(lambda _: 56)(lambda _: fail())(UNIT)# 实际结果：56；fail 没有执行。"
+  ];
+  for (const body of flattened) assert.equal(needsCodeReformat(body), true, `flattened code must be flagged: ${body.slice(0, 40)}`);
+
+  const ordinary = [
+    "def add(a, b):\n    return a + b\n\nprint(add(1, 2))\nf = lambda x: x + 1",
+    "services:\n  web:\n    image:      nginx:latest-with-a-very-long-tag-name-here\n    restart:    always",
+    "typedef int (*handler)(int);\ntypedef struct node node_t;",
+    'const baseURL = "https://example.com";\nconst userID = 1;',
+    'print("# heading")\nprint(f"{a} # {b}")',
+    "functions:\n  lambda: arn:aws:lambda:us-east-1:123:function:x"
+  ];
+  for (const body of ordinary) assert.equal(needsCodeReformat(body), false, `ordinary code must not be flagged: ${body.slice(0, 40)}`);
+
+  // The clipper's auto-detected label is often wrong for short Python.
+  assert.equal(contradictsPythonLabel("def f(x):    return x", "perl"), true);
+  assert.equal(contradictsPythonLabel("ZERO = lambda f: lambda x: x", "makefile"), true);
+  assert.equal(contradictsPythonLabel("def f(x):\n    return x", "python"), false);
+  assert.equal(contradictsPythonLabel("def f(x):\n    return x", ""), false, "unset labels are handled elsewhere");
+  assert.equal(contradictsPythonLabel("function f(x) { return x }", "javascript"), false);
+  assert.equal(contradictsPythonLabel("functions:\n  lambda: arn", "yaml"), false);
+
+  const mislabeled = ["```perl", flattened[0], "```"].join("\n");
+  const [flaggedBlock] = collectCodeCandidates(mislabeled).fencedCode;
+  assert.equal(flaggedBlock.needsReformat, true);
+  assert.equal(flaggedBlock.autoLanguage, "python");
+  assert.equal(flaggedBlock.fenceLanguage, "perl");
+  const reformatted = applyFormattingEdits(mislabeled, [flaggedBlock], [{
+    id: flaggedBlock.id,
+    action: "reformat-code",
+    language: "python",
+    content: 'def validate_nat(value):\n    if type(value) is not int:\n        raise TypeError("元素必须是内置 int")\n    if value < 0:\n        raise ValueError("元素必须是非负整数")\n    return value'
+  }]);
+  assert.equal(reformatted.applied, 1, "the model's line breaks and the corrected language are accepted");
+  assert.ok(reformatted.content.startsWith("```python\ndef validate_nat(value):\n    if type(value)"));
+
+  // Glued words are split by whitespace only; the code tokens themselves stay.
+  const glued = ["```python", flattened[1], "```"].join("\n");
+  const [gluedBlock] = collectCodeCandidates(glued).fencedCode;
+  const split = applyFormattingEdits(glued, [gluedBlock], [{
+    id: gluedBlock.id,
+    action: "reformat-code",
+    language: "python",
+    content: "from functools import reduce\n\ndef sum_even_squares_functional(values):\n    validate_list(values)\n    return reduce(\n        lambda total, square: total + square,\n        0,\n    )"
+  }]);
+  assert.equal(split.applied, 1, "`reducedef` may be split into `reduce` and `def`");
+
+  // A correctly labelled, already formatted block is left alone; a wrong label alone only changes the label.
+  assert.equal(collectCodeCandidates("```python\ndef add(a, b):\n    return a + b\n```").fencedCode.length, 0);
+  const wrongLabel = "```ruby\ndef add(a, b):\n    return a + b\n```";
+  const [labelOnly] = collectCodeCandidates(wrongLabel).fencedCode;
+  assert.equal(labelOnly.needsReformat, undefined);
+  const relabeled = applyFormattingEdits(wrongLabel, [labelOnly], [{ id: labelOnly.id, action: "set-code-language", language: "python" }]);
+  assert.equal(relabeled.content, "```python\ndef add(a, b):\n    return a + b\n```");
+}
 assert.equal(
   trimCodeFenceBody("\n    line1\n    line2\n"),
   "    line1\n    line2",
@@ -614,10 +794,6 @@ assert.equal(
   assert.equal(collectCodeCandidates(nested).fencedCode.length, 0);
   assert.equal(normalizeBodyHeadingLevels(nested), nested);
 
-  const quoted = String.raw`run "literal \\  --flag" --next`;
-  const comment = String.raw`run --flag # example \  --safe`;
-  assert.equal(restoreClippedShellContinuations(quoted, "sh"), quoted);
-  assert.equal(restoreClippedShellContinuations(comment, "sh"), comment);
 }
 
 {
@@ -674,6 +850,41 @@ assert.equal(
   assert.equal(prettyJsonBlock(pretty, "json"), pretty);
   assert.equal(prettyJsonBlock("{bad", "json"), "{bad");
   assert.equal(prettyJsonBlock(raw, "text"), raw);
+}
+
+{
+  // A long line whose `;` and braces sit in a trailing comment is ordinary code, not collapsed code.
+  const longComment = "  return 1; // " + "这是一段很长的说明".repeat(20);
+  assert.ok(longComment.length > 160);
+  assert.equal(needsCodeReformat(["function f() {", longComment, "}"].join("\n")), false, "a trailing comment must not mark the block");
+  assert.equal(needsCodeReformat("x = 1; y = 2; " + "z = 3; ".repeat(30)), true, "a genuinely collapsed long line is still flagged");
+
+  // A line break right after return/throw/yield/break/continue changes meaning, so it is rejected even though
+  // the tokens match once whitespace is ignored.
+  assert.equal(introducesRestrictedBreak("return 1", "return\n1"), true);
+  assert.equal(introducesRestrictedBreak("throw new Error()", "throw\nnew Error()"), true);
+  assert.equal(introducesRestrictedBreak("return\n1", "return\n1"), false, "breaks already in the source are allowed");
+  assert.equal(introducesRestrictedBreak("x = 1", "x = 1\ny = 2"), false);
+  const jsArticle = "```javascript\nfunction f() {  return 1; }\n```";
+  const jsCandidate = {
+    id: "fence-1", type: "fenced-code", startLine: 0, endLine: 2,
+    content: "function f() {  return 1; }", before: "", after: "", fenceLanguage: "javascript", needsReformat: true
+  };
+  const splitReturn = applyFormattingEdits(jsArticle, [jsCandidate], [{
+    id: jsCandidate.id, action: "reformat-code", language: "javascript", content: "function f() {\n  return\n  1;\n}"
+  }], { trustReformat: true });
+  assert.equal(splitReturn.content, jsArticle, "return followed by a newline is rejected even when the caller trusts the reformat");
+  assert.equal(splitReturn.applied, 0);
+  const safeReturn = applyFormattingEdits(jsArticle, [jsCandidate], [{
+    id: jsCandidate.id, action: "reformat-code", language: "javascript", content: "function f() {\n  return 1;\n}"
+  }], { trustReformat: true });
+  assert.equal(safeReturn.applied, 1, "the explicit preview path still accepts ordinary JavaScript formatting");
+
+  // Comment-only changes: the code must stay the same once comments are ignored.
+  assert.equal(sameCodeIgnoringComments("a = 1", "# 说明\na = 1"), true);
+  assert.equal(sameCodeIgnoringComments("a = 1", "// 说明\na = 1"), true);
+  assert.equal(sameCodeIgnoringComments("a = 1", "a = 2 # changed"), false);
+  assert.equal(sameCodeIgnoringComments("return 1", "return\n2"), false);
 }
 
 await rm(tempDir, { recursive: true, force: true });

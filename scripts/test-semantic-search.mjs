@@ -211,10 +211,48 @@ const raced = metadataFor("Articles/Apple.md").value.articles.find((article) => 
 assert.equal(raced.mtime, 100, "a rebuild must not stamp old vectors with a newer mtime");
 files[0].stat.mtime = appleBeforeRace;
 transport.embed = embedBeforeRace;
+
+{
+  const newFile = new TestTFile({ path: "Articles/Collision-289.md", basename: "Collision-289", extension: "md", stat: { mtime: 9 } });
+  let signalStart;
+  let releaseBuild;
+  const started = new Promise((resolve) => { signalStart = resolve; });
+  transport.embed = async (config, inputs) => {
+    if (!releaseBuild) await new Promise((resolve) => { releaseBuild = resolve; signalStart(); });
+    return embedBeforeRace(config, inputs);
+  };
+  const rebuilding = service.rebuild();
+  await started;
+  files.push(newFile);
+  const refresh = service.refreshFile(newFile);
+  releaseBuild();
+  await Promise.all([rebuilding, refresh]);
+  assert.ok(metadataFor(newFile.path), "refresh queued during a rebuild must run after the active manifest is published");
+  await service.removePath(newFile.path);
+  files.splice(files.indexOf(newFile), 1);
+  transport.embed = embedBeforeRace;
+}
+
 const includedContext = await service.searchContext("苹果", undefined, 2);
 assert.match(includedContext, /检索来源/);
 assert.match(includedContext, /苹果是一种水果/);
 assert.doesNotMatch(includedContext, /苹果营养概况|包含苹果与香蕉的摘要/);
+{
+  const persisted = stored.get("semantic-index.json");
+  const models = [];
+  const changed = { ...settings, embeddingModel: { ...settings.embeddingModel, model: "different-model" } };
+  transport.embed = async (config, inputs) => {
+    models.push(config.model);
+    service.updateSettings(changed);
+    return embedBeforeRace(config, inputs);
+  };
+  await assert.rejects(service.rebuild(), /索引配置在构建期间已更改/);
+  assert.deepEqual(models, [settings.embeddingModel.model, settings.embeddingModel.model]);
+  assert.equal(stored.get("semantic-index.json"), persisted);
+  service.updateSettings(settings);
+  transport.embed = embedBeforeRace;
+  await service.rebuild();
+}
 const beforeMissingSummary = embedCalls;
 assert.deepEqual(await service.findRelated(files[2]), []);
 assert.equal(embedCalls, beforeMissingSummary, "a source without a summary does not embed its full article");

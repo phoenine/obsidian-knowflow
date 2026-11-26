@@ -139,5 +139,60 @@ assert.ok(targets.concept >= 2 && targets.concept <= 3);
   );
 }
 
+{
+  // Bold markers exist in the article, but a quote that is only markup is not a source.
+  const article = "**核心概念** 很重要，缓存失效有三种常见原因。";
+  const options = ["A", "B", "C", "D"].map((key) => ({ key, content: "选项 " + key }));
+  for (const sourceQuote of ["**", "*", "=="]) {
+    const quiz = new QuizAi({
+      requestJson: async (_model, messages) => ({
+        sections: [{
+          sectionId: JSON.parse(messages[1].content).sections[0].id,
+          value: 3,
+          questions: [{ focusType: "concept", sourceQuote, question: "题干 " + sourceQuote, options, answerKey: "A" }]
+        }]
+      })
+    });
+    assert.equal((await quiz.generateQuiz({}, "Articles/Markup.md", "标记", article, 4)).length, 0, `quote ${sourceQuote} must be rejected`);
+  }
+}
+
+{
+  // Spaced operators are part of the claim: `count == limit` is not the same text as `count limit`.
+  const article = "当 count == limit 时停止重试。";
+  const options = ["A", "B", "C", "D"].map((key) => ({ key, content: "选项 " + key }));
+  const quizFor = (sourceQuote) => new QuizAi({
+    requestJson: async (_model, messages) => ({
+      sections: [{
+        sectionId: JSON.parse(messages[1].content).sections[0].id,
+        value: 3,
+        questions: [{ focusType: "concept", sourceQuote, question: "何时停止？", options, answerKey: "A" }]
+      }]
+    })
+  });
+  assert.equal((await quizFor("当 count limit 时停止重试").generateQuiz({}, "Articles/Op.md", "运算", article, 4)).length, 0);
+  assert.equal((await quizFor("当 count == limit 时停止重试").generateQuiz({}, "Articles/Op.md", "运算", article, 4)).length, 1);
+}
+
+{
+  // Two options share the letter A with different text: the answer is ambiguous, so the whole question is rejected.
+  const article = "队列按照先进先出的顺序处理任务。";
+  const options = ["A", "B", "C", "D"].map((key) => ({ key, content: "选项 " + key }));
+  const conflicting = [{ key: "A", content: "5" }, { key: "A", content: "4" }, ...options.slice(1)];
+  const quizFor = (questionOptions) => new QuizAi({
+    requestJson: async (_model, messages) => ({
+      sections: [{
+        sectionId: JSON.parse(messages[1].content).sections[0].id,
+        value: 3,
+        questions: [{ focusType: "concept", sourceQuote: article, question: "几？", options: questionOptions, answerKey: "A", explanation: "正确答案是 4" }]
+      }]
+    })
+  });
+  assert.equal((await quizFor(conflicting).generateQuiz({}, "Articles/Dup.md", "重复", article, 4)).length, 0);
+  // The same letter with the same text collapses to one option and the question is kept.
+  const repeated = [...options, { key: "A", content: "选项 A" }];
+  assert.equal((await quizFor(repeated).generateQuiz({}, "Articles/Dup.md", "重复", article, 4)).length, 1);
+}
+
 await rm(tempDir, { recursive: true, force: true });
 console.log("quiz generation tests passed");

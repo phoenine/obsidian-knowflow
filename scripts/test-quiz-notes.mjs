@@ -66,6 +66,7 @@ assert.ok(content.includes("考试日期: 2026-08-01"));
 assert.ok(content.includes("分类:\n  - AI"));
 assert.ok(content.includes('原文: "[[Articles/AI/示例文章]]"'));
 assert.ok(content.includes("考试结果: false"));
+assert.ok(buildQuizNoteContent({ ...meta, category: "" }, questions).includes("分类:\n  - 未分类\n"));
 assert.ok(content.includes("<!-- study-quiz:start -->"));
 assert.ok(content.includes("<!-- study-quiz:end -->"));
 assert.ok(content.includes("```Answer fold"));
