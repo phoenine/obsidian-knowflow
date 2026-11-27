@@ -14,6 +14,7 @@ await esbuild.build({
   platform: "node"
 });
 const {
+  isEditOfferAccepted,
   isArticleEditRequest,
   articleForEdit,
   readArticleEdits,
@@ -34,6 +35,9 @@ assert.equal(isArticleEditRequest("检查当前文章是否过时"), false);
 assert.equal(isArticleEditRequest("格式化文章中的代码块"), false);
 assert.equal(isArticleEditRequest("更新"), false);
 assert.equal(isArticleEditRequest("好"), false);
+assert.equal(isEditOfferAccepted("写进文章"), true);
+assert.equal(isEditOfferAccepted("好。"), true);
+assert.equal(isEditOfferAccepted("好，但先解释一下"), false);
 
 {
   const article = `${"甲".repeat(20000)}\n目标句子在后面。\n${"乙".repeat(8000)}`;

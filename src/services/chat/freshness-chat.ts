@@ -3,7 +3,7 @@ import { t } from "../../i18n";
 
 export type FreshnessRequest =
   | { kind: "check" | "check-and-update" | "classify" }
-  | { kind: "apply"; numbers: number[] | "all" };
+  | { kind: "apply"; numbers: number[] | "all"; label?: string };
 
 const REVISION_NUMBER = /^[一二三四五六七八九十]$/;
 const CHINESE_NUMBERS = "零一二三四五六七八九十";
@@ -16,6 +16,11 @@ export function parseFreshnessRequest(question: string): FreshnessRequest | null
   }
   if (/^(?:(?:应用|采纳)(?:全部|所有|这些)(?:修订|更新|修改)?|全部应用|apply all(?: (?:revisions|changes))?)$/i.test(text)) {
     return { kind: "apply", numbers: "all" };
+  }
+  const pointed = /^(?:应用|采纳|apply)\s*[:：]\s*(\d{1,2}|[一二三四五六七八九十])(?:\s*[·•]\s*(.+))?$/i.exec(text);
+  if (pointed) {
+    const number = REVISION_NUMBER.test(pointed[1]) ? CHINESE_NUMBERS.indexOf(pointed[1]) : Number(pointed[1]);
+    return { kind: "apply", numbers: [number], label: pointed[2]?.trim() };
   }
   const list = /^(?:应用|采纳)\s*(.+)$/.exec(text)?.[1];
   const englishItem = /^apply(?:\s+(?:revision|change|item))?\s+(\d{1,2})$/i.exec(text);
@@ -36,6 +41,12 @@ export function parseFreshnessRequest(question: string): FreshnessRequest | null
   return null;
 }
 
+/** The quoted action and status must belong to the numbered suggestion. */
+export function freshnessSelectionMatches(action: string, status: string, label: string): boolean {
+  const compact = (value: string): string => value.replace(/\s+/g, "");
+  return compact(label) === compact(`${action}·${status}`);
+}
+
 /** A direct answer to the update prompt. It only applies while a review is waiting. */
 export function parseArticleUpdateReply(question: string): "accept" | "decline" | null {
   const text = question.trim().replace(/[。！.!？?]+$/, "").replace(/^(?:请(?:帮我)?|麻烦(?:帮我)?|帮我)\s*/, "");
@@ -45,17 +56,33 @@ export function parseArticleUpdateReply(question: string): "accept" | "decline" 
 }
 
 export function renderFreshnessReview(_title: string, review: FreshnessReview): string {
-  const incomplete = review.incomplete.length || review.unverified.some((item) => item.reason.includes("尚未完成"));
+  const unfinished = (reason: string): boolean => reason.includes("尚未完成");
+  const incomplete = review.incomplete.length
+    || review.unverified.some((item) => unfinished(item.reason))
+    || (review.followUp ?? []).some((item) => unfinished(item.reason));
+  const followUp = renderFollowUp(review);
   if (!review.updates.length) {
-    if (incomplete) return t("freshnessIncomplete");
-    return review.unverified.length ? t("freshnessInsufficient") : t("freshnessNone");
+    const parts: string[] = [];
+    if (incomplete) parts.push(t("freshnessIncomplete"));
+    else if (review.unverified.length) parts.push(t("freshnessInsufficient"));
+    if (followUp) parts.push(followUp);
+    return parts.length ? parts.join("\n\n") : t("freshnessNone");
   }
   const updates = review.updates.map((update, index) => renderFreshnessUpdate(index, update));
   return [
     ...(incomplete ? [t("freshnessPartial")] : []),
     updates.join("\n\n---\n\n"),
+    ...(followUp ? [followUp] : []),
     t("freshnessAsk")
   ].join("\n\n");
+}
+
+function renderFollowUp(review: FreshnessReview): string {
+  const seen = new Set((review.followUp ?? []).map((item) => item.text));
+  const items = [...(review.followUp ?? []), ...review.unverified.filter((item) => !seen.has(item.text))];
+  if (!items.length) return "";
+  const lines = items.map((item) => `- ${markdownText(item.text)}：${markdownText(item.reason)}`);
+  return [t("freshnessFollowUp"), ...lines].join("\n");
 }
 
 export function renderFreshnessApplied(applied: number, remaining: number): string {
@@ -92,7 +119,9 @@ function renderFreshnessUpdate(index: number, update: FreshnessReview["updates"]
   if (update.before) parts.push(`**原文**\n> ${markdownText(update.before)}`);
   if (update.action !== "删除" && update.after) parts.push(`**建议**\n${emphasizeProse(update.after)}`);
   if (update.reason) parts.push(`*说明*　${markdownText(update.reason)}`);
-  parts.push(`**依据**　${markdownText(update.source.quote)} · [${markdownText(update.source.title)}](<${update.source.url}>)`);
+  parts.push(update.source.url
+    ? `**依据**　${markdownText(update.source.quote)} · [${markdownText(update.source.title)}](<${update.source.url}>)`
+    : `**依据**　${t("freshnessModelBasis")}`);
   return parts.join("\n\n");
 }
 

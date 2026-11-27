@@ -1,4 +1,5 @@
 import { requestUrl } from "obsidian";
+import { t } from "../../i18n";
 import type { AiModelConfig, ChatUsage } from "../../types";
 import type { ChatRequestMessage } from "../chat/chat-context";
 import { estimateChatUsage, parseChatStreamData } from "../chat/chat-stream";
@@ -7,6 +8,8 @@ const REQUEST_TIMEOUT_MS = 360000;
 
 export class EmptyAiResponseError extends Error {}
 export class InvalidAiJsonError extends Error {}
+/** The model endpoint could not be reached. Callers can keep results from earlier batches. */
+export class ModelConnectionError extends Error {}
 
 export class AiTransport {
   constructor(private skillInstructions = "") {}
@@ -21,8 +24,12 @@ export class AiTransport {
       : await this.requestText(config, messages, true);
     try {
       return parseJsonResponse<T>(text);
-    } catch (error) {
-      throw new InvalidAiJsonError(`${error instanceof Error ? error.message : String(error)} Raw response: ${text.slice(0, 500)}`);
+    } catch {
+      console.warn("KnowFlow: invalid model JSON.", {
+        responseChars: text.length,
+        streamRequested: Boolean(handlers?.onReasoning)
+      });
+      throw new InvalidAiJsonError(t("modelInvalidJson"));
     }
   }
 
@@ -37,7 +44,7 @@ export class AiTransport {
         onContent: (delta) => { text += delta; },
         onReasoning,
         onUsage: () => {}
-      });
+      }, true);
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (text || !/^AI stream failed:/.test(message)) throw error;
@@ -60,18 +67,7 @@ export class AiTransport {
       messages: this.withSkill(messages),
       temperature: 0.2
     };
-    if (json) {
-      body.response_format = config.runtime === "openai-compatible"
-        ? { type: "json_object" }
-        : {
-            type: "json_schema",
-            json_schema: {
-              name: "response",
-              strict: false,
-              schema: { type: "object" }
-            }
-          };
-    }
+    if (json) body.response_format = jsonResponseFormat(config);
 
     const response = await withTimeout(
       requestUrl({
@@ -83,7 +79,9 @@ export class AiTransport {
       }),
       REQUEST_TIMEOUT_MS,
       `AI request timed out after ${REQUEST_TIMEOUT_MS / 1000}s. Check that ${baseUrl} is reachable.`
-    );
+    ).catch((error: unknown) => {
+      throw asConnectionError(error, baseUrl);
+    });
 
     if (response.status < 200 || response.status >= 300) {
       throw new Error(`AI request failed: ${response.text?.slice(0, 220) || `HTTP ${response.status}`}`);
@@ -102,7 +100,8 @@ export class AiTransport {
       onContent: (delta: string) => void;
       onReasoning: (delta: string) => void;
       onUsage: (usage: ChatUsage) => void;
-    }
+    },
+    json = false
   ): Promise<ChatUsage> {
     assertModelConfig(config);
     const baseUrl = config.apiBaseUrl.trim().replace(/\/+$/g, "");
@@ -127,7 +126,8 @@ export class AiTransport {
           messages: this.withSkill(messages),
           temperature: 0.2,
           stream: true,
-          stream_options: { include_usage: true }
+          stream_options: { include_usage: true },
+          ...(json ? { response_format: jsonResponseFormat(config) } : {})
         }),
         signal: controller.signal
       });
@@ -200,6 +200,32 @@ export class AiTransport {
       content: `${system.content}\n\n遵循本次 Skill 的操作规则；任务的资料边界、输出协议和校验约束优先。\n${this.skillInstructions}`
     }, ...rest];
   }
+}
+
+function jsonResponseFormat(config: AiModelConfig): Record<string, unknown> {
+  return config.runtime === "openai-compatible"
+    ? { type: "json_object" }
+    : { type: "json_schema", json_schema: { name: "response", strict: false, schema: { type: "object" } } };
+}
+
+function isTransportFailure(message: string): boolean {
+  const text = message.trim();
+  return /^(network error|failed to fetch|fetch failed)$/i.test(text)
+    || /^net::ERR_/i.test(text)
+    || /ECONNRESET|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EPIPE|socket hang up|UND_ERR_/.test(text);
+}
+
+function asConnectionError(error: unknown, baseUrl: string): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!isTransportFailure(message)) return error instanceof Error ? error : new Error(message);
+  let host = baseUrl;
+  try {
+    host = new URL(baseUrl).host || baseUrl;
+  } catch {
+    host = baseUrl;
+  }
+  const bare = /^(network error|failed to fetch|fetch failed)$/i.test(message.trim());
+  return new ModelConnectionError(t("modelUnreachable", { host, detail: bare ? "" : `（${message}）` }));
 }
 
 function assertModelConfig(config: AiModelConfig): void {

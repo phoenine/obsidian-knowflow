@@ -26,6 +26,12 @@ export function isArticleEditRequest(question: string): boolean {
   return false;
 }
 
+/** A yes to "要把这些内容写进文章吗？". Anything longer goes through intent detection. */
+export function isEditOfferAccepted(reply: string): boolean {
+  const text = reply.trim().replace(/[。！!.]+$/, "");
+  return /^(?:要|好|好的|可以|行|嗯|写|写吧|写进去|写进文章|加上|补充|ok|yes)$/i.test(text);
+}
+
 /** The model only sees this excerpt. `before` is still matched against the full note. */
 export function articleForEdit(article: string, instruction: string): { text: string; truncated: boolean } {
   if (article.length <= ARTICLE_EDIT_CHARS) return { text: article, truncated: false };

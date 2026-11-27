@@ -395,7 +395,6 @@ function renderPendingSummary(parent: HTMLElement, sourceLabel: string): void {
 function compactErrorMessage(error: string): string {
   const firstLine = error.split("\n").find((line) => line.trim())?.trim() ?? error.trim();
   return firstLine
-    .replace(/\s*Raw response:.*$/s, "")
     .replace(/\s{2,}/g, " ")
     .slice(0, 120);
 }

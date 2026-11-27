@@ -1,6 +1,6 @@
 import type { TFile, Vault } from "obsidian";
 import type { AiModelConfig } from "../../types";
-import { AiTransport, EmptyAiResponseError, InvalidAiJsonError } from "../ai/ai-transport";
+import { AiTransport, EmptyAiResponseError, InvalidAiJsonError, ModelConnectionError } from "../ai/ai-transport";
 import { prepareArticleForAi } from "../clipping/managed-content";
 import { splitArticleSections } from "./article-sections";
 import type { NoteOperationCoordinator } from "../core/note-operation-coordinator";
@@ -14,7 +14,7 @@ const JUDGE_EXCERPT_CHARS = 2400;
 const DISCOVERY_CONTEXT_CHARS = 1800;
 const SEARCH_BUDGET = 12;
 const SEARCH_CONCURRENCY = 4;
-type ResearchStage = "阅读全文" | "检索证据" | "判断并生成更新";
+type ResearchStage = "阅读全文" | "依据自身知识判断" | "检索证据" | "判断并生成更新";
 
 export const KNOWLEDGE_STATUSES = [
   "仍然成立", "只需换例子", "条件变了", "已经失效",
@@ -50,12 +50,15 @@ export interface FreshnessReview {
   updates: FreshnessUpdate[];
   held: Array<{ section: string; text: string }>;
   unverified: Array<{ section: string; text: string; reason: string }>;
+  /** Claims the model would not judge. Searched only when DeepSeek Search is on. */
+  followUp: Array<{ section: string; text: string; reason: string }>;
 }
 
 interface Claim {
   quote: string;
   section: string;
   query: string;
+  pendingReason?: string;
 }
 
 interface DiscoveryQuery {
@@ -69,6 +72,8 @@ interface Analysis {
   coreClaimQuote: string;
   claims: Claim[];
   discovery: DiscoveryQuery[];
+  /** A later section batch lost the model connection. Claims already read are still usable. */
+  interrupted: boolean;
 }
 
 interface Judgment {
@@ -91,9 +96,6 @@ export class ArticleFreshness {
     onReasoning?: (delta: string) => void
   ): Promise<FreshnessReview> {
     if (file.extension !== "md") throw new Error("时效检查仅适用于 Markdown 笔记。");
-    if (!searchKey.trim()) {
-      throw new Error("请在 KnowFlow → AI Models 配置 DeepSeek Search 密钥或官方 DeepSeek 模型密钥。");
-    }
     return this.skills.run("article-freshness", async (instructions) => {
       const original = await this.vault.read(file);
       const article = prepareArticleForAi(original);
@@ -109,61 +111,96 @@ export class ArticleFreshness {
         onReasoning(delta);
       } : undefined;
       const analysis = await this.analyze(transport, model, file.basename, article, prose, (detail) => onStage?.("阅读全文", detail), note);
-      const queries = uniqueQueries([...analysis.discovery.map(({ query }) => query), ...analysis.claims.map((claim) => claim.query)]);
-      const searched = queries.slice(0, SEARCH_BUDGET);
-      const pending = new Set(queries.slice(SEARCH_BUDGET));
-      onStage?.("检索证据");
-      const evidence = new Map<string, PublicEvidence[]>();
-      let nextSourceId = 1;
-      let finished = 0;
-      const foundGroups = await mapPool(searched, SEARCH_CONCURRENCY, async (query) => {
-        const found = await findPublicEvidence([query], searchKey);
-        finished += 1;
-        onStage?.("检索证据", `${finished}/${searched.length}`);
-        return found;
-      });
-      for (const [index, query] of searched.entries()) {
-        evidence.set(query, foundGroups[index].map((item) => ({ ...item, id: nextSourceId++ })));
-      }
-
-      // A query only counts as covered when it returned sources; an empty result is not evidence either way.
-      const hasSources = (query: string): boolean => (evidence.get(query)?.length ?? 0) > 0;
-      const covered = analysis.claims.filter((claim) => hasSources(claim.query));
-      const incomplete = [...new Set(analysis.claims.filter((claim) => pending.has(claim.query)).map((claim) => claim.section))];
       const review: FreshnessReview = {
         path: file.path, original, checkedOn, coreConclusion: analysis.coreConclusion,
-        verdict: "", incomplete, updates: [], held: [], unverified: []
+        verdict: "", incomplete: [], updates: [], held: [], unverified: [], followUp: []
       };
-      for (const claim of analysis.claims) {
+      if (analysis.interrupted) {
+        review.unverified.push({ section: "正文", text: "后续章节", reason: "连接中断，后面的章节尚未完成。" });
+      }
+      const coreClaimQuote = analysis.claims.some((claim) => claim.quote === analysis.coreClaimQuote)
+        ? analysis.coreClaimQuote : "";
+      const knowledge = await this.judgeFromKnowledge(
+        transport, model, review, prose, analysis, coreClaimQuote, onStage, note
+      );
+      // Model judgments stay either way. Search only adds the claims the model would not decide.
+      if (!searchKey.trim()) {
+        this.recordFollowUp(review, knowledge.pending, analysis.discovery.length > 0);
+        review.verdict = verdictOf(review, knowledge.coreStillHolds, [], coreClaimQuote);
+        return review;
+      }
+
+      const queries = uniqueQueries([
+        ...analysis.discovery.map(({ query }) => query),
+        ...knowledge.pending.map((claim) => claim.query)
+      ]);
+      const searched = queries.slice(0, SEARCH_BUDGET);
+      const pending = new Set(queries.slice(SEARCH_BUDGET));
+      const failedQueries = new Set<string>();
+      const evidence = new Map<string, PublicEvidence[]>();
+      if (searched.length) {
+        onStage?.("检索证据");
+        let nextSourceId = 1;
+        let finished = 0;
+        const foundGroups = await mapPool(searched, SEARCH_CONCURRENCY, async (query) => {
+          try {
+            const found = await findPublicEvidence([query], searchKey);
+            finished += 1;
+            onStage?.("检索证据", `${finished}/${searched.length}`);
+            return found;
+          } catch {
+            finished += 1;
+            onStage?.("检索证据", `${finished}/${searched.length}`);
+            return undefined;
+          }
+        });
+        for (const [index, query] of searched.entries()) {
+          const found = foundGroups[index];
+          if (!found) {
+            failedQueries.add(query);
+            continue;
+          }
+          evidence.set(query, found.map((item) => ({ ...item, id: nextSourceId++ })));
+        }
+      }
+
+      const hasSources = (query: string): boolean => (evidence.get(query)?.length ?? 0) > 0;
+      const covered = knowledge.pending.filter((claim) => !pending.has(claim.query) && hasSources(claim.query));
+      const incomplete = [...new Set(knowledge.pending.filter((claim) => pending.has(claim.query)).map((claim) => claim.section))];
+      for (const claim of knowledge.pending) {
         if (pending.has(claim.query)) {
           review.unverified.push({ section: claim.section, text: claim.quote, reason: "检索预算已用完，此章尚未完成。" });
+        } else if (failedQueries.has(claim.query)) {
+          review.unverified.push({ section: claim.section, text: claim.quote, reason: "公开检索失败。" });
         } else if (!hasSources(claim.query)) {
           review.unverified.push({ section: claim.section, text: claim.quote, reason: "没有检索到可核对的公开资料。" });
         }
       }
       const discoveries: DiscoveryQuery[] = [];
       for (const discovery of analysis.discovery) {
-        if (!hasSources(discovery.query)) continue;
-        if (discovery.anchors.length) {
-          discoveries.push(discovery);
-        } else {
-          review.unverified.push({ section: "正文", text: "补充检索", reason: "没有找到可用于补充的正文锚点，本次判断尚未完成。" });
+        if (pending.has(discovery.query)) continue;
+        if (failedQueries.has(discovery.query)) {
+          review.unverified.push({ section: "正文", text: "补充检索", reason: "公开检索失败。" });
+          continue;
         }
+        if (!hasSources(discovery.query)) continue;
+        if (discovery.anchors.length) discoveries.push(discovery);
+        else review.unverified.push({ section: "正文", text: "补充检索", reason: "没有找到可用于补充的正文锚点，本次判断尚未完成。" });
       }
       if (!covered.length && !discoveries.length) {
-        review.verdict = analysis.claims.length || analysis.discovery.length ? "暂时无法判断" : "暂无需要检查的高风险说法";
+        review.verdict = verdictOf(review, knowledge.coreStillHolds, incomplete, coreClaimQuote);
         return review;
       }
 
       onStage?.("判断并生成更新");
       if (noted) note?.("\n\n");
-      const coreClaimQuote = covered.some((claim) => claim.quote === analysis.coreClaimQuote) ? analysis.coreClaimQuote : "";
-      const batches = packJudgmentBatches(covered, discoveries, evidence, { ...analysis, coreClaimQuote }, checkedOn);
-      let coreStillHolds: unknown = true;
+      const evidenceCore = covered.some((claim) => claim.quote === coreClaimQuote) ? coreClaimQuote : "";
+      const batches = packJudgmentBatches(covered, discoveries, evidence, { ...analysis, coreClaimQuote: evidenceCore }, checkedOn);
+      let coreStillHolds = knowledge.coreStillHolds;
       for (const [index, batch] of batches.entries()) {
         if (index > 0) note?.("\n\n");
         const judged = batch.content.length <= JUDGE_BATCH_CHARS
-          ? await this.judge(transport, model, batch.content, note)
+          ? await this.judge(transport, model, batch.content)
           : undefined;
         if (!judged || !Array.isArray(judged.items)) {
           const unfinished = batch.claims.length ? batch.claims : [{ section: "正文", quote: "补充检索" }];
@@ -172,8 +209,8 @@ export class ArticleFreshness {
           }
           continue;
         }
-        this.acceptJudgment(review, judged.items, prose, batch.sources);
-        if (batch.claims.some((claim) => claim.quote === coreClaimQuote)) coreStillHolds = judged.coreStillHolds;
+        this.acceptJudgment(review, judged.items, prose, batch);
+        if (evidenceCore && batch.claims.some((claim) => claim.quote === evidenceCore)) coreStillHolds = judged.coreStillHolds;
       }
       review.verdict = verdictOf(review, coreStillHolds, incomplete, coreClaimQuote);
       return review;
@@ -216,31 +253,42 @@ export class ArticleFreshness {
     let purpose = "";
     let coreConclusion = "";
     let coreClaimQuote = "";
+    let interrupted = false;
+    let sawModel = false;
     const discovery: DiscoveryQuery[] = [];
     const batches = sectionBatches(article);
     for (const [index, batch] of batches.entries()) {
       onProgress?.(batches.length > 1 ? `${index + 1}/${batches.length}` : undefined);
       if (index > 0) onReasoning?.("\n\n");
-      const payload = await transport.requestJson<Omit<Analysis, "discovery"> & { discoveryQueries?: unknown }>(model, [{
-        role: "system",
-        content: [
-          "按 Skill 做全文分析。理解这一批正文的目的、核心观点和知识边界。",
-          "提取所有具有实质性时效风险的说法，包括技术能力、限制、适用边界、方案优劣和行业判断。不要只找带有「目前、最新、唯一」的句子。原理、公式和历史叙述默认不提取。",
-          "quote 必须是这一批正文中的连续原文。合并重复说法。没有符合条件的说法就返回空数组，不要凑数。",
-          "只有某条 claims.quote 直接支撑 coreConclusion 时，才把该条原文填入 coreClaimQuote。核心结论没有对应的待核验说法时留空。",
-          "query 是验证这句说法的检索词，discoveryQueries 是发现该主题遗漏进展的检索词，各不超过 80 字，不要使用固定模板。只输出 JSON。"
-        ].join("\n")
-      }, {
-        role: "user",
-        content: JSON.stringify({
-          title, section: batch.title, article: batch.text,
-          responseShape: {
-            purpose: "", coreConclusion: "", coreClaimQuote: "", domains: ["领域"],
-            claims: [{ quote: "", section: "", query: "" }],
-            discoveryQueries: [""]
-          }
-        })
-      }], { onReasoning });
+      let payload: Omit<Analysis, "discovery" | "interrupted"> & { discoveryQueries?: unknown };
+      try {
+        payload = await transport.requestJson<typeof payload>(model, [{
+          role: "system",
+          content: [
+            "按 Skill 做全文分析。理解这一批正文的目的、核心观点和知识边界。",
+            "提取所有具有实质性时效风险的说法，包括技术能力、限制、适用边界、方案优劣和行业判断。不要只找带有「目前、最新、唯一」的句子。原理、公式和历史叙述默认不提取。",
+            "quote 必须是这一批正文中的连续原文。合并重复说法。没有符合条件的说法就返回空数组，不要凑数。",
+            "只有某条 claims.quote 直接支撑 coreConclusion 时，才把该条原文填入 coreClaimQuote。核心结论没有对应的待核验说法时留空。",
+            "query 是验证这句说法的检索词，discoveryQueries 是发现该主题遗漏进展的检索词，各不超过 80 字，不要使用固定模板。只输出 JSON。"
+          ].join("\n")
+        }, {
+          role: "user",
+          content: JSON.stringify({
+            title, section: batch.title, article: batch.text,
+            responseShape: {
+              purpose: "", coreConclusion: "", coreClaimQuote: "", domains: ["领域"],
+              claims: [{ quote: "", section: "", query: "" }],
+              discoveryQueries: [""]
+            }
+          })
+        }]);
+      } catch (error) {
+        if (!(error instanceof ModelConnectionError)) throw error;
+        if (!sawModel) throw error;
+        interrupted = true;
+        break;
+      }
+      sawModel = true;
       if (!payload || !Array.isArray(payload.claims)) throw new Error("模型未返回有效的知识检查结果。");
       if (!purpose && typeof payload.purpose === "string") purpose = payload.purpose.slice(0, 300);
       if (!coreConclusion && typeof payload.coreConclusion === "string" && payload.coreConclusion.trim()) {
@@ -265,14 +313,140 @@ export class ArticleFreshness {
         }
       }
     }
-    return { purpose, coreConclusion, coreClaimQuote, claims, discovery };
+    return { purpose, coreConclusion, coreClaimQuote, claims, discovery, interrupted };
+  }
+
+  private recordFollowUp(review: FreshnessReview, pending: Claim[], discoveryLeft: boolean): void {
+    for (const claim of pending) {
+      review.followUp.push({
+        section: claim.section,
+        text: claim.quote,
+        reason: claim.pendingReason ?? "模型认为需要进一步核对。"
+      });
+    }
+    if (discoveryLeft) {
+      review.followUp.push({ section: "正文", text: "补充检索", reason: "未开启公开检索，主题遗漏尚未核对。" });
+    }
+  }
+
+  private async judgeFromKnowledge(
+    transport: AiTransport,
+    model: AiModelConfig,
+    review: FreshnessReview,
+    prose: string,
+    analysis: Analysis,
+    coreClaimQuote: string,
+    onStage?: (stage: ResearchStage, detail?: string) => void,
+    onReasoning?: (delta: string) => void
+  ): Promise<{ coreStillHolds: unknown; pending: Claim[] }> {
+    const batches = packKnowledgeBatches({ ...analysis, coreClaimQuote }, review.checkedOn);
+    const pending: Claim[] = [];
+    let coreStillHolds: unknown = true;
+    if (!batches.length) return { coreStillHolds, pending };
+    onStage?.("依据自身知识判断");
+    for (const [index, batch] of batches.entries()) {
+      if (index > 0) onReasoning?.("\n\n");
+      if (batch.content.length > JUDGE_BATCH_CHARS) {
+        pending.push(...batch.claims.map((claim) => ({
+          ...claim, pendingReason: "这一批超出判断请求的字符预算，待进一步核对。"
+        })));
+        continue;
+      }
+      let judged: Judgment | undefined;
+      let offline = false;
+      try {
+        judged = await this.requestKnowledge(transport, model, batch.content);
+      } catch (error) {
+        if (!(error instanceof ModelConnectionError)) throw error;
+        offline = true;
+      }
+      if (offline || !judged || !Array.isArray(judged.items)) {
+        pending.push(...batch.claims.map((claim) => ({
+          ...claim,
+          pendingReason: offline ? "连接中断，这一批尚未完成。" : "这一批判断没有返回可用结果。"
+        })));
+        continue;
+      }
+      const follow = this.acceptKnowledge(review, judged.items, prose, batch.claims);
+      pending.push(...follow);
+      if (batch.claims.some((claim) => claim.quote === coreClaimQuote) && !follow.some((claim) => claim.quote === coreClaimQuote)) {
+        coreStillHolds = judged.coreStillHolds;
+      }
+    }
+    return { coreStillHolds, pending };
+  }
+
+  private async requestKnowledge(
+    transport: AiTransport,
+    model: AiModelConfig,
+    content: string
+  ): Promise<Judgment | undefined> {
+    try {
+      return await transport.requestJson<Judgment>(model, [{
+        role: "system",
+        content: [
+          "这一步只依据自身知识，输入里没有公开资料。能判断的直接给出可写入更新，不要链接。",
+          "不要因为没有来源就改成需要进一步核对。Skill 里关于来源链接，以及「没有反驳不代表仍成立」，只在后一步对照公开资料时使用。",
+          "逐条判断本批的 claims，quote 原样复制。仍然成立无需 after。需要改写时给出 action、before、after 和 reason，补充时从本批的 claims 中选 before。",
+          "没有把握、或取决于训练数据之后才知道的版本、接口和数据时，才把 needsVerification 设为 true。只输出 JSON。"
+        ].join("\n")
+      }, { role: "user", content }]);
+    } catch (error) {
+      if (error instanceof InvalidAiJsonError || error instanceof EmptyAiResponseError) return undefined;
+      throw error;
+    }
+  }
+
+  private acceptKnowledge(
+    review: FreshnessReview,
+    items: unknown[],
+    prose: string,
+    claims: Claim[]
+  ): Claim[] {
+    const known = new Set(claims.map((claim) => claim.quote));
+    const handled = new Set<string>();
+    const follow = new Set<string>();
+    for (const item of items) {
+      if (!item || typeof item !== "object") continue;
+      const record = item as {
+        quote?: unknown; section?: unknown; status?: unknown; action?: unknown;
+        before?: unknown; after?: unknown; reason?: unknown; needsVerification?: unknown;
+      };
+      const quote = typeof record.quote === "string" ? record.quote.trim() : "";
+      const before = typeof record.before === "string" ? record.before.trim() : "";
+      const claimQuote = quote || before;
+      if (!known.has(claimQuote)) continue;
+      const status = KNOWLEDGE_STATUSES.find((candidate) => candidate === record.status);
+      if (record.needsVerification === true || status === "证据不足") {
+        follow.add(claimQuote);
+        continue;
+      }
+      if (!status) continue;
+      const after = typeof record.after === "string" ? record.after.trim() : "";
+      const reason = typeof record.reason === "string" ? record.reason.trim().slice(0, 500) : "";
+      const section = typeof record.section === "string" && record.section.trim() ? record.section.trim() : "正文";
+      if (status === "仍然成立" && quote && located(prose, quote)) {
+        review.held.push({ section, text: quote });
+        handled.add(claimQuote);
+        continue;
+      }
+      const action = actionFor(status, record.action);
+      const anchor = status === "缺少重要知识" ? before : claimQuote;
+      if (!action || !reason || !known.has(anchor) || !located(prose, anchor)) continue;
+      if (action !== "删除" && !after) continue;
+      review.updates.push({
+        status, action, section, before: anchor, after, reason,
+        source: { title: "模型知识", url: "", date: "", quote: "" }
+      });
+      handled.add(claimQuote);
+    }
+    return claims.filter((claim) => follow.has(claim.quote) || !handled.has(claim.quote));
   }
 
   private async judge(
     transport: AiTransport,
     model: AiModelConfig,
-    content: string,
-    onReasoning?: (delta: string) => void
+    content: string
   ): Promise<Judgment | undefined> {
     try {
       return await transport.requestJson<Judgment>(model, [{
@@ -280,12 +454,12 @@ export class ArticleFreshness {
         content: [
           "按 Skill 逐条判断，并生成可写入文章的更新。材料不足时判为证据不足。",
           "没有反驳不代表仍然成立，没有支持不代表已经失效。新技术出现不代表旧技术失效。无法确认发表当时的情况时，不要区分已经失效和原文有误。",
-          "缺少的重要知识必须扣住文章目的。用补充，before 从该检索的 anchors 中选一段原文，after 填新增段落。",
-          "每项的 sourceIds 指向 sources 中的证据。证据引用必须是指定来源片段中的连续原文。性能、倍数和成本要核对条件是否一致。证据冲突且无法解释时判为证据不足。只输出 JSON。"
+          "核对已有说法时，quote 从本批 claims 原样复制。缺少的重要知识必须扣住文章目的。用补充，before 从该检索的 anchors 中选一段原文，after 填新增段落。",
+          "每项的 sourceId 必须来自该条说法或该次补充检索的 sourceIds。证据引用必须是指定来源片段中的连续原文。性能、倍数和成本要核对条件是否一致。证据冲突且无法解释时判为证据不足。只输出 JSON。"
         ].join("\n")
-      }, { role: "user", content }], { onReasoning });
+      }, { role: "user", content }]);
     } catch (error) {
-      if (error instanceof InvalidAiJsonError || error instanceof EmptyAiResponseError) return undefined;
+      if (error instanceof InvalidAiJsonError || error instanceof EmptyAiResponseError || error instanceof ModelConnectionError) return undefined;
       throw error;
     }
   }
@@ -294,40 +468,71 @@ export class ArticleFreshness {
     review: FreshnessReview,
     items: unknown[],
     prose: string,
-    sources: PublicEvidence[]
+    batch: JudgmentRequest
   ): void {
+    const resolved = new Set<string>();
+    const reject = (claim: Claim | undefined, reason: string): void => {
+      if (!claim || resolved.has(claim.quote)) return;
+      resolved.add(claim.quote);
+      review.unverified.push({ section: claim.section, text: claim.quote, reason });
+    };
     for (const item of items) {
       if (!item || typeof item !== "object") continue;
       const record = item as {
         quote?: unknown; section?: unknown; status?: unknown; action?: unknown;
         before?: unknown; after?: unknown; reason?: unknown; sourceId?: unknown; evidenceQuote?: unknown;
       };
-      const status = KNOWLEDGE_STATUSES.find((candidate) => candidate === record.status);
-      if (!status) continue;
       const quote = typeof record.quote === "string" ? record.quote.trim() : "";
       const before = typeof record.before === "string" ? record.before.trim() : "";
-      const after = typeof record.after === "string" ? record.after.trim() : "";
-      const reason = typeof record.reason === "string" ? record.reason.trim().slice(0, 500) : "";
-      const section = typeof record.section === "string" && record.section.trim() ? record.section.trim() : "正文";
-      const source = citedSource(sources, record);
-      if (status === "仍然成立" && quote && located(prose, quote)) {
-        if (source) review.held.push({ section, text: quote });
-        else if (!review.unverified.some((entry) => entry.text === quote)) {
-          review.unverified.push({ section, text: quote, reason: "没有可以核对的引用依据。" });
-        }
+      const status = KNOWLEDGE_STATUSES.find((candidate) => candidate === record.status);
+      const discovery = status === "缺少重要知识";
+      const anchor = discovery ? before : quote || before;
+      const claim = discovery || !anchor ? undefined : batch.claims.find((candidate) => candidate.quote === anchor)
+        ?? batch.claims.find((candidate) => candidate.quote.replace(/[。！？.!?]+$/, "") === anchor);
+      if (!discovery && !claim) continue;
+      if (!status) {
+        reject(claim, "核对后无法形成可写入的更新。");
         continue;
       }
+      const after = typeof record.after === "string" ? record.after.trim() : "";
+      const reason = typeof record.reason === "string" ? record.reason.trim().slice(0, 500) : "";
+      const section = claim?.section ?? (typeof record.section === "string" && record.section.trim() ? record.section.trim() : "正文");
       if (status === "证据不足") {
-        review.unverified.push({ section, text: quote || before, reason: reason || "证据不足。" });
+        reject(claim, reason || "证据不足。");
+        continue;
+      }
+      if (!located(prose, anchor)) {
+        reject(claim, "建议对不上原文，没有写入。");
+        continue;
+      }
+      const sourceId = record.sourceId;
+      const sourceAllowed = typeof sourceId === "number" && (claim
+        ? claim.sourceIds.includes(sourceId)
+        : batch.discovery.some((entry) => entry.anchors.includes(anchor) && entry.sourceIds.includes(sourceId)));
+      const source = sourceAllowed ? citedSource(batch.sources, record) : undefined;
+      if (!source) {
+        reject(claim, "没有可以核对的引用依据。");
+        continue;
+      }
+      if (status === "仍然成立" && claim) {
+        review.held.push({ section, text: anchor });
+        resolved.add(claim.quote);
         continue;
       }
       const action = actionFor(status, record.action);
-      const anchor = status === "缺少重要知识" ? before : quote || before;
-      if (!action || !reason || !source || !anchor || !located(prose, anchor)) continue;
-      if (action !== "删除" && !after) continue;
-      if (action !== "补充" && anchor !== (quote || before)) continue;
-      if ((action === "修正" || action === "替换") && !hasSupportedNumericChanges(anchor, after, source.quote)) continue;
+      if (!action || !reason || (action !== "删除" && !after)) {
+        reject(claim, "没有给出可写入的内容。");
+        continue;
+      }
+      if ((action === "修正" || action === "替换") && !hasSupportedNumericChanges(anchor, after, source.quote)) {
+        reject(claim, "依据里的数字对不上，没有写入。");
+        continue;
+      }
       review.updates.push({ status, action, section, before: anchor, after, reason, source });
+      if (claim) resolved.add(claim.quote);
+    }
+    for (const claim of batch.claims) {
+      reject(claim, "核对后无法形成可写入的更新。");
     }
   }
 }
@@ -449,7 +654,7 @@ function verdictOf(review: FreshnessReview, coreStillHolds: unknown, incomplete:
     item.before === coreClaimQuote && (item.status === "已经失效" || item.status === "原文有误"));
   if (coreStillHolds === false && invalidated) return "核心结论需要重新审视";
   if (review.updates.length) return "局部内容需要更新";
-  if (review.unverified.length) return "暂时无法判断";
+  if (review.unverified.length || review.followUp.length) return "暂时无法判断";
   if (review.held.length) return "未发现明显过时内容";
   return "暂无需要检查的高风险说法";
 }
@@ -495,7 +700,8 @@ interface JudgmentBatch {
 }
 
 interface JudgmentRequest {
-  claims: Claim[];
+  claims: Array<Claim & { sourceIds: number[] }>;
+  discovery: Array<DiscoveryQuery & { sourceIds: number[] }>;
   content: string;
   sources: PublicEvidence[];
 }
@@ -517,9 +723,7 @@ function judgmentRequest(
     }
     return source.id;
   });
-  const claims = batch.claims.map(({ quote, section, query }) => ({
-    quote, section: section.slice(0, 200), query, sourceIds: sourceIds(query)
-  }));
+  const claims = batch.claims.map((claim) => ({ ...claim, sourceIds: sourceIds(claim.query) }));
   const discovery = batch.discovery.map((entry) => ({ ...entry, sourceIds: sourceIds(entry.query) }));
   const sources = [...sourcesById.values()];
   const content = JSON.stringify({
@@ -527,7 +731,7 @@ function judgmentRequest(
     purpose: analysis.purpose,
     coreConclusion: analysis.coreConclusion,
     coreClaimQuote: analysis.coreClaimQuote,
-    claims,
+    claims: claims.map(({ quote, section, query, sourceIds }) => ({ quote, section: section.slice(0, 200), query, sourceIds })),
     discovery,
     sources: sources.map(({ id, title, date, excerpts }) => ({ id, title: title.slice(0, 200), date, excerpts })),
     responseShape: {
@@ -539,7 +743,43 @@ function judgmentRequest(
       }]
     }
   });
-  return { claims: batch.claims, content, sources };
+  return { claims, discovery, content, sources };
+}
+
+function packKnowledgeBatches(analysis: Analysis, checkedOn: string): Array<{ claims: Claim[]; content: string }> {
+  const contentFor = (group: Claim[]): string => JSON.stringify({
+    checkedOn,
+    purpose: analysis.purpose,
+    coreConclusion: analysis.coreConclusion,
+    coreClaimQuote: group.some(({ quote }) => quote === analysis.coreClaimQuote) ? analysis.coreClaimQuote : "",
+    claims: group.map(({ quote, section }) => ({ quote, section: section.slice(0, 200) })),
+    responseShape: {
+      coreStillHolds: true,
+      items: [{
+        quote: "", section: "", needsVerification: false,
+        status: KNOWLEDGE_STATUSES.join(" | "),
+        action: "修正 | 替换 | 补充 | 删除",
+        before: "", after: "", reason: ""
+      }]
+    }
+  });
+  const batches: Array<{ claims: Claim[]; content: string }> = [];
+  let current: Claim[] = [];
+  let prepared: { claims: Claim[]; content: string } | undefined;
+  for (const claim of analysis.claims) {
+    const next = [...current, claim];
+    const content = contentFor(next);
+    if (content.length <= JUDGE_BATCH_CHARS) {
+      current = next;
+      prepared = { claims: [...current], content };
+      continue;
+    }
+    if (prepared) batches.push(prepared);
+    current = [claim];
+    prepared = { claims: [claim], content: contentFor(current) };
+  }
+  if (prepared) batches.push(prepared);
+  return batches;
 }
 
 function packJudgmentBatches(
@@ -595,6 +835,9 @@ function knowledgeNote(update: FreshnessUpdate, checkedOn: string, newline: stri
       ? emphasizeArticleProse(update.after).split(/\r?\n/)
       : ["*原文已按依据更新。*"];
   for (const line of body) lines.push(line.trim() ? `> ${line.trim()}` : ">");
-  lines.push(">", `> *依据*：「${update.source.quote.replace(/\s+/g, " ").trim()}」 <${update.source.url}>`);
+  const basis = update.source.url
+    ? `> *依据*：「${update.source.quote.replace(/\s+/g, " ").trim()}」 <${update.source.url}>`
+    : "> *依据*：模型自身知识。";
+  lines.push(">", basis);
   return lines.join(newline);
 }

@@ -32,6 +32,8 @@ export interface KnowFlowSettings {
   embeddingModel: AiModelConfig;
   dailyNewArticleLimit: number;
   dailyReviewQuestionCap: number;
+  /** When true, freshness checks search claims the model could not judge, and chat may search public facts. */
+  deepseekSearchEnabled: boolean;
   language: "zh" | "en";
 }
 

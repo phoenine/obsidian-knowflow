@@ -285,7 +285,8 @@ function normalizeSettings(savedSettings: unknown): KnowFlowSettings {
       saved.semanticIndexExcludeFolders,
       DEFAULT_SETTINGS.semanticIndexExcludeFolders
     ),
-    language: (saved.language === "en" ? "en" : "zh") as KnowFlowSettings["language"]
+    language: (saved.language === "en" ? "en" : "zh") as KnowFlowSettings["language"],
+    deepseekSearchEnabled: saved.deepseekSearchEnabled === true
   };
   delete (settings as typeof settings & { apiKey?: unknown }).apiKey;
   delete (settings as typeof settings & { knowledgeMapModel?: unknown }).knowledgeMapModel;

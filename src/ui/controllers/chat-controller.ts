@@ -3,9 +3,9 @@ import type { App } from "obsidian";
 import type KnowFlowPlugin from "../../main";
 import type { ChatMessage, ChatThread, ChatUsage, ViewContext } from "../../types";
 import { prepareArticleForAi } from "../../services/clipping/managed-content";
-import { parseArticleUpdateReply, parseFreshnessRequest, renderFreshnessApplied, renderFreshnessCommit, renderFreshnessReview } from "../../services/chat/freshness-chat";
+import { freshnessSelectionMatches, parseArticleUpdateReply, parseFreshnessRequest, renderFreshnessApplied, renderFreshnessCommit, renderFreshnessReview } from "../../services/chat/freshness-chat";
 import { locateCodeBlocks, parseCodeFormatApply, parseCodeFormatRequest, renderCodeFormatReview } from "../../services/chat/code-format-chat";
-import { chatEdits, isArticleEditRequest, renderArticleEditResult, renderArticleEditReview } from "../../services/chat/article-edit-chat";
+import { chatEdits, isArticleEditRequest, isEditOfferAccepted, renderArticleEditResult, renderArticleEditReview } from "../../services/chat/article-edit-chat";
 import { commitNoteEdits, type EditItem } from "../../services/core/note-edits";
 import type { FreshnessReview } from "../../services/learning/article-freshness";
 import { applyFormattingEdits, batchFormattingCandidates, planCodeFormatting, sameCodeIgnoringComments, type FormattingCandidate, type FormattingDecision } from "../../services/clipping/formatting-candidates";
@@ -16,6 +16,7 @@ interface PendingFreshnessReview {
   file: TFile;
   review: FreshnessReview;
   messageId: string;
+  selected: number[];
 }
 
 interface PendingCodeFormat {
@@ -39,6 +40,8 @@ export class ChatController {
   private pendingFreshness = new WeakMap<ChatThread, PendingFreshnessReview>();
   private pendingCodeFormat = new WeakMap<ChatThread, PendingCodeFormat>();
   private pendingArticleEdit = new WeakMap<ChatThread, PendingArticleEdit>();
+  /** An answer that ends by asking whether to put it into the article. */
+  private pendingEditOffer = new WeakMap<ChatThread, string>();
 
   constructor(
     private app: App,
@@ -91,22 +94,26 @@ export class ChatController {
       };
       const result = handlers.replay ? null
         : (await this.handleFreshness(question, thread, file, assistantMessage, refreshMessage, (delta) => {
-          assistantMessage.reasoning += delta;
+          appendReasoning(assistantMessage, delta);
           if (this.activeThread === thread) handlers.onReasoning(assistantMessage);
         })) ?? await this.handleCodeFormat(question, thread, file, assistantMessage, refreshMessage)
           ?? await this.handleArticleEdit(question, thread, file, assistantMessage, refreshMessage, (delta) => {
-            assistantMessage.reasoning += delta;
+            appendReasoning(assistantMessage, delta);
             if (this.activeThread === thread) handlers.onReasoning(assistantMessage);
           });
       if (result !== null) {
         assistantMessage.content = result;
       } else {
         requestUsage = await this.answerQuestion(question, file, thread, assistantMessage, handlers);
+        if (this.pendingEditOffer.get(thread) === assistantMessage.id) {
+          assistantMessage.content = `${assistantMessage.content.trimEnd()}\n\n${t("articleEditOffer")}`;
+        }
       }
       assistantMessage.status = "done";
       assistantMessage.completedAt = new Date().toISOString();
       thread.usage = addChatUsage(thread.usage, requestUsage);
     } catch (error) {
+      if (this.pendingEditOffer.get(thread) === assistantMessage.id) this.pendingEditOffer.delete(thread);
       const message = error instanceof Error ? error.message : String(error);
       if (assistantMessage.kind) assistantMessage.content = "";
       assistantMessage.status = "error";
@@ -145,7 +152,7 @@ export class ChatController {
     }
     const attachedContext = await this.loadAttachedContext(handlers.contextPaths ?? []);
     retrievedContext = [attachedContext, retrievedContext].filter(Boolean).join("\n\n");
-    const searchKey = this.plugin.settings
+    const searchKey = this.plugin.settings?.deepseekSearchEnabled === true
       ? resolveDeepSeekSearchKey(this.plugin.settings, this.app.secretStorage)
       : "";
     const externalContext = searchKey && this.plugin.ai.externalContextForChat
@@ -167,7 +174,7 @@ export class ChatController {
           if (this.activeThread === thread) handlers.onContent(assistantMessage);
         },
         onReasoning: (delta) => {
-          assistantMessage.reasoning += delta;
+          appendReasoning(assistantMessage, delta);
           if (this.activeThread === thread) handlers.onReasoning(assistantMessage);
         },
         onUsage: () => {},
@@ -175,6 +182,14 @@ export class ChatController {
         externalContext
       }
     );
+  }
+
+  /** Empty when DeepSeek Search is off. A missing key is an error only when the user turned search on. */
+  private freshnessSearchKey(): string {
+    if (this.plugin.settings?.deepseekSearchEnabled !== true) return "";
+    const key = resolveDeepSeekSearchKey(this.plugin.settings, this.app.secretStorage);
+    if (!key.trim()) throw new Error(t("deepseekSearchRequired"));
+    return key;
   }
 
   private async handleFreshness(
@@ -212,25 +227,34 @@ export class ChatController {
       return t("freshnessUnchanged");
     }
     if (reply === "accept" && pending) {
-      return this.applyFreshnessUpdates(
-        file, thread, pending.review,
-        new Set(pending.review.updates.map((_, index) => index)),
-        message, progress
-      );
+      if (!pending.selected.length) {
+        this.pendingFreshness.set(thread, { ...pending, messageId: message.id });
+        return t("freshnessSelectFirst");
+      }
+      return this.applyFreshnessUpdates(file, thread, pending.review, new Set(pending.selected), message, progress);
     }
     if (!request) return null;
 
     if (request.kind === "apply") {
       if (!pending) return t("freshnessNoPending");
       const { review } = pending;
-      const selected = new Set(request.numbers === "all"
+      const indexes = request.numbers === "all"
         ? review.updates.map((_, index) => index)
-        : request.numbers.map((number) => number - 1));
-      if ([...selected].some((index) => index < 0 || index >= review.updates.length)) {
-        this.pendingFreshness.set(thread, { ...pending, messageId: message.id });
+        : [...new Set(request.numbers)].map((number) => number - 1);
+      if (indexes.some((index) => index < 0 || index >= review.updates.length)) {
+        this.pendingFreshness.set(thread, { ...pending, selected: [], messageId: message.id });
         return t("freshnessBadIndex", { count: review.updates.length });
       }
-      return this.applyFreshnessUpdates(file, thread, review, selected, message, progress);
+      const chosen = review.updates[indexes[0]];
+      if (request.label && (indexes.length !== 1 || !chosen || !freshnessSelectionMatches(chosen.action, chosen.status, request.label))) {
+        this.pendingFreshness.set(thread, { ...pending, selected: [], messageId: message.id });
+        return t("freshnessPickMismatch", { n: indexes[0] + 1, label: request.label });
+      }
+      this.pendingFreshness.set(thread, { ...pending, selected: indexes, messageId: message.id });
+      if (indexes.length === 1 && chosen) {
+        return t("freshnessPick", { n: indexes[0] + 1, label: `${chosen.action} · ${chosen.status}` });
+      }
+      return t("freshnessPickMany", { list: indexes.map((index) => index + 1).join("、") });
     }
 
     this.pendingFreshness.delete(thread);
@@ -238,13 +262,26 @@ export class ChatController {
     const review = await this.plugin.freshness.check(
       file,
       this.plugin.settings.chatModel,
-      resolveDeepSeekSearchKey(this.plugin.settings, this.app.secretStorage),
+      this.freshnessSearchKey(),
       progress,
       onReasoning
     );
     if (!review.updates.length || !thread.messages.includes(message)) return renderFreshnessReview(file.basename, review);
-    this.pendingFreshness.set(thread, { file, review, messageId: message.id });
+    this.pendingFreshness.set(thread, { file, review, messageId: message.id, selected: review.updates.map((_, index) => index) });
     return renderFreshnessReview(file.basename, review);
+  }
+
+  freshnessSelection(thread: ChatThread, message: ChatMessage): { count: number; selected: readonly number[] } | undefined {
+    const pending = this.pendingFreshness.get(thread);
+    if (!pending || this.activeThread !== thread || thread.messages.at(-1) !== message || pending.messageId !== message.id) return;
+    return { count: pending.review.updates.length, selected: pending.selected };
+  }
+
+  selectFreshnessItems(thread: ChatThread, message: ChatMessage, indexes: number[]): boolean {
+    const pending = this.pendingFreshness.get(thread);
+    if (!pending || !this.freshnessSelection(thread, message) || indexes.some((index) => !pending.review.updates[index])) return false;
+    pending.selected = indexes;
+    return indexes.length > 0;
   }
 
   /**
@@ -254,47 +291,27 @@ export class ChatController {
    */
   replyChoices(thread: ChatThread, message: ChatMessage): Array<{ label: string; reply: string }> {
     if (thread.messages.at(-1) !== message) return [];
+    if (this.pendingEditOffer.get(thread) === message.id) {
+      return [
+        { label: t("articleEditOfferChoice"), reply: "写进文章" },
+        { label: t("freshnessKeepChoice"), reply: "不用" }
+      ];
+    }
     const freshness = this.pendingFreshness.get(thread);
     if (freshness?.messageId === message.id) {
-      if (freshness.review.updates.length === 1) {
-        return [
-          { label: t("freshnessUpdateChoice"), reply: "更新" },
-          { label: t("freshnessKeepChoice"), reply: "不用" }
-        ];
-      }
       return [
         { label: t("freshnessUpdateChoice"), reply: "更新" },
-        ...freshness.review.updates.map((_, index) => ({ label: t("codeFormatChoiceOne", { n: index + 1 }), reply: `应用第 ${index + 1} 个` })),
         { label: t("freshnessKeepChoice"), reply: "不用" }
       ];
     }
     const pending = this.pendingCodeFormat.get(thread);
-    if (pending?.messageId === message.id) {
-      if (pending.items.length === 1) {
-        return [
-          { label: t("freshnessUpdateChoice"), reply: "更新" },
-          { label: t("freshnessKeepChoice"), reply: "不用" }
-        ];
-      }
-      return [
-        { label: t("codeFormatChoiceAll"), reply: "应用全部" },
-        ...pending.items.map((_, index) => ({ label: t("codeFormatChoiceOne", { n: index + 1 }), reply: `应用第 ${index + 1} 个` })),
-        { label: t("freshnessKeepChoice"), reply: "不用" }
-      ];
-    }
-    const articleEdit = this.pendingArticleEdit.get(thread);
-    if (articleEdit?.messageId !== message.id) return [];
-    if (articleEdit.items.length === 1) {
+    if (pending?.messageId === message.id || this.pendingArticleEdit.get(thread)?.messageId === message.id) {
       return [
         { label: t("freshnessUpdateChoice"), reply: "更新" },
         { label: t("freshnessKeepChoice"), reply: "不用" }
       ];
     }
-    return [
-      { label: t("codeFormatChoiceAll"), reply: "应用全部" },
-      ...articleEdit.items.map((_, index) => ({ label: t("codeFormatChoiceOne", { n: index + 1 }), reply: `应用第 ${index + 1} 个` })),
-      { label: t("freshnessKeepChoice"), reply: "不用" }
-    ];
+    return [];
   }
 
   /** A preview is waiting for the reply to come right after it. */
@@ -324,7 +341,7 @@ export class ChatController {
       return summary;
     }
     const next = { ...review, updates: unselected };
-    this.pendingFreshness.set(thread, { file, review: next, messageId: message.id });
+    this.pendingFreshness.set(thread, { file, review: next, messageId: message.id, selected: unselected.map((_, index) => index) });
     return [summary, renderFreshnessReview(file.basename, next)].join("\n\n");
   }
 
@@ -445,6 +462,24 @@ export class ChatController {
     return [t("codeFormatApplied", { count: edited.applied }), ...pending.warnings].join("\n\n");
   }
 
+  /** The last ordinary answer. Reports and previews are not article text. */
+  private previousAnswer(thread: ChatThread, currentMessageId: string): string {
+    const offer = t("articleEditOffer");
+    for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
+      const item = thread.messages[index];
+      if (item.id === currentMessageId || item.role !== "assistant") continue;
+      if (item.status !== "done" || item.kind || !item.content.trim()) return "";
+      const content = item.content.trimEnd();
+      return content.endsWith(offer) ? content.slice(0, -offer.length).trimEnd() : content;
+    }
+    return "";
+  }
+
+  private canEdit(thread: ChatThread, file: TFile | null): boolean {
+    return Boolean(file && file.extension === "md" && file.path === thread.filePath
+      && this.app.vault.getAbstractFileByPath(file.path) === file);
+  }
+
   /** A preview is waiting for the reply to come right after it. */
   private articleEditReviewIsCurrent(thread: ChatThread, file: TFile | null): boolean {
     const pending = this.pendingArticleEdit.get(thread);
@@ -467,10 +502,27 @@ export class ChatController {
     const reviewIsCurrent = this.articleEditReviewIsCurrent(thread, file);
     const reply = reviewIsCurrent ? parseArticleUpdateReply(question) : null;
     const chosen = reviewIsCurrent ? parseCodeFormatApply(question) : null;
-    const request = isArticleEditRequest(question);
+    const offered = this.pendingEditOffer.get(thread);
+    const offerIsCurrent = Boolean(offered && thread.messages.at(-3)?.id === offered);
+    this.pendingEditOffer.delete(thread);
+    let instruction = question;
+    if (offerIsCurrent && parseArticleUpdateReply(question) === "decline") {
+      message.kind = "article-edit";
+      return t("freshnessUnchanged");
+    }
+    let request = isArticleEditRequest(question);
+    if (offerIsCurrent && (isEditOfferAccepted(question) || parseArticleUpdateReply(question) === "accept")) {
+      instruction = "把上一轮回答中的内容补充到文章里。";
+      request = true;
+    }
     if (!request && !reply && !chosen) {
       if (pending) this.pendingArticleEdit.delete(thread);
-      return null;
+      const intent = this.canEdit(thread, file) && this.plugin.ai.classifyArticleEdit
+        ? await this.plugin.ai.classifyArticleEdit(question, this.previousAnswer(thread, message.id))
+        : "none";
+      if (intent === "ask") this.pendingEditOffer.set(thread, message.id);
+      if (intent !== "edit") return null;
+      request = true;
     }
 
     message.kind = "article-edit";
@@ -501,7 +553,12 @@ export class ChatController {
     this.pendingArticleEdit.delete(thread);
     progress(t("readingArticle"));
     const content = await this.app.vault.read(file);
-    const proposal = await this.plugin.ai.proposeArticleEdits(question, content, onReasoning);
+    const proposal = await this.plugin.ai.proposeArticleEdits(
+      instruction,
+      content,
+      onReasoning,
+      this.previousAnswer(thread, message.id)
+    );
     if (!proposal.edits) return t("articleEditInvalid");
     const prepared = chatEdits(content, proposal.edits);
     if (!prepared.items.length) {
@@ -592,6 +649,19 @@ export class ChatController {
     }
     return sections.join("\n\n");
   }
+}
+
+const REASONING_TAIL = 160;
+
+/** The thinking line only shows its tail. Keeping the whole trace makes every token rewrite a huge string. */
+function appendReasoning(message: ChatMessage, delta: string): void {
+  if (!delta) return;
+  if (delta.length >= REASONING_TAIL) {
+    message.reasoning = delta.slice(-REASONING_TAIL);
+    return;
+  }
+  const overflow = message.reasoning.length + delta.length - REASONING_TAIL;
+  message.reasoning = overflow > 0 ? message.reasoning.slice(overflow) + delta : message.reasoning + delta;
 }
 
 function createChatThread(context: ViewContext, file: TFile | null, now: string): ChatThread {
