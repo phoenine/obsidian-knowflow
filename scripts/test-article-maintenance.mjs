@@ -160,7 +160,8 @@ const twoSentenceUpdate = { ...review.updates[0], after: "默认版本是 v2。 
 assert.ok(renderFreshnessReview("Source", { ...review, updates: [twoSentenceUpdate] })
   .includes("**默认版本是 v2。**现有配置可以沿用。"));
 contents.set(file, original + "\r\n人工补充");
-await assert.rejects(() => freshness.apply(file, review, new Set([0])), /重新检查/);
+await freshness.apply(file, review, new Set([0]));
+assert.match(contents.get(file), /默认版本是 v2/);
 assert.match(contents.get(file), /人工补充$/);
 contents.set(file, original);
 await freshness.apply(file, review, new Set([0]));
@@ -185,7 +186,9 @@ assert.match(contents.get(file), /默认限制为 50/);
   assert.equal([...contents.get(target).matchAll(/KnowFlow 知识更新/g)].length, 2);
   contents.set(target, paragraph);
   const conflicting = { ...grouped, updates: [first, { ...second, before: "方案甲。可选方案乙" }] };
-  await assert.rejects(freshness.apply(target, conflicting, new Set([0, 1])), /范围重叠/);
+  const skipped = await freshness.apply(target, conflicting, new Set([0, 1]));
+  assert.equal(skipped.written, 0);
+  assert.equal(skipped.skipped.length, 2);
   assert.equal(contents.get(target), paragraph);
 }
 assert.doesNotMatch(prepareArticleForAi(contents.get(file)), /KnowFlow 时效更新|默认版本是 v1/);
@@ -317,6 +320,120 @@ assert.match(retiredText, /\*\*已删除\*\*/);
 }
 
 {
+  const batched = await vault.create("Articles/Batch Budget.md", "重复开头。\n说法甲。\n\n重复开头。\n说法乙。\n");
+  const quote = "当前默认版本是 v2。";
+  const big = quote + String.fromCharCode(92).repeat(2400);
+  const judgeBodies = [];
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (url.endsWith("/search")) {
+      const { query } = JSON.parse(body);
+      return { status: 200, json: { results: [1, 2, 3, 4].map((index) => ({
+        url: `https://example.com/${encodeURIComponent(query)}-${index}`,
+        title: query,
+        content: big
+      })) } };
+    }
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        purpose: "测试分批", coreConclusion: "说明默认配置。", coreClaimQuote: "", domains: ["测试"],
+        claims: [
+          { quote: "说法甲。", section: "甲", query: "查询甲" },
+          { quote: "说法乙。", section: "乙", query: "查询乙" }
+        ],
+        discoveryQueries: ["发现一", "发现二"]
+      });
+    }
+    const payload = JSON.parse(messages[1].content);
+    judgeBodies.push(messages[1].content);
+    if (payload.claims.some((claim) => claim.quote === "说法甲。")) {
+      return toResponse({
+        coreStillHolds: true,
+        items: [{
+          quote: "说法甲。", before: "说法甲。", after: "说法甲已改为 v2。", section: "甲",
+          status: "已经失效", action: "修正", reason: "版本已经升级。",
+          sourceId: payload.sources[0].id, evidenceQuote: quote
+        }]
+      });
+    }
+    if (payload.claims.some((claim) => claim.quote === "说法乙。")) {
+      return { status: 200, json: { choices: [{ message: { content: "本批没有返回 JSON" } }] } };
+    }
+    const discovery = payload.discovery.find((entry) => entry.query === "发现一");
+    if (discovery) {
+      assert.deepEqual(payload.claims, [], "a discovery request must work without any claims in its batch");
+      assert.equal(payload.coreClaimQuote, "");
+      assert.ok(discovery.anchors.includes("说法乙。"));
+      return toResponse({ items: [{
+        before: discovery.anchors.find((anchor) => anchor === "说法乙。"),
+        after: "可以补充新版本的默认配置。", status: "缺少重要知识", action: "补充", reason: "新版本增加了配置。",
+        sourceId: discovery.sourceIds[0], evidenceQuote: quote
+      }] });
+    }
+    return toResponse({ coreStillHolds: true, items: [] });
+  };
+  const budgetReview = await freshness.check(batched, model, "fixture");
+  assert.ok(judgeBodies.length >= 2, "oversized judgment input is split");
+  for (const body of judgeBodies) {
+    assert.ok(body.length <= 12000, "every serialized judgment payload fits, including oversized single tasks");
+    const payload = JSON.parse(body);
+    const ids = new Set(payload.sources.map((source) => source.id));
+    assert.equal(ids.size, payload.sources.length);
+    for (const entry of [...payload.claims, ...payload.discovery]) {
+      assert.equal("sources" in entry, false);
+      assert.equal(entry.sourceIds.length, 4, "compacting an oversized request keeps each source");
+      assert.ok(entry.sourceIds.every((id) => ids.has(id)));
+    }
+  }
+  assert.deepEqual(budgetReview.updates.map(({ action, before }) => [action, before]), [["修正", "说法甲。"], ["补充", "说法乙。"]]);
+  assert.ok(budgetReview.unverified.some((item) => item.text === "说法乙。" && item.reason.includes("尚未完成")));
+  assert.match(renderFreshnessReview(batched.basename, budgetReview), /部分内容尚未判断完/);
+}
+
+{
+  const noAnchor = await vault.create("Articles/No Discovery Anchor.md", "相同的原文。\n\n相同的原文。\n");
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (url.endsWith("/search")) {
+      return { status: 200, json: { results: [{
+        url: "https://example.com/discovery-without-anchor", content: "这是补充检索返回的证据。"
+      }] } };
+    }
+    const { messages } = JSON.parse(body);
+    assert.match(messages[0].content, /全文分析/, "discovery without an anchor must not reach the judge");
+    return toResponse({ claims: [], discoveryQueries: ["发现遗漏"] });
+  };
+  const review = await freshness.check(noAnchor, model, "fixture");
+  assert.equal(review.updates.length, 0);
+  assert.match(renderFreshnessReview(noAnchor.basename, review), /没有判断完/);
+}
+
+{
+  const invalid = await vault.create("Articles/Invalid Judge.md", "默认版本是 v1。");
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (url.endsWith("/search")) {
+      return { status: 200, json: { results: [{
+        url: "https://example.com/invalid-judge", title: "版本说明", content: "当前默认版本是 v2。"
+      }] } };
+    }
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        purpose: "说明默认版本", coreConclusion: "默认版本是 v1。", coreClaimQuote: "默认版本是 v1。", domains: ["版本"],
+        claims: [{ quote: "默认版本是 v1。", section: "导语", query: "默认版本现状" }],
+        discoveryQueries: []
+      });
+    }
+    return toResponse({ coreStillHolds: true });
+  };
+  const invalidReview = await freshness.check(invalid, model, "fixture");
+  assert.equal(invalidReview.updates.length, 0);
+  assert.equal(invalidReview.verdict, "暂时无法判断");
+  assert.ok(invalidReview.unverified.some((item) => item.reason.includes("尚未完成")));
+  assert.match(renderFreshnessReview("Invalid Judge", invalidReview), /没有判断完/);
+  assert.doesNotMatch(renderFreshnessReview("Invalid Judge", invalidReview), /没有需要更新的内容/);
+}
+
+{
   // Clipping passes its own instructions, but the article-translation skill (including a vault override) still applies.
   const seen = [];
   globalThis.knowflowRequest = async ({ body }) => {
@@ -350,6 +467,10 @@ assert.match(retiredText, /\*\*已删除\*\*/);
   await formatting.confirmFormatting([candidate], "", "code-chat");
   assert.ok(seen[1].includes("只允许返回 keep 或 reformat-code"), "chat formatting must be limited to reformat-code");
   assert.ok(seen[1].includes("只有确认是网页行号时才去掉行首数字"), "chat formatting still follows the code rules");
+  await formatting.confirmFormatting([candidate], "", "code-chat-comments");
+  assert.match(seen[2], /允许在代码行上方或行尾新增简短的中文注释/);
+  assert.match(seen[2], /保留已有注释和所有原有代码/);
+  assert.doesNotMatch(seen[2], /不要改动任何字符|只修改布局所需的空白|以参考为准/);
 }
 
 {

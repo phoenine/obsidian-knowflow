@@ -1473,6 +1473,9 @@ export class KnowFlowSidebarView extends ItemView {
       color: "var(--text-muted)",
       fontSize: "13px",
       lineHeight: "1.5",
+      maxWidth: "100%",
+      minWidth: "0",
+      overflowWrap: "anywhere",
       ...options.style
     });
     await MarkdownRenderer.render(this.app, markdown, container, sourcePath, this);

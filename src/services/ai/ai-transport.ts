@@ -6,6 +6,7 @@ import { estimateChatUsage, parseChatStreamData } from "../chat/chat-stream";
 const REQUEST_TIMEOUT_MS = 360000;
 
 export class EmptyAiResponseError extends Error {}
+export class InvalidAiJsonError extends Error {}
 
 export class AiTransport {
   constructor(private skillInstructions = "") {}
@@ -21,7 +22,7 @@ export class AiTransport {
     try {
       return parseJsonResponse<T>(text);
     } catch (error) {
-      throw new Error(`${error instanceof Error ? error.message : String(error)} Raw response: ${text.slice(0, 500)}`);
+      throw new InvalidAiJsonError(`${error instanceof Error ? error.message : String(error)} Raw response: ${text.slice(0, 500)}`);
     }
   }
 

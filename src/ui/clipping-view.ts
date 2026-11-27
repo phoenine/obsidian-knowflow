@@ -54,7 +54,14 @@ export function renderClippingView(root: HTMLElement, props: ClippingViewProps):
 
 export function renderSummaryCard(content: HTMLElement, props: SummaryCardProps): void {
   const summary = section(content, "kf-summary");
-  if (props.summaryPending) setStyles(summary, { minHeight: "400px" });
+  // A fixed minimum replaces the flex item's content-based minimum, so a long
+  // stream would paint past the border. Keep the reserved height, but never
+  // shrink the card below the text it already has.
+  setStyles(summary, {
+    flexShrink: "0",
+    minWidth: "0",
+    ...(props.summaryPending ? { minHeight: "400px" } : {})
+  });
   let refreshButton!: HTMLButtonElement;
   cardHeader(summary, "sparkles", t("aiSummary"), (header) => {
     refreshButton = unborderedIconButton(header, t("refreshSummary"), "refresh-cw", () => {
@@ -86,8 +93,10 @@ export function renderSummaryCard(content: HTMLElement, props: SummaryCardProps)
       color: "var(--text-muted)",
       fontSize: "13px",
       lineHeight: "1.5",
-      whiteSpace: "pre-wrap",
-      wordBreak: "break-word"
+      maxWidth: "100%",
+      minWidth: "0",
+      overflowWrap: "anywhere",
+      whiteSpace: "pre-wrap"
     });
     streamEl.setText(props.streamingText);
   } else if (props.summaryPending && props.streamingReasoning) {

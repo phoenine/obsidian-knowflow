@@ -11,10 +11,10 @@ import {
   collectClippedCodeCandidates,
   collectCodeCandidates,
   normalizeOrphanBoldTriplet,
+  planCodeFormatting,
   repairBoldFlankingLine,
   trimCodeFenceBody,
-  type FormattingCandidate,
-  type FormattingDecision
+  type FormattingCandidate
 } from "./formatting-candidates";
 import { applyArticleFrontmatter, fillEmptyNoteProperties, splitFrontmatter, updateFrontmatterCategory } from "./frontmatter-rules";
 import { NoteOperationCoordinator } from "../core/note-operation-coordinator";
@@ -322,8 +322,8 @@ export class ClippingPipeline {
   ): Promise<{ content: string; changed: number; notes: string[] }> {
     const candidates = collectUncertainCandidates(content);
     if (candidates.length === 0) return { content, changed: 0, notes: [] };
-    const batches = batchFormattingCandidates(candidates, { maxChars: 3500, maxItems: 4 });
-    const decisions: FormattingDecision[] = [];
+    const { local: decisions, model } = planCodeFormatting(candidates);
+    const batches = batchFormattingCandidates(model, { maxChars: 3500, maxItems: 4 });
     let failedBatches = 0;
     let nextBatch = 0;
     const workers = Array.from({ length: Math.min(FORMAT_CONFIRM_CONCURRENCY, batches.length) }, async () => {

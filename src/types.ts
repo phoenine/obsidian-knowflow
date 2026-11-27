@@ -193,7 +193,7 @@ export interface ChatMessage {
   createdAt: string;
   completedAt?: string;
   status: "pending" | "streaming" | "done" | "error";
-  kind?: "article-freshness";
+  kind?: "article-freshness" | "article-edit";
   error?: string;
 }
 

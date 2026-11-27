@@ -35,8 +35,27 @@ import { assessUnfencedCode } from "./code-confidence";
 import { promptFenceStarts } from "./prompt-blocks";
 import { protectedLineIndices, protectedRanges } from "./protected-markdown";
 import { clippedCodeRegions, restoreClippedFence } from "./clipped-code";
+import { expandFlatPropertyList, hasJavaScriptStructure, preservesJavaScriptStructure } from "./javascript-structure";
 
 const FORMATTING_BATCH_CHARS = 16000;
+
+export function planCodeFormatting(candidates: FormattingCandidate[]): {
+  local: FormattingDecision[];
+  model: FormattingCandidate[];
+} {
+  const local: FormattingDecision[] = [];
+  const model: FormattingCandidate[] = [];
+  for (const candidate of candidates) {
+    const label = normalizeLanguage(candidate.fenceLanguage);
+    const language = isUnsetFenceLanguage(label) ? "javascript" : label;
+    const expanded = candidate.type === "fenced-code" && candidate.needsReformat && JAVASCRIPT_LABELS.test(language)
+      ? expandFlatPropertyList(candidate.content, language)
+      : undefined;
+    if (expanded) local.push({ id: candidate.id, action: "reformat-code", language, content: expanded });
+    else model.push(candidate);
+  }
+  return { local, model };
+}
 
 export function batchFormattingCandidates(
   candidates: FormattingCandidate[],
@@ -78,13 +97,14 @@ export function applyFormattingEdits(
   candidates: FormattingCandidate[],
   decisions: FormattingDecision[],
   /**
-   * `trustReformat`: the user confirmed each reformat in a preview, so the
-   * character-level check is skipped. Only the structural checks remain.
+   * `trustReformat`: the caller has already validated these bodies against this
+   * snapshot. Recheck the fence and source position without reparsing the code.
    */
   options: { trustReformat?: boolean } = {}
-): { content: string; applied: number; rejectedReformats: number } {
+): { content: string; applied: number; rejectedReformats: number; reformats: Map<string, RestoredCode> } {
   const lines = content.split("\n");
   let rejectedReformats = 0;
+  const reformats = new Map<string, RestoredCode>();
   const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   const accepted = decisions
     .map((decision) => ({ decision, candidate: byId.get(decision.id) }))
@@ -115,26 +135,27 @@ export function applyFormattingEdits(
         // Only blocks the program flagged as collapsed may be rewritten. The prompt says so, but the
         // model is not trusted to follow it: a normal block must never be rewritten.
         if (!candidate.needsReformat) continue;
-        const language = resolveFenceLanguage(decision.language, candidate);
-        const body = typeof decision.content === "string" ? trimCodeFenceBody(decision.content) : "";
-        const safe = options.trustReformat || isSafeAutomaticReformat(candidate, body, language);
-        if (!language || !body || /```/.test(body) || !safe || introducesRestrictedBreak(candidate.content, body)) {
+        const restored = options.trustReformat
+          ? trustedReformat(candidate, decision)
+          : assessCodeRestore(candidate, decision);
+        if (!restored.ok) {
           rejectedReformats += 1;
           continue;
         }
         lines.splice(
           candidate.startLine,
           candidate.endLine - candidate.startLine + 1,
-          `\`\`\`${language}`,
-          ...body.split("\n"),
+          `\`\`\`${restored.language}`,
+          ...restored.body.split("\n"),
           "```"
         );
+        reformats.set(candidate.id, { body: restored.body, language: restored.language });
         applied += 1;
         continue;
       }
 
       if (decision.action !== "set-code-language") continue;
-      const language = resolveFenceLanguage(decision.language, candidate);
+      const language = restoredLanguage(candidate.content, normalizeLanguage(candidate.fenceLanguage), normalizeLanguage(decision.language));
       const opening = `\`\`\`${language}`;
       if (!language || lines[candidate.startLine] === opening) continue;
       lines[candidate.startLine] = opening;
@@ -160,7 +181,7 @@ export function applyFormattingEdits(
     }
   }
 
-  return { content: lines.join("\n"), applied, rejectedReformats };
+  return { content: lines.join("\n"), applied, rejectedReformats, reformats };
 }
 
 export function stripSequentialLineNumbers(body: string): string {
@@ -233,9 +254,91 @@ export function isSafeCodeReformat(candidate: FormattingCandidate, formatted: st
   return sameCodeTokens(source, formatted) && sameStringLiterals(source, formatted);
 }
 
-function isSafeAutomaticReformat(candidate: FormattingCandidate, formatted: string, language: string): boolean {
-  const source = trimCodeFenceBody(candidate.content);
+interface RestoredCode {
+  body: string;
+  language: string;
+}
+
+export type CodeRestore =
+  | ({ ok: true } & RestoredCode)
+  | { ok: false; reason: "empty" | "fence" | "tokens" | "break" | "layout" };
+
+/**
+ * Clipping and chat share the same checks for code characters and fence boundaries.
+ * Layout changes also need a check specific to the language. A verified label change
+ * can be applied on its own, even when the language has no body layout check.
+ */
+export function assessCodeRestore(candidate: FormattingCandidate, decision: FormattingDecision): CodeRestore {
+  const body = typeof decision.content === "string" ? trimCodeFenceBody(decision.content) : "";
+  if (!body) return { ok: false, reason: "empty" };
+  if (/```/.test(body)) return { ok: false, reason: "fence" };
+  if (!isSafeCodeReformat(candidate, body)) return { ok: false, reason: "tokens" };
+  if (introducesRestrictedBreak(candidate.content, body)) return { ok: false, reason: "break" };
+  const language = restoredLanguage(candidate.content, normalizeLanguage(candidate.fenceLanguage), normalizeLanguage(decision.language));
+  if (!preservesCodeLayout(trimCodeFenceBody(candidate.content), body, language)) return { ok: false, reason: "layout" };
+  return { ok: true, body, language };
+}
+
+/** Reuse layout checks already performed on this snapshot, or apply a comment-only result. */
+function trustedReformat(candidate: FormattingCandidate, decision: FormattingDecision): CodeRestore {
+  const body = typeof decision.content === "string" ? trimCodeFenceBody(decision.content) : "";
+  const language = resolveFenceLanguage(decision.language, candidate);
+  if (!language || !body) return { ok: false, reason: "empty" };
+  if (/```/.test(body)) return { ok: false, reason: "fence" };
+  if (introducesRestrictedBreak(candidate.content, body)) return { ok: false, reason: "break" };
+  return { ok: true, body, language };
+}
+
+const HIGHLIGHTER_MISS = new Set(["perl", "ruby", "rb", "css", "makefile", "make"]);
+const JAVASCRIPT_LABELS = /^(?:js|javascript|mjs|cjs|jsx|ts|typescript|mts|cts|tsx|json|jsonc)$/;
+const QUOTED_CODE = /"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|\x60(?:\\.|[^\x60\\])*\x60/g;
+const LANGUAGE_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  javascript: ["js"],
+  typescript: ["ts"],
+  python: ["py", "python3", "py3"],
+  rust: ["rs"],
+  go: ["golang"]
+};
+const SQL_LABELS = new Set(["sql", "postgresql", "postgres", "pgsql", "mysql", "sqlite", "plsql", "tsql"]);
+
+function evidentLanguage(source: string, current: string): string | null {
+  if (contradictsPythonLabel(source, current)) return "python";
+  const code = source.replace(QUOTED_CODE, " ").trim();
+  if (/^package\s+\w+[ \t]*(?:;|\n)/.test(code) && /^[ \t]*func\s+\w+[ \t]*\(/m.test(code)) return "go";
+  if (/^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+\w+\s*\(/.test(code)
+    && /::|\b(?:let\s+mut|\w+!\s*[([{])/.test(code)) return "rust";
+  if (/^SELECT\b[\s\S]+\bFROM\s+\S/i.test(code)
+    || /^(?:INSERT\s+INTO|DELETE\s+FROM|CREATE\s+TABLE|ALTER\s+TABLE)\s+\S/i.test(code)) return "sql";
+  if (!HIGHLIGHTER_MISS.has(current)) return null;
+  if (!/\{/.test(code)) return null;
+  if (/\b(?:interface|type)\s+\w+/.test(code) && hasJavaScriptStructure(source, "typescript")) return "typescript";
+  if ((/\/\/|\/\*|=>/.test(code) || /\b(?:const|let|function|import|export)\b/.test(code))
+    && hasJavaScriptStructure(source, "javascript")) return "javascript";
+  return null;
+}
+
+function matchesLanguage(label: string, evident: string): boolean {
+  return label === evident || (LANGUAGE_ALIASES[evident]?.includes(label) ?? false);
+}
+
+function keepsLanguage(label: string, evident: string): boolean {
+  return matchesLanguage(label, evident) || evident === "sql" && SQL_LABELS.has(label);
+}
+
+function restoredLanguage(source: string, current: string, proposed: string): string {
+  if (preferTextLanguage(source)) return "text";
+  const evident = evidentLanguage(source, current);
+  if (evident) {
+    if (keepsLanguage(current, evident)) return current;
+    return matchesLanguage(proposed, evident) ? proposed : evident;
+  }
+  if (current && !isUnsetFenceLanguage(current)) return current;
+  return proposed || "text";
+}
+
+function preservesCodeLayout(source: string, formatted: string, language: string): boolean {
   if (source === formatted) return true;
+  if (JAVASCRIPT_LABELS.test(language)) return preservesJavaScriptStructure(source, formatted, language);
   if (/^(?:sh|bash|shell|zsh)$/.test(language)) {
     if (/<<|\n/.test(source)) return false;
     const tokens = /"(?:\\.|[^"\\])*"?|'[^']*'?|`(?:\\.|[^`\\])*\x60?|(?:^|[ \t])#[^\n]*|(?<continuation>\\[ \t]{2,})(?=--[a-zA-Z])|\\./gm;
@@ -243,7 +346,7 @@ function isSafeAutomaticReformat(candidate: FormattingCandidate, formatted: stri
   }
   // For indentation-sensitive code, only restore line breaks that map back to
   // visible indentation in the flattened original. Preserve all intact lines.
-  if (!PYTHON_LABELS.has(language) || /"""|'''/.test(source) || !isSafeCodeReformat(candidate, formatted)) return false;
+  if (!PYTHON_LABELS.has(language) || /"""|'''/.test(source)) return false;
   const output = formatted.split("\n");
   let index = 0;
   for (const line of source.split("\n")) {
@@ -312,7 +415,7 @@ function comparableTokens(text: string): string {
 }
 
 function sameStringLiterals(source: string, formatted: string): boolean {
-  const literals = (text: string) => [...text.matchAll(/"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`/g)].map((match) => match[0]);
+  const literals = (text: string) => text.match(QUOTED_CODE) ?? [];
   const left = literals(source);
   const right = literals(formatted);
   return left.length === right.length && left.every((literal, index) => literal === right[index]);
@@ -403,9 +506,10 @@ const PYTHON_LABELS = new Set(["python", "py", "python3", "py3", "ipython", "pyc
 export function contradictsPythonLabel(body: string, language: string): boolean {
   const label = language.trim().toLowerCase();
   if (!label || PYTHON_LABELS.has(label) || isUnsetFenceLanguage(label)) return false;
-  return /\bdef\s+\w+\s*\([^)\n]*\)\s*(?:->\s*[^:\n]+)?:/.test(body)
-    || /\blambda\s+[\w*][\w\s,*=]*:/.test(body)
-    || /^\s*from\s+[\w.]+\s+import\s+\w/m.test(body);
+  const code = body.replace(QUOTED_CODE, " ");
+  return /\bdef\s+\w+\s*\([^)\n]*\)\s*(?:->\s*[^:\n]+)?:/.test(code)
+    || /\blambda\s+[\w*][\w\s,*=]*:/.test(code)
+    || /^\s*from\s+[\w.]+\s+import\s+\w/m.test(code);
 }
 
 function isUnsetFenceLanguage(language: string): boolean {
@@ -427,12 +531,14 @@ function makeFencedCodeCandidate(
   if (plainLooking && !needsFmt && !hasNumberPrefixes) return null;
 
   const needsLang = isUnsetFenceLanguage(fenceLanguage);
-  const wrongLabel = contradictsPythonLabel(body, fenceLanguage);
-  if (!needsLang && !needsFmt && !hasNumberPrefixes && !wrongLabel) return null;
+  const current = normalizeLanguage(fenceLanguage);
+  const evident = evidentLanguage(body, current);
+  const correctedLanguage = evident && !keepsLanguage(current, evident) ? evident : null;
+  if (!needsLang && !needsFmt && !hasNumberPrefixes && !correctedLanguage) return null;
 
   const candidate = makeCandidate(index, "fenced-code", startLine, endLine, body, lines);
   if (fenceLanguage) candidate.fenceLanguage = fenceLanguage;
-  if (wrongLabel) candidate.autoLanguage = "python";
+  if (correctedLanguage) candidate.autoLanguage = correctedLanguage;
   if (needsFmt) candidate.needsReformat = true;
   return candidate;
 }

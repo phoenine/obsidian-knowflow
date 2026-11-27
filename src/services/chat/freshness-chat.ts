@@ -22,7 +22,7 @@ export function parseFreshnessRequest(question: string): FreshnessRequest | null
   if (englishItem) return { kind: "apply", numbers: [Number(englishItem[1])] };
   if (list && /^第/.test(list)) {
     const items = list.replace(/(?:修订|更新|修改)$/, "").split(/[、,，和及与]/);
-    const values = items.map((item) => /^\s*第?\s*(\d{1,2}|[一二三四五六七八九十])\s*[条项]?\s*$/.exec(item)?.[1]);
+    const values = items.map((item) => /^\s*第?\s*(\d{1,2}|[一二三四五六七八九十])\s*[条项个]?\s*$/.exec(item)?.[1]);
     if (values.every((value): value is string => value !== undefined)) {
       return { kind: "apply", numbers: values.map((value) => REVISION_NUMBER.test(value) ? CHINESE_NUMBERS.indexOf(value) : Number(value)) };
     }
@@ -45,11 +45,14 @@ export function parseArticleUpdateReply(question: string): "accept" | "decline" 
 }
 
 export function renderFreshnessReview(_title: string, review: FreshnessReview): string {
+  const incomplete = review.incomplete.length || review.unverified.some((item) => item.reason.includes("尚未完成"));
   if (!review.updates.length) {
+    if (incomplete) return t("freshnessIncomplete");
     return review.unverified.length ? t("freshnessInsufficient") : t("freshnessNone");
   }
   const updates = review.updates.map((update, index) => renderFreshnessUpdate(index, update));
   return [
+    ...(incomplete ? [t("freshnessPartial")] : []),
     updates.join("\n\n---\n\n"),
     t("freshnessAsk")
   ].join("\n\n");
@@ -58,6 +61,30 @@ export function renderFreshnessReview(_title: string, review: FreshnessReview): 
 export function renderFreshnessApplied(applied: number, remaining: number): string {
   if (remaining > 0) return t("freshnessAppliedRemaining", { count: applied, remaining });
   return t("freshnessApplied", { count: applied });
+}
+
+const FRESHNESS_SKIP = {
+  missing: "articleEditReasonMissing",
+  ambiguous: "articleEditReasonAmbiguous",
+  paragraph: "articleEditReasonParagraph",
+  conflict: "articleEditReasonConflict",
+  span: "articleEditReasonSpan",
+  protected: "articleEditReasonProtected"
+} as const;
+
+export function renderFreshnessCommit(
+  written: number,
+  skipped: Array<{ index: number; reason: string }>,
+  unselected: number
+): string {
+  const parts: string[] = [];
+  if (written) parts.push(renderFreshnessApplied(written, unselected));
+  for (const skip of skipped) {
+    const reason = FRESHNESS_SKIP[skip.reason as keyof typeof FRESHNESS_SKIP] ?? "articleEditReasonMissing";
+    parts.push(t("articleEditSkipped", { n: skip.index + 1, reason: t(reason) }));
+  }
+  if (!parts.length) parts.push(t("freshnessUnchanged"));
+  return parts.join("\n\n");
 }
 
 function renderFreshnessUpdate(index: number, update: FreshnessReview["updates"][number]): string {

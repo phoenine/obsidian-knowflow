@@ -9,12 +9,6 @@ export interface CodeFormatScope {
   comments?: boolean;
 }
 
-/** Sent to the model as extra instructions when comments were requested. */
-export const CODE_COMMENT_INSTRUCTION = [
-  "用户要求为这些代码块增加注释。reformat-code 时：可以在代码行上方或行尾新增注释，注释使用该代码块语言的注释语法，用简短的中文说明作用。",
-  "不得修改、删除或移动任何代码字符，也不得改变代码的顺序和缩进结构。content 放加好注释的完整代码。"
-].join("\n");
-
 const COMMENT_REQUEST = /(?:增加|添加|加上|加|补充)(?:一些|一下|些)?注释/;
 
 export interface LocatedCodeBlock {
