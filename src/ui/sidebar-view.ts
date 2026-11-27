@@ -1576,10 +1576,10 @@ export class KnowFlowSidebarView extends ItemView {
 
 function renderThinkingLine(parent: HTMLElement, reasoning: string): HTMLElement {
   const line = parent.createDiv({ cls: "kf-thinking-line" });
+  if (!reasoning) line.addClass("kf-thinking-line-hidden");
   setStyles(line, {
     alignItems: "center",
     color: "var(--text-faint)",
-    display: reasoning ? "flex" : "none",
     fontFamily: "var(--font-monospace)",
     fontSize: "11px",
     fontStyle: "italic",
@@ -1612,7 +1612,7 @@ function renderThinkingLine(parent: HTMLElement, reasoning: string): HTMLElement
 function paintThinkingLine(text: HTMLElement | null, reasoning: string): void {
   const line = text?.closest<HTMLElement>(".kf-thinking-line");
   if (!line || !text) return;
-  if (line.style.display === "none") line.style.display = "flex";
+  line.removeClass("kf-thinking-line-hidden");
   const preview = thinkingPreview(reasoning);
   if (text.textContent !== preview) text.textContent = preview;
   const viewport = text.parentElement;

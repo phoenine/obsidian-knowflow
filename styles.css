@@ -1,1 +1,28 @@
-/* KnowFlow styles are intentionally disabled until style isolation is verified. */
+.setting-item .kf-deepseek-purpose,
+.setting-item .kf-deepseek-status {
+  display: block;
+}
+
+.setting-item .kf-deepseek-status {
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.setting-item.kf-deepseek-enabled {
+  align-items: flex-start;
+}
+
+.setting-item.kf-deepseek-enabled .setting-item-control.kf-deepseek-controls {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 12px;
+  padding-top: 2px;
+}
+
+.knowflow-view .kf-thinking-line {
+  display: flex;
+}
+
+.knowflow-view .kf-thinking-line.kf-thinking-line-hidden {
+  display: none;
+}

@@ -184,11 +184,9 @@ export class KnowFlowSettingTab extends PluginSettingTab {
     const status = separateKey ? t("deepseekDedicated")
       : resolveDeepSeekSearchKey(this.plugin.settings, secrets) ? t("deepseekFallback") : t("deepseekMissing");
     const description = document.createDocumentFragment();
-    const purpose = description.createSpan({ text: t("deepseekSearchEnabledDesc") });
-    purpose.style.display = "block";
+    description.createSpan({ cls: "kf-deepseek-purpose", text: t("deepseekSearchEnabledDesc") });
     if (enabled) {
-      const current = description.createSpan({ text: `Current: ${status}` });
-      Object.assign(current.style, { display: "block", marginTop: "3px", overflowWrap: "anywhere" });
+      description.createSpan({ cls: "kf-deepseek-status", text: `Current: ${status}` });
     }
     const search = new Setting(ai).setName(t("deepseekSearch")).setDesc(description);
     search.addToggle((toggle) => toggle
@@ -202,13 +200,8 @@ export class KnowFlowSettingTab extends PluginSettingTab {
       search.addButton((button) => button.setButtonText(t("configure")).onClick(
         () => new DeepSeekSearchConfigModal(this.app, () => this.display()).open()
       ));
-      search.settingEl.style.alignItems = "flex-start";
-      Object.assign(search.controlEl.style, {
-        flexDirection: "column",
-        alignItems: "flex-end",
-        gap: "12px",
-        paddingTop: "2px"
-      });
+      search.settingEl.addClass("kf-deepseek-enabled");
+      search.controlEl.addClass("kf-deepseek-controls");
     }
   }
 
