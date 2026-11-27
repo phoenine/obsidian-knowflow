@@ -32,6 +32,8 @@ export interface KnowFlowSettings {
   embeddingModel: AiModelConfig;
   dailyNewArticleLimit: number;
   dailyReviewQuestionCap: number;
+  /** When true, freshness checks search claims the model could not judge, and chat may search public facts. */
+  deepseekSearchEnabled: boolean;
   language: "zh" | "en";
 }
 
@@ -193,7 +195,7 @@ export interface ChatMessage {
   createdAt: string;
   completedAt?: string;
   status: "pending" | "streaming" | "done" | "error";
-  kind?: "article-freshness";
+  kind?: "article-freshness" | "article-edit";
   error?: string;
 }
 

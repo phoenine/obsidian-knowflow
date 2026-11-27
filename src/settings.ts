@@ -41,6 +41,7 @@ export const DEFAULT_SETTINGS: KnowFlowSettings = {
   },
   dailyNewArticleLimit: 1,
   dailyReviewQuestionCap: 10,
+  deepseekSearchEnabled: false,
   language: "zh"
 };
 
@@ -177,13 +178,38 @@ export class KnowFlowSettingTab extends PluginSettingTab {
     this.createModelEntry(ai, t("chatModel"), t("chatModelDesc"), "chatModel");
     this.createModelEntry(ai, t("embeddingModel"), t("embeddingModelDesc"), "embeddingModel");
 
+    const enabled = this.plugin.settings.deepseekSearchEnabled;
     const secrets = this.app.secretStorage;
     const separateKey = secrets?.getSecret(DEEPSEEK_SEARCH_SECRET_ID)?.trim();
     const status = separateKey ? t("deepseekDedicated")
       : resolveDeepSeekSearchKey(this.plugin.settings, secrets) ? t("deepseekFallback") : t("deepseekMissing");
-    this.createConfiguredEntry(ai, t("deepseekSearch"), t("deepseekSearchDesc"), status,
-      () => new DeepSeekSearchConfigModal(this.app, () => this.display()).open()
-      );
+    const description = document.createDocumentFragment();
+    const purpose = description.createSpan({ text: t("deepseekSearchEnabledDesc") });
+    purpose.style.display = "block";
+    if (enabled) {
+      const current = description.createSpan({ text: `Current: ${status}` });
+      Object.assign(current.style, { display: "block", marginTop: "3px", overflowWrap: "anywhere" });
+    }
+    const search = new Setting(ai).setName(t("deepseekSearch")).setDesc(description);
+    search.addToggle((toggle) => toggle
+      .setValue(enabled)
+      .onChange(async (value) => {
+        this.plugin.settings.deepseekSearchEnabled = value;
+        await this.plugin.saveSettings();
+        this.display();
+      }));
+    if (enabled) {
+      search.addButton((button) => button.setButtonText(t("configure")).onClick(
+        () => new DeepSeekSearchConfigModal(this.app, () => this.display()).open()
+      ));
+      search.settingEl.style.alignItems = "flex-start";
+      Object.assign(search.controlEl.style, {
+        flexDirection: "column",
+        alignItems: "flex-end",
+        gap: "12px",
+        paddingTop: "2px"
+      });
+    }
   }
 
   private displayLearning(containerEl: HTMLElement): void {

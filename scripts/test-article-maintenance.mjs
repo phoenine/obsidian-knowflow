@@ -7,6 +7,7 @@ const { outputFiles } = await esbuild.build({
     contents: `
       export { TFile } from "obsidian";
       export { AiService } from "./src/services/ai/ai-service";
+      export { AiTransport, InvalidAiJsonError } from "./src/services/ai/ai-transport";
       export { prepareSummarySource } from "./src/services/ai/summary-source";
       export { SummaryNoteService } from "./src/services/learning/summary-note-service";
       export { SkillRunner } from "./src/services/core/skill-runner";
@@ -52,7 +53,7 @@ const { outputFiles } = await esbuild.build({
     }
   }]
 });
-const { TFile, SkillStore, NoteOperationCoordinator, readLegacyRepairSkill, prepareArticleForAi, ArticleFreshness, renderFreshnessReview, SkillRunner, rankRelevantNotes, AiService, prepareSummarySource, SummaryNoteService, findPublicEvidence, resolveDeepSeekSearchKey } =
+const { TFile, SkillStore, NoteOperationCoordinator, readLegacyRepairSkill, prepareArticleForAi, ArticleFreshness, renderFreshnessReview, SkillRunner, rankRelevantNotes, AiService, AiTransport, InvalidAiJsonError, prepareSummarySource, SummaryNoteService, findPublicEvidence, resolveDeepSeekSearchKey } =
   await import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].contents).toString("base64")}`);
 
 const files = new Map();
@@ -137,6 +138,14 @@ globalThis.knowflowRequest = async ({ url, body, headers }) => {
       discoveryQueries: []
     });
   }
+  if (messages[0].content.includes("依据自身知识")) {
+    requests.push("knowledge");
+    const payload = JSON.parse(messages[1].content);
+    return toResponse({
+      coreStillHolds: true,
+      items: payload.claims.map((claim) => ({ quote: claim.quote, needsVerification: true }))
+    });
+  }
   requests.push("judge");
   return toResponse({
     coreStillHolds: true,
@@ -150,9 +159,13 @@ globalThis.knowflowRequest = async ({ url, body, headers }) => {
   });
 };
 const freshness = new ArticleFreshness(vault, runner, ops);
-await assert.rejects(() => freshness.check(file, model, ""), /DeepSeek Search/);
+const offline = await freshness.check(file, model, "");
+assert.deepEqual(requests, ["analyze", "knowledge"]);
+assert.equal(offline.updates.length, 0);
+assert.ok(offline.followUp.length >= 1);
+requests.length = 0;
 const review = await freshness.check(file, model, "fixture");
-assert.deepEqual(requests, ["analyze", "search", "judge"]);
+assert.deepEqual(requests, ["analyze", "knowledge", "search", "judge"]);
 assert.deepEqual(review.updates.map((item) => item.after), ["默认版本是 v2", "默认限制为 75。"]);
 assert.equal(review.verdict, "局部内容需要更新");
 assert.equal(writes, 0, "checking must leave the note untouched");
@@ -160,7 +173,8 @@ const twoSentenceUpdate = { ...review.updates[0], after: "默认版本是 v2。 
 assert.ok(renderFreshnessReview("Source", { ...review, updates: [twoSentenceUpdate] })
   .includes("**默认版本是 v2。**现有配置可以沿用。"));
 contents.set(file, original + "\r\n人工补充");
-await assert.rejects(() => freshness.apply(file, review, new Set([0])), /重新检查/);
+await freshness.apply(file, review, new Set([0]));
+assert.match(contents.get(file), /默认版本是 v2/);
 assert.match(contents.get(file), /人工补充$/);
 contents.set(file, original);
 await freshness.apply(file, review, new Set([0]));
@@ -185,7 +199,9 @@ assert.match(contents.get(file), /默认限制为 50/);
   assert.equal([...contents.get(target).matchAll(/KnowFlow 知识更新/g)].length, 2);
   contents.set(target, paragraph);
   const conflicting = { ...grouped, updates: [first, { ...second, before: "方案甲。可选方案乙" }] };
-  await assert.rejects(freshness.apply(target, conflicting, new Set([0, 1])), /范围重叠/);
+  const skipped = await freshness.apply(target, conflicting, new Set([0, 1]));
+  assert.equal(skipped.written, 0);
+  assert.equal(skipped.skipped.length, 2);
   assert.equal(contents.get(target), paragraph);
 }
 assert.doesNotMatch(prepareArticleForAi(contents.get(file)), /KnowFlow 时效更新|默认版本是 v1/);
@@ -230,6 +246,13 @@ globalThis.knowflowRequest = async ({ url, body, headers, method }) => {
       purpose: "介绍如何连接服务", coreConclusion: "这项服务可以远程使用。", coreClaimQuote: "Retired Tool 提供远程公开服务。", domains: ["Retired Tool"],
       claims: [{ quote: "Retired Tool 提供远程公开服务。", section: "导语", query: "Retired Tool 远程服务状态" }],
       discoveryQueries: []
+    });
+  }
+  if (messages[0].content.includes("依据自身知识")) {
+    const payload = JSON.parse(messages[1].content);
+    return toResponse({
+      coreStillHolds: true,
+      items: payload.claims.map((claim) => ({ quote: claim.quote, needsVerification: true }))
     });
   }
   const payload = JSON.parse(messages[1].content);
@@ -278,6 +301,13 @@ assert.match(retiredText, /\*\*已删除\*\*/);
         discoveryQueries: []
       });
     }
+    if (messages[0].content.includes("依据自身知识")) {
+      const payload = JSON.parse(messages[1].content);
+      return toResponse({
+        coreStillHolds: true,
+        items: payload.claims.map((claim) => ({ quote: claim.quote, needsVerification: true }))
+      });
+    }
     const { sources } = JSON.parse(messages[1].content);
     return toResponse({ coreStillHolds: false, items: [
       null,
@@ -305,6 +335,13 @@ assert.match(retiredText, /\*\*已删除\*\*/);
         discoveryQueries: []
       });
     }
+    if (messages[0].content.includes("依据自身知识")) {
+      const payload = JSON.parse(messages[1].content);
+      return toResponse({
+        coreStillHolds: true,
+        items: payload.claims.map((claim) => ({ quote: claim.quote, needsVerification: true }))
+      });
+    }
     judgeRequests.push(messages);
     return toResponse({ coreStillHolds: false, items: [] });
   };
@@ -314,6 +351,556 @@ assert.match(retiredText, /\*\*已删除\*\*/);
   assert.equal(empty.verdict, "暂时无法判断");
   assert.deepEqual(empty.unverified.map((item) => item.reason), ["没有检索到可核对的公开资料。"]);
   assert.equal(empty.updates.length, 0);
+  const emptyReport = renderFreshnessReview(unsearched.basename, empty);
+  assert.match(emptyReport, /证据不足，原文先不改/);
+  assert.match(emptyReport, /默认版本是 v1/);
+}
+
+{
+  const batched = await vault.create("Articles/Batch Budget.md", "重复开头。\n说法甲。\n\n重复开头。\n说法乙。\n");
+  const quote = "当前默认版本是 v2。";
+  const big = quote + String.fromCharCode(92).repeat(2400);
+  const judgeBodies = [];
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (url.endsWith("/search")) {
+      const { query } = JSON.parse(body);
+      return { status: 200, json: { results: [1, 2, 3, 4].map((index) => ({
+        url: `https://example.com/${encodeURIComponent(query)}-${index}`,
+        title: query,
+        content: big
+      })) } };
+    }
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        purpose: "测试分批", coreConclusion: "说明默认配置。", coreClaimQuote: "", domains: ["测试"],
+        claims: [
+          { quote: "说法甲。", section: "甲", query: "查询甲" },
+          { quote: "说法乙。", section: "乙", query: "查询乙" }
+        ],
+        discoveryQueries: ["发现一", "发现二"]
+      });
+    }
+    if (messages[0].content.includes("依据自身知识")) {
+      const payload = JSON.parse(messages[1].content);
+      return toResponse({
+        coreStillHolds: true,
+        items: payload.claims.map((claim) => ({ quote: claim.quote, needsVerification: true }))
+      });
+    }
+    const payload = JSON.parse(messages[1].content);
+    judgeBodies.push(messages[1].content);
+    if (payload.claims.some((claim) => claim.quote === "说法甲。")) {
+      return toResponse({
+        coreStillHolds: true,
+        items: [{
+          quote: "说法甲。", before: "说法甲。", after: "说法甲已改为 v2。", section: "甲",
+          status: "已经失效", action: "修正", reason: "版本已经升级。",
+          sourceId: payload.sources[0].id, evidenceQuote: quote
+        }]
+      });
+    }
+    if (payload.claims.some((claim) => claim.quote === "说法乙。")) {
+      return { status: 200, json: { choices: [{ message: { content: "本批没有返回 JSON" } }] } };
+    }
+    const discovery = payload.discovery.find((entry) => entry.query === "发现一");
+    if (discovery) {
+      assert.deepEqual(payload.claims, [], "a discovery request must work without any claims in its batch");
+      assert.equal(payload.coreClaimQuote, "");
+      assert.ok(discovery.anchors.includes("说法乙。"));
+      return toResponse({ items: [
+        { before: "说法甲", after: "越出补充锚点范围。", status: "缺少重要知识", action: "补充",
+          reason: "新版本增加了配置。", sourceId: discovery.sourceIds[0], evidenceQuote: quote },
+        { before: "说法乙。", after: "可以补充新版本的默认配置。", status: "缺少重要知识", action: "补充",
+          reason: "新版本增加了配置。", sourceId: discovery.sourceIds[0], evidenceQuote: quote }
+      ] });
+    }
+    return toResponse({ coreStillHolds: true, items: [] });
+  };
+  const budgetReview = await freshness.check(batched, model, "fixture");
+  assert.ok(judgeBodies.length >= 2, "oversized judgment input is split");
+  for (const body of judgeBodies) {
+    assert.ok(body.length <= 12000, "every serialized judgment payload fits, including oversized single tasks");
+    const payload = JSON.parse(body);
+    const ids = new Set(payload.sources.map((source) => source.id));
+    assert.equal(ids.size, payload.sources.length);
+    for (const entry of [...payload.claims, ...payload.discovery]) {
+      assert.equal("sources" in entry, false);
+      assert.equal(entry.sourceIds.length, 4, "compacting an oversized request keeps each source");
+      assert.ok(entry.sourceIds.every((id) => ids.has(id)));
+    }
+  }
+  assert.deepEqual(budgetReview.updates.map(({ action, before }) => [action, before]), [["修正", "说法甲。"], ["补充", "说法乙。"]]);
+  assert.ok(budgetReview.unverified.some((item) => item.text === "说法乙。" && item.reason.includes("尚未完成")));
+  assert.match(renderFreshnessReview(batched.basename, budgetReview), /部分内容尚未判断完/);
+}
+
+{
+  const noAnchor = await vault.create("Articles/No Discovery Anchor.md", "相同的原文。\n\n相同的原文。\n");
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (url.endsWith("/search")) {
+      return { status: 200, json: { results: [{
+        url: "https://example.com/discovery-without-anchor", content: "这是补充检索返回的证据。"
+      }] } };
+    }
+    const { messages } = JSON.parse(body);
+    assert.match(messages[0].content, /全文分析/, "discovery without an anchor must not reach the judge");
+    return toResponse({ claims: [], discoveryQueries: ["发现遗漏"] });
+  };
+  const review = await freshness.check(noAnchor, model, "fixture");
+  assert.equal(review.updates.length, 0);
+  assert.match(renderFreshnessReview(noAnchor.basename, review), /没有判断完/);
+}
+
+{
+  const invalid = await vault.create("Articles/Invalid Judge.md", "默认版本是 v1。");
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (url.endsWith("/search")) {
+      return { status: 200, json: { results: [{
+        url: "https://example.com/invalid-judge", title: "版本说明", content: "当前默认版本是 v2。"
+      }] } };
+    }
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        purpose: "说明默认版本", coreConclusion: "默认版本是 v1。", coreClaimQuote: "默认版本是 v1。", domains: ["版本"],
+        claims: [{ quote: "默认版本是 v1。", section: "导语", query: "默认版本现状" }],
+        discoveryQueries: []
+      });
+    }
+    if (messages[0].content.includes("依据自身知识")) {
+      const payload = JSON.parse(messages[1].content);
+      return toResponse({
+        coreStillHolds: true,
+        items: payload.claims.map((claim) => ({ quote: claim.quote, needsVerification: true }))
+      });
+    }
+    return toResponse({ coreStillHolds: true });
+  };
+  const invalidReview = await freshness.check(invalid, model, "fixture");
+  assert.equal(invalidReview.updates.length, 0);
+  assert.equal(invalidReview.verdict, "暂时无法判断");
+  assert.ok(invalidReview.unverified.some((item) => item.reason.includes("尚未完成")));
+  assert.match(renderFreshnessReview("Invalid Judge", invalidReview), /没有判断完/);
+  assert.doesNotMatch(renderFreshnessReview("Invalid Judge", invalidReview), /没有需要更新的内容/);
+}
+
+{
+  const article = await vault.create("Articles/Model Knowledge.md", "默认版本是 v1。\n\n接口仍是旧地址。\n");
+  const calls = [];
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (String(url).includes("api.deepseek.com")) {
+      calls.push(JSON.parse(body).query);
+      return { status: 200, json: { results: [{
+        url: "https://example.com/api", title: "接口说明", content: "当前接口已经改为新地址。"
+      }] } };
+    }
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        purpose: "说明版本和接口", coreConclusion: "默认版本是 v1。", coreClaimQuote: "默认版本是 v1。",
+        claims: [
+          { quote: "默认版本是 v1。", section: "导语", query: "默认版本现状" },
+          { quote: "接口仍是旧地址。", section: "导语", query: "接口地址现状" }
+        ],
+        discoveryQueries: []
+      });
+    }
+    if (messages[0].content.includes("依据自身知识")) {
+      return toResponse({
+        coreStillHolds: false,
+        items: [
+          {
+            quote: "默认版本是 v1。", before: "默认版本是 v1。", after: "默认版本是 v2。",
+            section: "导语", status: "已经失效", action: "修正", reason: "模型记得默认版本已经升级。"
+          },
+          { quote: "接口仍是旧地址。", needsVerification: true }
+        ]
+      });
+    }
+    const payload = JSON.parse(messages[1].content);
+    assert.deepEqual(payload.claims.map((claim) => claim.quote), ["接口仍是旧地址。"]);
+    return toResponse({
+      coreStillHolds: true,
+      items: [{
+        quote: "接口仍是旧地址。", before: "接口仍是旧地址。", after: "接口已经改为新地址。",
+        section: "导语", status: "已经失效", action: "修正", reason: "公告已经更换接口。",
+        sourceId: payload.sources[0].id, evidenceQuote: "当前接口已经改为新地址。"
+      }]
+    });
+  };
+  const offline = await freshness.check(article, model, "");
+  assert.deepEqual(calls, []);
+  assert.equal(offline.updates.length, 1);
+  assert.equal(offline.updates[0].after, "默认版本是 v2。");
+  assert.equal(offline.updates[0].source.url, "");
+  assert.equal(offline.verdict, "核心结论需要重新审视");
+  assert.deepEqual(offline.followUp.map((item) => item.text), ["接口仍是旧地址。"]);
+  const offlineReport = renderFreshnessReview(article.basename, offline);
+  assert.match(offlineReport, /模型自身知识/);
+  assert.match(offlineReport, /接口仍是旧地址/);
+  assert.match(offlineReport, /要不要按这些建议更新原文/);
+  await freshness.apply(article, offline, new Set([0]));
+  assert.match(contents.get(article), /默认版本是 v2/);
+  assert.match(contents.get(article), /模型自身知识/);
+  assert.doesNotMatch(contents.get(article), /https?:/);
+  contents.set(article, "默认版本是 v1。\n\n接口仍是旧地址。\n");
+  const online = await freshness.check(article, model, "fixture");
+  assert.deepEqual(calls, ["接口地址现状"]);
+  assert.deepEqual(online.updates.map((item) => [item.before, item.source.url]), [
+    ["默认版本是 v1。", ""],
+    ["接口仍是旧地址。", "https://example.com/api"]
+  ]);
+  assert.equal(online.followUp.length, 0);
+}
+
+{
+  const checked = "默认版本是 v1。";
+  const unchecked = "原文还讨论了另一条规则。";
+  const article = await vault.create("Articles/Knowledge Scope.md", `${checked}\n\n${unchecked}`);
+  globalThis.knowflowRequest = async ({ body }) => {
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({ claims: [{ quote: checked, query: "默认版本" }] });
+    }
+    assert.deepEqual(JSON.parse(messages[1].content).claims.map(({ quote }) => quote), [checked]);
+    return toResponse({ items: [
+      { quote: unchecked, status: "仍然成立" },
+      { quote: unchecked, status: "原文有误", after: "另一条规则已经废除。", reason: "规则有变。" },
+      { quote: checked, before: unchecked, status: "缺少重要知识", after: "额外说明。", reason: "新增内容。" },
+      { quote: checked, status: "原文有误", after: "默认版本是 v2。", reason: "已升级。" }
+    ] });
+  };
+  const review = await freshness.check(article, model, "");
+  assert.deepEqual(review.held, []);
+  assert.deepEqual(review.updates.map(({ before }) => before), [checked]);
+  await freshness.apply(article, review, new Set(review.updates.map((_, index) => index)));
+  assert.ok(contents.get(article).includes(`\n\n${unchecked}`));
+  assert.match(contents.get(article), /默认版本是 v2。/);
+  assert.doesNotMatch(contents.get(article), /另一条规则已经废除|额外说明/);
+}
+
+{
+  const checked = "默认开启快速模式。";
+  const otherClaim = "后台任务会自动重试。";
+  const unchecked = "兼容模式仅在旧环境使用。";
+  const article = await vault.create("Articles/Public Evidence Scope.md", [checked, otherClaim, unchecked].join("\n\n"));
+  const modeEvidence = "新版本默认关闭快速模式。";
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    const payload = JSON.parse(body);
+    if (url.endsWith("/search")) {
+      const mode = payload.query === "快速模式";
+      return { status: 200, json: { results: [{
+        url: mode ? "https://example.com/mode" : "https://example.com/retry", title: payload.query,
+        content: mode ? modeEvidence : "后台任务仍会自动重试。"
+      }] } };
+    }
+    const { messages } = payload;
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({ claims: [{ quote: checked, query: "快速模式" }, { quote: otherClaim, query: "后台任务" }] });
+    }
+    const { claims } = JSON.parse(messages[1].content);
+    if (messages[0].content.includes("依据自身知识")) {
+      return toResponse({ items: claims.map(({ quote }) => ({ quote, needsVerification: true })) });
+    }
+    assert.deepEqual(claims.map(({ quote }) => quote), [checked, otherClaim]);
+    const evidence = { status: "原文有误", reason: "默认配置已变更。", sourceId: claims[0].sourceIds[0], evidenceQuote: modeEvidence };
+    return toResponse({ items: [
+      { ...evidence, quote: unchecked, after: "兼容模式总是启用。" },
+      { ...evidence, quote: otherClaim, after: "后台任务不会重试。" },
+      { ...evidence, quote: checked, after: "默认关闭快速模式。" }
+    ] });
+  };
+  const review = await freshness.check(article, model, "fixture");
+  assert.deepEqual(review.updates.map(({ before }) => before), [checked]);
+  assert.ok(review.unverified.some(({ text }) => text === otherClaim));
+  await freshness.apply(article, review, new Set(review.updates.map((_, index) => index)));
+  assert.match(contents.get(article), /默认关闭快速模式。/);
+  assert.ok(contents.get(article).endsWith(`${otherClaim}\n\n${unchecked}`));
+}
+
+{
+  const quotes = Array.from({ length: 36 }, (_, index) => `配置 ${index} ${"例".repeat(420)}。`);
+  const article = await vault.create("Articles/Knowledge Batch Budget.md", quotes.join("\n\n"));
+  const checked = [];
+  let batches = 0;
+  globalThis.knowflowRequest = async ({ body }) => {
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        coreConclusion: "配置说明。", coreClaimQuote: "未匹配".repeat(4400),
+        claims: quotes.map((quote) => ({ quote, query: "配置说明" }))
+      });
+    }
+    const content = messages[1].content;
+    assert.ok(content.length <= 12_000, "model-knowledge batches honor the serialized character budget");
+    const payload = JSON.parse(content);
+    assert.equal(payload.coreClaimQuote, "");
+    batches += 1;
+    checked.push(...payload.claims.map(({ quote }) => quote));
+    return toResponse({ items: payload.claims.map(({ quote }) => ({ quote, status: "仍然成立" })) });
+  };
+  const review = await freshness.check(article, model, "");
+  assert.ok(batches > 1);
+  assert.deepEqual(checked, quotes);
+  assert.deepEqual(review.held.map(({ text }) => text), quotes);
+  assert.deepEqual(review.followUp, []);
+}
+
+{
+  const article = await vault.create("Articles/Search Failure.md", "默认版本是 v1。\n\n接口仍是旧地址。\n");
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (String(url).includes("api.deepseek.com")) throw new Error("search down");
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        purpose: "说明版本和接口", coreConclusion: "默认版本是 v1。", coreClaimQuote: "默认版本是 v1。",
+        claims: [
+          { quote: "默认版本是 v1。", section: "导语", query: "默认版本现状" },
+          { quote: "接口仍是旧地址。", section: "导语", query: "接口地址现状" }
+        ],
+        discoveryQueries: ["发现遗漏"]
+      });
+    }
+    if (messages[0].content.includes("依据自身知识")) {
+      return toResponse({
+        coreStillHolds: false,
+        items: [
+          {
+            quote: "默认版本是 v1。", before: "默认版本是 v1。", after: "默认版本是 v2。",
+            section: "导语", status: "已经失效", action: "修正", reason: "模型记得默认版本已经升级。"
+          },
+          { quote: "接口仍是旧地址。", needsVerification: true }
+        ]
+      });
+    }
+    throw new Error("evidence judge must not run when search fails");
+  };
+  const failedSearch = await freshness.check(article, model, "fixture");
+  assert.equal(failedSearch.updates.length, 1);
+  assert.equal(failedSearch.updates[0].after, "默认版本是 v2。");
+  assert.ok(failedSearch.unverified.some((item) => item.text === "接口仍是旧地址。" && item.reason === "公开检索失败。"));
+  assert.ok(failedSearch.unverified.some((item) => item.text === "补充检索" && item.reason === "公开检索失败。"));
+  const failedReport = renderFreshnessReview(article.basename, failedSearch);
+  assert.match(failedReport, /默认版本是 v2/);
+  assert.match(failedReport, /接口仍是旧地址/);
+  assert.match(failedReport, /要不要按这些建议更新原文/);
+}
+
+{
+  const article = await vault.create("Articles/Knowledge Gap.md", "接口仍是旧地址。\n");
+  const calls = [];
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (String(url).includes("api.deepseek.com")) {
+      calls.push(JSON.parse(body).query);
+      return { status: 200, json: { results: [{
+        url: "https://example.com/api", title: "接口说明", content: "当前接口已经改为新地址。"
+      }] } };
+    }
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        purpose: "说明接口", coreConclusion: "接口仍是旧地址。",
+        claims: [{ quote: "接口仍是旧地址。", section: "导语", query: "接口地址现状" }],
+        discoveryQueries: []
+      });
+    }
+    if (messages[0].content.includes("依据自身知识")) {
+      return { status: 200, json: { choices: [{ message: { content: "不是 JSON" } }] } };
+    }
+    const payload = JSON.parse(messages[1].content);
+    return toResponse({
+      items: [{
+        quote: "接口仍是旧地址。", before: "接口仍是旧地址。", after: "接口已经改为新地址。",
+        section: "导语", status: "已经失效", action: "修正", reason: "公告已经更换接口。",
+        sourceId: payload.sources[0].id, evidenceQuote: "当前接口已经改为新地址。"
+      }]
+    });
+  };
+  const recovered = await freshness.check(article, model, "fixture");
+  assert.deepEqual(calls, ["接口地址现状"]);
+  assert.equal(recovered.updates[0]?.source.url, "https://example.com/api");
+  assert.equal(recovered.unverified.length, 0);
+}
+
+{
+  const article = await vault.create("Articles/Offline Gap.md", "接口仍是旧地址。\n");
+  let searched = false;
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (String(url).includes("api.deepseek.com")) searched = true;
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        claims: [{ quote: "接口仍是旧地址。", section: "导语", query: "接口地址现状" }],
+        discoveryQueries: []
+      });
+    }
+    return { status: 200, json: { choices: [{ message: { content: "不是 JSON" } }] } };
+  };
+  const offlineGap = await freshness.check(article, model, "");
+  assert.equal(searched, false);
+  assert.equal(offlineGap.updates.length, 0);
+  assert.equal(offlineGap.followUp[0]?.reason, "这一批判断没有返回可用结果。");
+  const gapReport = renderFreshnessReview(article.basename, offlineGap);
+  assert.match(gapReport, /接口仍是旧地址/);
+  assert.doesNotMatch(gapReport, /没有判断完，原文先不改/);
+}
+
+{
+  const article = await vault.create("Articles/Rejected Evidence.md", "默认上限是 10。\n");
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (String(url).includes("api.deepseek.com")) {
+      return { status: 200, json: { results: [{
+        url: "https://example.com/limit", title: "上限说明", content: "版本升级后默认限制为 75。"
+      }] } };
+    }
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        purpose: "说明上限", coreConclusion: "默认上限是 10。",
+        claims: [{ quote: "默认上限是 10。", section: "导语", query: "默认上限" }],
+        discoveryQueries: []
+      });
+    }
+    if (messages[0].content.includes("依据自身知识")) {
+      const payload = JSON.parse(messages[1].content);
+      return toResponse({ items: payload.claims.map((claim) => ({ quote: claim.quote, needsVerification: true })) });
+    }
+    const payload = JSON.parse(messages[1].content);
+    return toResponse({
+      items: [{
+        quote: "默认上限是 10。", before: "默认上限是 10。", after: "默认上限是 12。",
+        section: "导语", status: "已经失效", action: "修正", reason: "证据没有支持新上限。",
+        sourceId: payload.sources[0].id, evidenceQuote: "版本升级后默认限制为 75。"
+      }]
+    });
+  };
+  const rejected = await freshness.check(article, model, "fixture");
+  assert.equal(rejected.updates.length, 0);
+  assert.ok(rejected.unverified.some((item) => item.text === "默认上限是 10。" && item.reason.includes("数字")));
+  const rejectedReport = renderFreshnessReview(article.basename, rejected);
+  assert.match(rejectedReport, /默认上限是 10/);
+  assert.match(rejectedReport, /证据不足，原文先不改/);
+}
+
+{
+  const article = await vault.create("Articles/Model Offline.md", "默认版本是 v1。\n");
+  globalThis.knowflowRequest = async () => { throw new Error("network error"); };
+  await assert.rejects(() => freshness.check(article, model, ""), /无法连接模型服务/);
+}
+
+{
+  const article = await vault.create("Articles/Model Drop.md", "默认版本是 v1。\n");
+  let calls = 0;
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (String(url).includes("api.deepseek.com")) throw new Error("search should stay off");
+    calls += 1;
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        claims: [{ quote: "默认版本是 v1。", section: "导语", query: "版本现状" }],
+        discoveryQueries: []
+      });
+    }
+    throw new Error("network error");
+  };
+  const dropped = await freshness.check(article, model, "");
+  assert.equal(calls, 2);
+  assert.equal(dropped.updates.length, 0);
+  assert.equal(dropped.followUp[0]?.text, "默认版本是 v1。");
+  assert.match(dropped.followUp[0]?.reason ?? "", /连接中断/);
+  const report = renderFreshnessReview(article.basename, dropped);
+  assert.match(report, /默认版本是 v1/);
+  assert.match(report, /没有判断完/);
+}
+
+{
+  const article = await vault.create("Articles/No Stream.md", "默认版本是 v1。\n");
+  const previousFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches += 1;
+    throw new Error("freshness must not open a stream");
+  };
+  let requests = 0;
+  globalThis.knowflowRequest = async ({ url, body }) => {
+    if (String(url).includes("api.deepseek.com")) throw new Error("search should stay off");
+    requests += 1;
+    const { messages } = JSON.parse(body);
+    if (messages[0].content.includes("全文分析")) {
+      return toResponse({
+        claims: [{ quote: "默认版本是 v1。", section: "导语", query: "版本现状" }],
+        discoveryQueries: []
+      });
+    }
+    return toResponse({
+      items: [{
+        quote: "默认版本是 v1。", before: "默认版本是 v1。", after: "默认版本是 v2。",
+        section: "导语", status: "已经失效", action: "修正", reason: "模型记得默认版本已经升级。"
+      }]
+    });
+  };
+  try {
+    const once = await freshness.check(article, model, "", () => {}, () => {});
+    assert.equal(fetches, 0, "a dropped connection must not start a second generation");
+    assert.equal(requests, 2, "each model step is one request");
+    assert.equal(once.updates[0]?.after, "默认版本是 v2。");
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+}
+
+{
+  // Article edits stream their reasoning. The stream must still ask for JSON.
+  const previousWindow = globalThis.window;
+  const previousFetch = globalThis.fetch;
+  const previousWarn = console.warn;
+  const previousRequest = globalThis.knowflowRequest;
+  globalThis.window = { ...previousWindow, setTimeout, clearTimeout };
+  const warnings = [];
+  console.warn = (...args) => { warnings.push(args); };
+  const bodies = [];
+  let answer = "";
+  globalThis.fetch = async (_url, request) => {
+    bodies.push(JSON.parse(request.body));
+    const events = `data: ${JSON.stringify({ choices: [{ delta: { content: answer } }] })}\n\ndata: [DONE]\n\n`;
+    return {
+      ok: true,
+      body: new ReadableStream({ start(stream) { stream.enqueue(new TextEncoder().encode(events)); stream.close(); } })
+    };
+  };
+  const chatModel = { ...model, runtime: "openai-compatible", apiKey: "key" };
+  const editing = new AiService({ chatModel });
+  globalThis.knowflowRequest = async () => ({ status: 200, json: { choices: [{ message: { content: answer } }] } });
+  try {
+    answer = JSON.stringify({ edits: [{ op: "replace", anchor: "旧句。", text: "新句。" }] });
+    const valid = await editing.proposeArticleEdits("把旧句改掉", "旧句。", () => {});
+    assert.deepEqual(bodies[0].response_format, { type: "json_object" });
+    assert.equal(bodies[0].stream, true);
+    assert.deepEqual(valid.edits, [{ op: "replace", anchor: "旧句。", text: "新句。" }]);
+    answer = "{\"edits\":[{\"op\":\"insert\",\"text\":\"断开";
+    const broken = await editing.proposeArticleEdits("补充", "旧句。", () => {});
+    assert.equal(broken.edits, null, "a broken payload becomes no usable edit instead of a raw dump");
+
+    const noteText = "模拟笔记内容";
+    answer = `{ "text": ${noteText.repeat(110)} }`;
+    const transport = new AiTransport();
+    for (const handlers of [undefined, { onReasoning() {} }]) {
+      warnings.length = 0;
+      await assert.rejects(
+        () => transport.requestJson(chatModel, [{ role: "user", content: "返回 JSON" }], handlers),
+        (error) => error instanceof InvalidAiJsonError && !error.message.includes(noteText) && error.cause === undefined
+      );
+      assert.equal(warnings.length, 1);
+      assert.doesNotMatch(JSON.stringify(warnings), new RegExp(noteText));
+      assert.deepEqual(warnings[0][1], { responseChars: answer.length, streamRequested: Boolean(handlers) });
+    }
+  } finally {
+    globalThis.window = previousWindow;
+    globalThis.fetch = previousFetch;
+    globalThis.knowflowRequest = previousRequest;
+    console.warn = previousWarn;
+  }
 }
 
 {
@@ -350,6 +937,10 @@ assert.match(retiredText, /\*\*已删除\*\*/);
   await formatting.confirmFormatting([candidate], "", "code-chat");
   assert.ok(seen[1].includes("只允许返回 keep 或 reformat-code"), "chat formatting must be limited to reformat-code");
   assert.ok(seen[1].includes("只有确认是网页行号时才去掉行首数字"), "chat formatting still follows the code rules");
+  await formatting.confirmFormatting([candidate], "", "code-chat-comments");
+  assert.match(seen[2], /允许在代码行上方或行尾新增简短的中文注释/);
+  assert.match(seen[2], /保留已有注释和所有原有代码/);
+  assert.doesNotMatch(seen[2], /不要改动任何字符|只修改布局所需的空白|以参考为准/);
 }
 
 {

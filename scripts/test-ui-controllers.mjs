@@ -11,7 +11,8 @@ await esbuild.build({
   entryPoints: {
     "chat-controller": "src/ui/controllers/chat-controller.ts",
     "summary-controller": "src/ui/controllers/summary-controller.ts",
-    "sidebar-view": "src/ui/sidebar-view.ts"
+    "sidebar-view": "src/ui/sidebar-view.ts",
+    "chat-note-service": "src/services/chat/chat-note-service.ts"
   },
   format: "esm",
   outdir: tempDir,
@@ -41,6 +42,26 @@ await esbuild.build({
 const { ChatController } = await import(pathToFileURL(join(tempDir, "chat-controller.js")).href);
 const { SummaryController } = await import(pathToFileURL(join(tempDir, "summary-controller.js")).href);
 const { KnowFlowSidebarView } = await import(pathToFileURL(join(tempDir, "sidebar-view.js")).href);
+const { ChatNoteService } = await import(pathToFileURL(join(tempDir, "chat-note-service.js")).href);
+
+function chatElement(tag = "div", props = {}, elements = []) {
+  const listeners = new Map();
+  const element = {
+    tag, props, style: {}, ownerDocument: {}, disabled: false,
+    createDiv: (options) => chatElement("div", options, elements),
+    createSpan: (options) => chatElement("span", options, elements),
+    createEl: (name, options) => chatElement(name, options, elements),
+    querySelector: () => null, empty() {}, addClass() {}, setAttribute() {}, animate() {},
+    addEventListener(event, callback) {
+      listeners.set(event, [...(listeners.get(event) ?? []), callback]);
+    },
+    emit(event) {
+      if (!this.disabled) for (const callback of listeners.get(event) ?? []) callback();
+    }
+  };
+  elements.push(element);
+  return element;
+}
 
 {
   const file = { path: "Articles/Test.md", basename: "Test" };
@@ -167,15 +188,51 @@ const { KnowFlowSidebarView } = await import(pathToFileURL(join(tempDir, "sideba
   assert.match(checked.content, /\*\*原文\*\*\n> /);
   assert.match(checked.content, /要不要按这些建议更新原文/);
   assert.deepEqual(writes, []);
-  assert.deepEqual(controller.replyChoices(controller.activeThread, checked).map((choice) => choice.reply), ["更新", "不用"], "buttons show while the review waits");
-  await ask("应用第 3 条");
+  assert.deepEqual(controller.replyChoices(controller.activeThread, checked).map((choice) => choice.reply), ["更新", "不用"], "freshness offers only update and decline");
+  const missing = await ask("应用第 3 条");
   assert.deepEqual(controller.replyChoices(controller.activeThread, checked), [], "buttons hide once the user has replied");
+  assert.deepEqual(controller.replyChoices(controller.activeThread, missing).map((choice) => choice.reply), ["更新", "不用"]);
   assert.deepEqual(writes, []);
-  await ask("应用第 2 条");
+  assert.match((await ask("更新")).content, /请先勾选/);
+  assert.deepEqual(writes, [], "an invalid number cannot authorize all updates");
+  assert.match((await ask("apply: 1 · replace · outdated")).content, /不符/);
+  assert.match((await ask("update")).content, /请先勾选/);
+  assert.deepEqual(writes, [], "an unrecognized label cannot authorize all updates");
+  const picked = await ask("应用：2 · 修正 · 已经失效");
+  assert.match(picked.content, /将只写入第 2 项/);
+  assert.deepEqual(controller.replyChoices(controller.activeThread, picked).map((choice) => choice.reply), ["更新", "不用"]);
+  assert.deepEqual(writes, []);
+  const view = new KnowFlowSidebarView({ app }, { ...plugin, router: { getContext: () => ({ mode: "article-detail", activeFile: file }) } });
+  view.chatController = controller;
+  let confirmation;
+  view.submitChat = (question) => { confirmation = ask(question); };
+  const elements = [];
+  view.renderChatChoices(chatElement("div", {}, elements), controller.activeThread, picked, file);
+  const [selectAll, ...boxes] = elements.filter((element) => element.tag === "input");
+  const buttons = elements.filter((element) => element.tag === "button");
+  assert.deepEqual(buttons.map(({ props }) => props.text), ["更新", "不用"]);
+  assert.deepEqual(boxes.map(({ checked }) => checked), [false, true]);
+  assert.equal(selectAll.indeterminate, true);
+  selectAll.checked = true;
+  selectAll.emit("change");
+  assert.deepEqual(boxes.map(({ checked }) => checked), [true, true]);
+  selectAll.checked = false;
+  selectAll.emit("change");
+  assert.deepEqual(boxes.map(({ checked }) => checked), [false, false]);
+  assert.equal(buttons[0].disabled, true);
+  buttons[0].emit("click");
+  assert.equal(confirmation, undefined);
+  boxes[1].checked = true;
+  boxes[1].emit("change");
+  assert.equal(buttons[0].disabled, false);
+  buttons[0].emit("click");
+  await confirmation;
   assert.deepEqual(writes, [[1]]);
   await ask("检查并更新这篇文章");
   assert.deepEqual(writes, [[1]], "check-and-update waits for confirmation");
   await ask("应用第 1、2 条");
+  assert.deepEqual(writes, [[1]]);
+  await ask("更新");
   assert.deepEqual(writes, [[1], [0, 1]]);
   controller.activeThread = null;
   assert.match((await ask("应用全部")).content, /本对话没有可应用/);
@@ -213,6 +270,116 @@ const { KnowFlowSidebarView } = await import(pathToFileURL(join(tempDir, "sideba
 }
 
 {
+  const oldWindow = globalThis.window;
+  globalThis.window = { requestAnimationFrame: () => 1, moment: () => ({ format: () => "20261127_100000" }) };
+  try {
+    const notes = new Map();
+    const app = { vault: {
+      adapter: { exists: async (path) => notes.has(path) },
+      createFolder: async () => {}, create: async (path, body) => notes.set(path, body),
+      getMarkdownFiles: () => [...notes.keys()].map((path) => ({ path })),
+      cachedRead: async ({ path }) => notes.get(path)
+    } };
+    const chatNotes = new ChatNoteService(app, "Chat history");
+    const context = { mode: "article-detail", activeFile: { path: "Articles/B.md" } };
+    const view = new KnowFlowSidebarView({ app }, { chatNotes, router: { getContext: () => context } });
+    const elements = [];
+    view.containerEl = { children: [null, chatElement("div", {}, elements)] };
+    view.renderArticleDetail = () => {};
+    view.renderChatThread = () => {};
+    view.finishAutoComposer = () => {};
+    view.render();
+    const time = "2026-11-27T00:00:00Z";
+    view.chatController.activeThread = {
+      id: "thread", filePath: context.activeFile.path, contextLabel: "B", sourceMode: "article-detail",
+      createdAt: time, updatedAt: time, messages: [{ role: "user", content: "问题", createdAt: time }]
+    };
+    await view.chatController.saveActiveThread();
+    context.activeFile = { path: "Articles/A.md" };
+    view.render();
+    assert.equal(view.chatController.activeThread, null);
+    await view.openChatHistory();
+    const saved = elements.find(({ props }) => props.cls === "kf-chat-history-item");
+    saved.emit("click");
+    assert.equal(view.chatController.activeThread.filePath, "Articles/B.md", "saved chats open from other articles");
+    view.render();
+    assert.equal(view.chatController.activeThread.filePath, "Articles/B.md", "ordinary rerenders keep the opened chat");
+    context.activeFile = { path: "Articles/C.md" };
+    view.render();
+    assert.equal(view.chatController.activeThread, null, "navigating to another article still leaves the chat");
+  } finally {
+    globalThis.window = oldWindow;
+  }
+}
+
+{
+  const file = { path: "Articles/Article.md", basename: "Article", extension: "md" };
+  const source = { title: "发布说明", url: "https://example.com/release", date: "", quote: "已更新至版本 2" };
+  const review = {
+    path: file.path, original: "版本 1\n\n上限 10\n", checkedOn: "2026-11-23", verdict: "局部内容需要更新",
+    coreConclusion: "", incomplete: [], held: [], unverified: [],
+    updates: [
+      { status: "已经失效", action: "修正", section: "一", before: "版本 1", after: "版本 2", reason: "版本已更新。", source },
+      { status: "已经失效", action: "修正", section: "一", before: "上限 10", after: "上限 20", reason: "上限已提高。", source: { ...source, quote: "上限提升至 20" } }
+    ]
+  };
+  const writes = [];
+  let answered = false;
+  const model = { runtime: "disabled", apiBaseUrl: "", apiKey: "", model: "" };
+  const app = { vault: {
+    getAbstractFileByPath: (path) => path === file.path ? file : null,
+    read: async () => review.original
+  } };
+  const plugin = {
+    settings: { summaryModel: model, taskModel: model, chatModel: model, embeddingModel: model },
+    ai: {
+      isFreshnessRequest: async () => false,
+      answerStream: async () => {
+        answered = true;
+        return { promptTokens: 0, completionTokens: 0, totalTokens: 0, estimated: false };
+      }
+    },
+    freshness: {
+      check: async () => review,
+      apply: async (_target, _review, selected) => {
+        writes.push([...selected]);
+        return { written: selected.size, skipped: [] };
+      }
+    }
+  };
+  const controller = new ChatController(app, plugin, () => {});
+  const ask = async (question, replay = false) => {
+    await controller.submit(question, { mode: "article-detail", activeFile: file, selectedPath: null }, file, {
+      onStart() {}, onContent() {}, onReasoning() {}, replay
+    });
+    return controller.activeThread.messages.at(-1);
+  };
+  await ask("检查当前文章是否过时");
+  await ask("应用第 1 个");
+  const first = await ask("更新");
+  assert.equal(answered, false);
+  assert.deepEqual(writes, [[0]]);
+  assert.match(first.content, /还有 1 项没写入/);
+  assert.match(first.content, /上限 10/);
+  assert.deepEqual(controller.replyChoices(controller.activeThread, first).map((choice) => choice.reply), ["更新", "不用"]);
+  const second = await ask("更新");
+  assert.deepEqual(writes[1], [0]);
+  assert.match(second.content, /已更新 1 项/);
+  assert.doesNotMatch(second.content, /还有 1 项没写入/);
+  assert.equal(answered, false);
+  await ask("检查当前文章是否过时");
+  const ordinary = await ask("最新的是哪一个？");
+  assert.equal(answered, true);
+  assert.deepEqual(controller.replyChoices(controller.activeThread, ordinary), []);
+  const stale = await ask("应用第 1 个");
+  assert.match(stale.content, /本对话没有可应用/);
+  await ask("检查当前文章是否过时");
+  await ask("换个角度解释", true);
+  assert.match((await ask("应用第 1 个")).content, /本对话没有可应用/);
+  assert.deepEqual(writes, [[0], [0]]);
+}
+
+{
   // Code-format preview: buttons, targeted writes, and "应用全部" reaching the right handler.
   const file = { path: "Articles/Code.md", basename: "Code", extension: "md" };
   const fixture = (blocks) => [
@@ -235,10 +402,10 @@ const { KnowFlowSidebarView } = await import(pathToFileURL(join(tempDir, "sideba
   const plugin = {
     settings: {},
     ai: {
-      confirmFormatting: async (batch, instructions) => {
-        calls.push({ ids: batch.map((candidate) => candidate.id), instructions });
+      confirmFormatting: async (batch, _instructions, scope) => {
+        calls.push({ ids: batch.map((candidate) => candidate.id), scope });
         // Only a comment request may add comments; a pure format returns the code unchanged.
-        return batch.map((candidate) => ({ id: candidate.id, action: "reformat-code", language: "python", content: instructions ? `# 说明\n${candidate.content}` : candidate.content }));
+        return batch.map((candidate) => ({ id: candidate.id, action: "reformat-code", language: "python", content: scope === "code-chat-comments" ? `# 说明\n${candidate.content}` : candidate.content }));
       }
     }
   };
@@ -253,20 +420,20 @@ const { KnowFlowSidebarView } = await import(pathToFileURL(join(tempDir, "sideba
   // One block: the comment request reaches the model, the preview offers 更新 / 不用, and 更新 writes only that block.
   const single = await ask("格式化下2.4. exp下面的代码块，增加一些注释");
   assert.deepEqual(calls.at(-1).ids, ["fence-1"]);
-  assert.match(calls.at(-1).instructions, /增加注释/);
+  assert.equal(calls.at(-1).scope, "code-chat-comments");
   assert.match(single.content, /要写回这个代码块吗/);
   assert.deepEqual(controller.replyChoices(controller.activeThread, single).map((choice) => choice.reply), ["更新", "不用"]);
   await ask("更新");
   assert.match(body, /```python\n# 说明\nimport os\nprint\(1\)\n```/);
   assert.match(body, /```python\nkeep = 1\n```/, "blocks outside the named section are untouched");
 
-  // Two blocks in one section: each gets a button, and "应用第 2 个" writes only the second one.
+  // Two blocks in one section: buttons stay 更新 / 不用, and typing "应用第 2 个" writes only the second one.
   body = fixture([["a = 1"], ["b = 2"]]);
   controller.activeThread = null;
   const two = await ask("格式化 2.4. exp 章节的代码块");
   assert.deepEqual(
     controller.replyChoices(controller.activeThread, two).map((choice) => choice.reply),
-    ["应用全部", "应用第 1 个", "应用第 2 个", "不用"]
+    ["更新", "不用"]
   );
   await ask("应用第 2 个");
   assert.match(body, /```python\na = 1\n```/, "first block is not written");
@@ -287,7 +454,7 @@ const { KnowFlowSidebarView } = await import(pathToFileURL(join(tempDir, "sideba
   controller.activeThread = null;
   plugin.ai.confirmFormatting = async (batch) => batch.map((candidate) => ({ id: candidate.id, action: "reformat-code", language: "python", content: "" }));
   const empty = await ask("格式化 2.4. exp 章节的代码块");
-  assert.match(empty.content, /格式正常/);
+  assert.match(empty.content, /未通过校验/);
   assert.match(body, /```python\ne = 5\n```/);
 
   // Pure formatting may not change the code: a candidate that does is not offered, and the note stays.
@@ -295,7 +462,7 @@ const { KnowFlowSidebarView } = await import(pathToFileURL(join(tempDir, "sideba
   controller.activeThread = null;
   plugin.ai.confirmFormatting = async (batch) => batch.map((candidate) => ({ id: candidate.id, action: "reformat-code", language: "python", content: candidate.content.replace("f = 6", "f = 7") }));
   const changed = await ask("格式化 2.4. exp 章节的代码块");
-  assert.match(changed.content, /格式正常/, "pure formatting that changes code is not offered");
+  assert.match(changed.content, /未通过校验/, "pure formatting that changes code is not offered");
   assert.match(body, /```python\nf = 6\n```/);
 
   // Pure formatting keeps the fence's own language even when the model proposes another one.
@@ -313,6 +480,123 @@ const { KnowFlowSidebarView } = await import(pathToFileURL(join(tempDir, "sideba
   const commentChanged = await ask("格式化下2.4. exp下面的代码块，增加一些注释");
   assert.doesNotMatch(commentChanged.content, /要写回这个代码块吗/, "a comment request that changes code is not offered");
   assert.match(body, /```python\nh = 8\n```/);
+}
+
+{
+  // The same restore result as clipping: a perl object becomes javascript, a typo is not "fixed",
+  // a failed batch leaves its block, and a note edited after the preview is not overwritten.
+  const file = { path: "Articles/Ts.md", basename: "Ts", extension: "md" };
+  const eslint = `"rules": {    "prettier/prettier": "error"  },  "overrides": [    {      // Tolerate warnings on legacy JavaScript files      "files": ["*.js"]    }  ]`;
+  const eslintRestored = [
+    `"rules": {`,
+    `  "prettier/prettier": "error"`,
+    `},`,
+    `"overrides": [`,
+    `  {`,
+    `    // Tolerate warnings on legacy JavaScript files`,
+    `    "files": ["*.js"]`,
+    `  }`,
+    `]`
+  ].join("\n");
+  const typed = "import { makeFeatures } = from './domain/features';import { userCollection } from './infrastructure/mongodb/UserCollection';import { ImageStorage } from './infrastructure/ImageStorage.js';";
+  const flat = "const value = {    ready: true,    name: \"demo\"  };";
+  const pretty = "const value = {\n  ready: true,\n  name: \"demo\"\n};";
+  const huge = `const blob = "${"a".repeat(8000)}";`;
+  let body = ["# 标题", "", "```perl", eslint, "```", "", "```typescript", typed, "```", "", "```javascript", "const ok = 1;", "```", ""].join("\n");
+  const app = {
+    vault: {
+      getAbstractFileByPath: (path) => path === file.path ? file : null,
+      read: async () => body,
+      process: async (target, update) => {
+        assert.equal(target, file);
+        body = update(body);
+      }
+    }
+  };
+  const plugin = {
+    settings: {},
+    ai: {
+      confirmFormatting: async (batch) => batch.map((candidate) => {
+        if (candidate.fenceLanguage === "perl") return { id: candidate.id, action: "reformat-code", language: "perl", content: eslintRestored };
+        if (candidate.content.includes("makeFeatures")) {
+          return { id: candidate.id, action: "reformat-code", language: "typescript", content: candidate.content.replaceAll("';import", "';\nimport") };
+        }
+        return { id: candidate.id, action: "keep" };
+      })
+    }
+  };
+  const controller = new ChatController(app, plugin, () => {});
+  const ask = async (question) => {
+    await controller.submit(question, { mode: "article-detail", activeFile: file, selectedPath: null }, file, {
+      onStart() {}, onContent() {}, onReasoning() {}
+    });
+    return controller.activeThread.messages.at(-1);
+  };
+  const preview = await ask("格式化文章里的代码");
+  assert.match(preview.content, /```javascript\n"rules":/);
+  assert.match(preview.content, /```typescript\nimport \{ makeFeatures \} = from/);
+  assert.doesNotMatch(preview.content, /const ok = 1/, "an unchanged ordinary block is not offered");
+  await ask("更新");
+  assert.match(body, /```javascript\n"rules": \{\n {2}"prettier\/prettier": "error"/);
+  assert.doesNotMatch(body, /```perl/);
+  assert.match(body, /= from '\.\/domain\/features'/);
+  assert.match(body, /```javascript\nconst ok = 1;/);
+
+  body = ["# 标题", "", "```perl", "SELECT id FROM events;", "```", ""].join("\n");
+  controller.activeThread = null;
+  plugin.ai.confirmFormatting = async (batch) => batch.map((candidate) => ({
+    id: candidate.id, action: "reformat-code", language: "sql", content: candidate.content
+  }));
+  const labelPreview = await ask("格式化文章里的代码");
+  assert.match(labelPreview.content, /```sql\nSELECT id FROM events;/);
+  assert.match(body, /```perl\nSELECT id FROM events;/, "a label correction still waits for confirmation");
+  await ask("更新");
+  assert.match(body, /```sql\nSELECT id FROM events;/);
+
+  const scriptLine = '"scripts": {    "lint": "eslint .",    "lint:types": "tsc --noEmit --skipLibCheck"  },';
+  body = ["# 标题", "", "```javascript", scriptLine, "```", "", "图注。"].join("\n");
+  controller.activeThread = null;
+  let modelCalls = 0;
+  plugin.ai.confirmFormatting = async () => { modelCalls += 1; return []; };
+  const localPreview = await ask("格式化文章里的代码");
+  assert.match(localPreview.content, /"scripts": \{\n {2}"lint":/);
+  assert.match(body, /"scripts": \{ {4}"lint":/);
+  await ask("更新");
+  assert.equal(modelCalls, 0);
+  assert.match(body, /"scripts": \{\n {2}"lint": "eslint \.",\n {2}"lint:types": "tsc --noEmit --skipLibCheck"\n\},\n```\n\n图注。/);
+
+  body = ["# 标题", "", "```javascript", huge, "```", "", "```javascript", flat, "```", ""].join("\n");
+  controller.activeThread = null;
+  plugin.ai.confirmFormatting = async (batch) => {
+    if (batch.some((candidate) => candidate.content.includes("blob"))) throw new Error("batch failed");
+    return batch.map((candidate) => ({ id: candidate.id, action: "reformat-code", language: "javascript", content: pretty }));
+  };
+  const partial = await ask("格式化文章里的代码");
+  assert.match(partial.content, /ready: true/);
+  assert.match(partial.content, /1 个代码块的检查没有完成/);
+  assert.doesNotMatch(partial.content, /blob/);
+  const partialWrite = await ask("更新");
+  assert.match(partialWrite.content, /已写入 1 个代码块/);
+  assert.match(partialWrite.content, /1 个代码块的检查没有完成/);
+  assert.match(body, /const blob = "/, "the failed batch keeps its original block");
+  assert.match(body, /ready: true/);
+
+  body = ["# 标题", "", "```javascript", flat, "```", ""].join("\n");
+  controller.activeThread = null;
+  plugin.ai.confirmFormatting = async (batch) => batch.map((candidate) => ({ id: candidate.id, action: "reformat-code", language: "javascript", content: pretty }));
+  await ask("格式化文章里的代码");
+  body = `${body}\n旁边写了一句。\n`;
+  const stale = await ask("更新");
+  assert.match(stale.content, /确认前被修改/);
+  assert.match(body, /旁边写了一句/);
+  assert.match(body, /const value = \{ {4}ready: true/, "the old preview is not written over the edited note");
+
+  body = ["# 标题", "", "```javascript", flat, "```", ""].join("\n");
+  controller.activeThread = null;
+  plugin.ai.confirmFormatting = async () => { throw new Error("batch failed"); };
+  const failed = await ask("格式化文章里的代码");
+  assert.match(failed.content, /没有完成/);
+  assert.match(body, /const value = \{ {4}ready: true/);
 }
 
 {
@@ -428,6 +712,151 @@ const { KnowFlowSidebarView } = await import(pathToFileURL(join(tempDir, "sideba
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual([taskCalls, reviewCalls], [2, 2]);
   assert.equal(view.dailyTaskPlanErrors.size + view.dailyReviewErrors.size, 0);
+}
+
+{
+  // Article edits are previewed, then written only after confirmation. Questions stay in chat.
+  const file = { path: "Articles/Edit.md", basename: "Edit", extension: "md" };
+  let body = "开头保持不变。\n\n用队列连接生产者和消费者。\n\n结尾保持不变。\n";
+  const app = {
+    vault: {
+      getAbstractFileByPath: (path) => path === file.path ? file : null,
+      read: async () => body,
+      process: async (target, update) => {
+        assert.equal(target, file);
+        body = update(body);
+      }
+    }
+  };
+  const plugin = {
+    ai: {
+      proposeArticleEdits: async (instruction, article) => {
+        assert.match(instruction, /改成/);
+        assert.match(article, /用队列连接生产者和消费者/);
+        return { edits: [{ before: "用队列连接生产者和消费者。", after: "用队列解耦生产者和消费者。" }], truncated: false };
+      },
+      answerStream: async (_label, _content, _history, handlers) => {
+        handlers.onContent("这是解释");
+        return { promptTokens: 0, completionTokens: 0, totalTokens: 0, estimated: false };
+      }
+    }
+  };
+  const controller = new ChatController(app, plugin, () => {});
+  const ask = async (question) => {
+    await controller.submit(question, { mode: "article-detail", activeFile: file, selectedPath: null }, file, {
+      onStart() {}, onContent() {}, onReasoning() {}
+    });
+    return controller.activeThread.messages.at(-1);
+  };
+
+  const preview = await ask("把「用队列连接生产者和消费者。」改成更短的说法");
+  assert.equal(preview.kind, "article-edit");
+  assert.match(preview.content, /用队列连接生产者和消费者/);
+  assert.match(preview.content, /要把这次修改写回文章吗/);
+  assert.match(body, /用队列连接生产者和消费者/);
+  assert.deepEqual(controller.replyChoices(controller.activeThread, preview).map((choice) => choice.reply), ["更新", "不用"]);
+  const written = await ask("更新");
+  assert.match(written.content, /已写入 1 处修改/);
+  assert.match(body, /用队列解耦生产者和消费者/);
+  assert.doesNotMatch(body, /用队列连接生产者和消费者/);
+
+  // Intent comes from the model, not from a list of phrasings.
+  const answerWith = (text) => {
+    plugin.ai.answerStream = async (_label, _content, _history, handlers) => {
+      handlers.onContent(text);
+      return { promptTokens: 0, completionTokens: 0, totalTokens: 0, estimated: false };
+    };
+  };
+  const insertion = { op: "insert", anchor: "用队列解耦生产者和消费者。", at: "after", text: "在 AD 审计中的位置\n\n域控是 LDAP。" };
+  plugin.ai.classifyArticleEdit = async (question) =>
+    ({ "补充到文章中啊": "edit", "当前文章的信息量太少了，需要补充": "edit", "第二节好像少了背景": "ask" })[question] ?? "none";
+
+  controller.activeThread = null;
+  answerWith("建议插在功能介绍之后。\n\n在 AD 审计中的位置\n\n域控是 LDAP。");
+  await ask("这段放哪");
+  plugin.ai.proposeArticleEdits = async (instruction, _article, _onReasoning, previousReply) => {
+    assert.equal(instruction, "补充到文章中啊");
+    assert.match(previousReply, /在 AD 审计中的位置/);
+    return { edits: [insertion], truncated: false };
+  };
+  const placed = await ask("补充到文章中啊");
+  assert.equal(placed.kind, "article-edit");
+  assert.match(placed.content, /在 AD 审计中的位置/);
+  assert.doesNotMatch(body, /在 AD 审计中的位置/, "an edit is only a preview until confirmed");
+
+  controller.activeThread = null;
+  plugin.ai.proposeArticleEdits = async (instruction, _article, _onReasoning, previousReply) => {
+    assert.equal(instruction, "当前文章的信息量太少了，需要补充");
+    assert.equal(previousReply, "", "a fresh thread has no earlier answer to insert");
+    return { edits: [insertion], truncated: false };
+  };
+  const thin = await ask("当前文章的信息量太少了，需要补充");
+  assert.equal(thin.kind, "article-edit");
+  assert.deepEqual(controller.replyChoices(controller.activeThread, thin).map((choice) => choice.reply), ["更新", "不用"]);
+
+  controller.activeThread = null;
+  answerWith("可以补一句为什么需要队列。");
+  const offer = await ask("第二节好像少了背景");
+  assert.notEqual(offer.kind, "article-edit");
+  assert.match(offer.content, /可以补一句为什么需要队列。\n\n要把这些内容写进文章吗？$/);
+  assert.deepEqual(controller.replyChoices(controller.activeThread, offer).map((choice) => choice.reply), ["写进文章", "不用"]);
+  plugin.ai.proposeArticleEdits = async (instruction, _article, _onReasoning, previousReply) => {
+    assert.match(instruction, /上一轮回答/);
+    assert.equal(previousReply, "可以补一句为什么需要队列。", "the offer question is not article text");
+    return { edits: [insertion], truncated: false };
+  };
+  const accepted = await ask("写进文章");
+  assert.equal(accepted.kind, "article-edit");
+  assert.deepEqual(controller.replyChoices(controller.activeThread, accepted).map((choice) => choice.reply), ["更新", "不用"]);
+
+  controller.activeThread = null;
+  answerWith("可以补一句为什么需要队列。");
+  await ask("第二节好像少了背景");
+  const declined = await ask("不用");
+  assert.match(declined.content, /原文保持不变/);
+  assert.deepEqual(controller.replyChoices(controller.activeThread, declined), []);
+
+  plugin.ai.classifyArticleEdit = async () => "none";
+  answerWith("这是解释");
+
+  controller.activeThread = null;
+  const explained = await ask("为什么要用队列？");
+  assert.equal(explained.content, "这是解释");
+  assert.notEqual(explained.kind, "article-edit");
+  assert.deepEqual(controller.replyChoices(controller.activeThread, explained), [], "ordinary answers do not ask to edit");
+  plugin.ai.classifyArticleEdit = async () => { throw new Error("explicit commands and replies skip intent detection"); };
+
+  body = "同样的句子。\n\n同样的句子。\n";
+  controller.activeThread = null;
+  plugin.ai.proposeArticleEdits = async () => ({ edits: [{ before: "同样的句子。", after: "不同的句子。" }], truncated: false });
+  const ambiguous = await ask("把「同样的句子。」改成别的");
+  assert.match(ambiguous.content, /不止一次/);
+  assert.equal(body, "同样的句子。\n\n同样的句子。\n");
+
+  body = "甲句。\n\n乙句。\n";
+  controller.activeThread = null;
+  plugin.ai.proposeArticleEdits = async () => ({
+    edits: [
+      { before: "甲句。", after: "甲句改。" },
+      { before: "乙句。", after: "乙句改。" }
+    ],
+    truncated: false
+  });
+  const many = await ask("把甲句和乙句改短");
+  assert.deepEqual(
+    controller.replyChoices(controller.activeThread, many).map((choice) => choice.reply),
+    ["更新", "不用"]
+  );
+  const one = await ask("应用第 1 个");
+  assert.match(one.content, /已写入 1 处修改/);
+  assert.match(body, /甲句改。/);
+  assert.match(body, /乙句。/);
+  assert.doesNotMatch(body, /乙句改/);
+  assert.deepEqual(controller.replyChoices(controller.activeThread, one).map((choice) => choice.reply), ["更新", "不用"]);
+  const rest = await ask("更新");
+  assert.match(rest.content, /已写入 1 处修改/);
+  assert.match(body, /乙句改。/);
+  assert.deepEqual(controller.replyChoices(controller.activeThread, rest), []);
 }
 
 await rm(tempDir, { recursive: true, force: true });

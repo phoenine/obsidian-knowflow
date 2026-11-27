@@ -48,8 +48,10 @@ interface RelatedNotesState {
 
 export class KnowFlowSidebarView extends ItemView {
   private chatController: ChatController;
+  private chatWorkspacePath: string | null | undefined;
   private streamingAnswerEl: HTMLElement | null = null;
   private streamingReasoningEl: HTMLElement | null = null;
+  private thinkingFrame = 0;
   private streamingSummaryContentEl: HTMLElement | null = null;
   private streamingSummaryReasoningHistoryEl: HTMLElement | null = null;
   private streamingSummaryReasoningLatestEl: HTMLElement | null = null;
@@ -124,10 +126,13 @@ export class KnowFlowSidebarView extends ItemView {
   async onClose(): Promise<void> {
     this.composerResizeObserver?.disconnect();
     this.composerResizeObserver = null;
+    if (this.thinkingFrame) window.cancelAnimationFrame(this.thinkingFrame);
+    this.thinkingFrame = 0;
     await super.onClose();
   }
 
   render(composerFocus?: ComposerFocus, draft?: string): void {
+    this.leaveChatIfArticleChanged();
     const root = this.containerEl.children[1] as HTMLElement;
     const nextContextKey = this.getRenderContextKey();
     const currentScroll = root.querySelector<HTMLElement>(".kf-content")?.scrollTop ?? 0;
@@ -706,6 +711,7 @@ export class KnowFlowSidebarView extends ItemView {
     }, articleTitle && topic && topic !== articleTitle ? topic : "");
     this.streamingAnswerEl = null;
     this.streamingReasoningEl = null;
+    const file = thread.filePath ? this.app.vault.getAbstractFileByPath(thread.filePath) : null;
 
     for (const message of thread.messages) {
       if (message.role === "user") {
@@ -779,17 +785,7 @@ export class KnowFlowSidebarView extends ItemView {
         answer.textContent = message.content || t("waitingModel");
       }
 
-      const choices = message.status === "done" ? this.chatController.replyChoices(thread, message) : [];
-      if (choices.length) {
-        const choiceRow = row(assistant);
-        setStyles(choiceRow, { flexWrap: "wrap", gap: "8px", width: "100%" });
-        choices.forEach((choice, index) => {
-          // The reply text is what the user would type, so the existing parsers and write path handle it.
-          button(choiceRow, choice.label, () => {
-            void this.submitChat(choice.reply, this.plugin.router.getContext(), file instanceof TFile ? file : null);
-          }, index === 0);
-        });
-      }
+      if (message.status === "done") this.renderChatChoices(assistant, thread, message, file instanceof TFile ? file : null);
 
       if (message.status === "pending" || message.status === "streaming") {
         this.streamingAnswerEl = answer;
@@ -832,8 +828,55 @@ export class KnowFlowSidebarView extends ItemView {
     }
 
     const context = this.plugin.router.getContext();
-    const file = thread.filePath ? this.app.vault.getAbstractFileByPath(thread.filePath) : null;
     this.renderComposer(root, context, thread.contextLabel, file instanceof TFile ? file : null);
+  }
+
+  private renderChatChoices(parent: HTMLElement, thread: ChatThread, message: ChatMessage, file: TFile | null): void {
+    const choices = this.chatController.replyChoices(thread, message);
+    if (!choices.length) return;
+    const selection = this.chatController.freshnessSelection(thread, message);
+    const picker = selection ? row(parent, "kf-freshness-selection") : null;
+    const choiceRow = row(parent);
+    setStyles(choiceRow, { flexWrap: "wrap", gap: "8px", width: "100%" });
+    const [primary] = choices.map((choice, index) => button(choiceRow, choice.label, () => {
+      void this.submitChat(choice.reply, this.plugin.router.getContext(), file);
+    }, index === 0));
+    if (!selection || !picker) return;
+
+    picker.setAttribute("role", "group");
+    picker.setAttribute("aria-label", t("freshnessSelectItems"));
+    setStyles(picker, { flexWrap: "wrap", gap: "8px" });
+    const checkbox = (caption: string): HTMLInputElement => {
+      const label = picker.createEl("label");
+      setStyles(label, { alignItems: "center", display: "inline-flex", gap: "4px" });
+      const input = label.createEl("input", { attr: { type: "checkbox" } });
+      label.createSpan({ text: caption });
+      return input;
+    };
+    const selectAll = selection.count > 1 ? checkbox(t("freshnessSelectAll")) : null;
+    const items = Array.from({ length: selection.count }, (_, index) => {
+      const input = checkbox(t("freshnessSelectItem", { n: index + 1 }));
+      input.checked = selection.selected.includes(index);
+      return input;
+    });
+    const reflectCount = (count: number): void => {
+      primary.disabled = count === 0;
+      primary.style.opacity = count ? "" : "0.55";
+      if (!selectAll) return;
+      selectAll.checked = count === items.length;
+      selectAll.indeterminate = count > 0 && count < items.length;
+    };
+    const change = (): void => {
+      const indexes = items.flatMap((input, index) => input.checked ? [index] : []);
+      const selected = this.chatController.selectFreshnessItems(thread, message, indexes);
+      reflectCount(selected ? indexes.length : 0);
+    };
+    for (const item of items) item.addEventListener("change", change);
+    selectAll?.addEventListener("change", () => {
+      for (const item of items) item.checked = selectAll.checked;
+      change();
+    });
+    reflectCount(selection.selected.length);
   }
 
   private renderComposer(root: HTMLElement, context: ViewContext, label: string, file: TFile | null): void {
@@ -1019,13 +1062,11 @@ export class KnowFlowSidebarView extends ItemView {
         this.streamingAnswerEl.textContent = message.content;
       },
       onReasoning: (message) => {
-        const line = this.streamingReasoningEl?.closest<HTMLElement>(".kf-thinking-line");
-        const text = this.streamingReasoningEl?.querySelector<HTMLElement>(".kf-thinking-text");
-        if (!line || !text) return;
-        line.setCssStyles({ display: "flex" });
-        text.textContent = message.reasoning.replace(/\s+/g, " ").trim();
-        const viewport = text.parentElement;
-        if (viewport) viewport.scrollLeft = viewport.scrollWidth;
+        if (this.thinkingFrame) return;
+        this.thinkingFrame = window.requestAnimationFrame(() => {
+          this.thinkingFrame = 0;
+          paintThinkingLine(this.streamingReasoningEl, message.reasoning);
+        });
       },
       useVaultSearch: this.vaultSearchEnabled,
       contextPaths: Array.from(this.chatContextPaths),
@@ -1442,6 +1483,32 @@ export class KnowFlowSidebarView extends ItemView {
     return "--";
   }
 
+  /** Follow workspace navigation while letting explicitly opened chats stay visible. */
+  private leaveChatIfArticleChanged(): void {
+    const context = this.plugin.router?.getContext();
+    if (!context) return;
+    const thread = this.chatController.activeThread;
+    const activePath = context.activeFile?.path ?? null;
+    const previousPath = this.chatWorkspacePath;
+    this.chatWorkspacePath = activePath;
+    if (!thread || previousPath === undefined || previousPath === activePath || thread.filePath === activePath) return;
+    if (thread.filePath) {
+      this.collapsedChats.set(`${thread.sourceMode}:${thread.filePath}`, {
+        draft: this.composerDraft,
+        contextPaths: Array.from(this.chatContextPaths),
+        thread,
+        pendingReply: thread.messages.find((message) => message.status === "pending" || message.status === "streaming")
+      });
+    }
+    this.chatController.activeThread = null;
+    this.streamingAnswerEl = null;
+    this.streamingReasoningEl = null;
+    this.chatContextPaths.clear();
+    this.composerDraft = "";
+    this.composerExpanded = false;
+    this.composerPreference = "closed";
+  }
+
   private getRenderContextKey(): string {
     if (this.chatController.activeThread) return `chat:${this.chatController.activeThread.id}`;
     if (this.quizSession?.reviewDate) return `review:${this.quizSession.reviewDate}`;
@@ -1473,6 +1540,9 @@ export class KnowFlowSidebarView extends ItemView {
       color: "var(--text-muted)",
       fontSize: "13px",
       lineHeight: "1.5",
+      maxWidth: "100%",
+      minWidth: "0",
+      overflowWrap: "anywhere",
       ...options.style
     });
     await MarkdownRenderer.render(this.app, markdown, container, sourcePath, this);
@@ -1532,11 +1602,26 @@ function renderThinkingLine(parent: HTMLElement, reasoning: string): HTMLElement
     overflow: "hidden",
     whiteSpace: "nowrap"
   });
-  viewport.createSpan({ cls: "kf-thinking-text", text: reasoning.replace(/\s+/g, " ").trim() });
+  const text = viewport.createSpan({ cls: "kf-thinking-text", text: thinkingPreview(reasoning) });
   window.requestAnimationFrame(() => {
     if (viewport.isConnected) viewport.scrollLeft = viewport.scrollWidth;
   });
-  return line;
+  return text;
+}
+
+function paintThinkingLine(text: HTMLElement | null, reasoning: string): void {
+  const line = text?.closest<HTMLElement>(".kf-thinking-line");
+  if (!line || !text) return;
+  if (line.style.display === "none") line.style.display = "flex";
+  const preview = thinkingPreview(reasoning);
+  if (text.textContent !== preview) text.textContent = preview;
+  const viewport = text.parentElement;
+  if (viewport) viewport.scrollLeft = viewport.scrollWidth;
+}
+
+function thinkingPreview(reasoning: string): string {
+  const slice = reasoning.length > 160 ? reasoning.slice(-160) : reasoning;
+  return slice.replace(/\s+/g, " ").trim();
 }
 
 function renderFreshnessStatus(parent: HTMLElement, label: string): void {

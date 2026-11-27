@@ -23,12 +23,15 @@ await esbuild.build({
 const {
   applyFormattingDecisions,
   applyFormattingEdits,
+  assessCodeRestore,
   batchFormattingCandidates,
   collectCodeCandidates,
   collectClippedCodeCandidates,
+  collectFencedBlocks,
   sameCodeTokens,
   isSafeCodeReformat,
   needsCodeReformat,
+  planCodeFormatting,
   contradictsPythonLabel,
   introducesRestrictedBreak,
   sameCodeIgnoringComments,
@@ -342,7 +345,61 @@ assert.equal(
   const split = applyFormattingEdits(python, [{ ...candidate, content: spaced, fenceLanguage: "python", endLine: 2 }], [{
     id: candidate.id, action: "reformat-code", language: "python", content: "def f(x):\n    return x +\n    1"
   }]);
-  assert.equal(split.content, python, "an aligned expression must not be split at an operator");
+  assert.equal(split.content, python, "splitting a Python expression outside parentheses makes it invalid");
+  assert.equal(split.rejectedReformats, 1);
+  const rewritten = applyFormattingEdits(python, [{ ...candidate, content: spaced, fenceLanguage: "python", endLine: 2 }], [{
+    id: candidate.id, action: "reformat-code", language: "python", content: "def f(x):\n    return x -\n    1"
+  }]);
+  assert.equal(rewritten.content, python, "changing an operator is not restoration");
+}
+
+{
+  const code = "let firstCounter = 0, secondCounter = 0;    firstCounter\n++secondCounter;";
+  const moved = "let firstCounter = 0, secondCounter = 0;\nfirstCounter++\nsecondCounter;";
+  const article = ["```javascript", code, "```"].join("\n");
+  const [candidate] = collectCodeCandidates(article).fencedCode;
+  const decision = { id: candidate.id, action: "reformat-code", language: "javascript", content: moved };
+  assert.equal(sameCodeTokens(code, moved), true);
+  assert.deepEqual(assessCodeRestore(candidate, decision), { ok: false, reason: "layout" });
+  assert.equal(applyFormattingEdits(article, [candidate], [decision]).content, article);
+
+  const commented = 'const endpoint = "https://example.com";    // sample configuration\nconst next = 1;';
+  const swallowed = 'const endpoint = "https://example.com";\n// sample configuration const next = 1;';
+  const commentArticle = ["```javascript", commented, "```"].join("\n");
+  const [commentCandidate] = collectCodeCandidates(commentArticle).fencedCode;
+  assert.deepEqual(assessCodeRestore(commentCandidate, { ...decision, content: swallowed }), { ok: false, reason: "layout" });
+}
+
+{
+  const code = 'settings = {    endpoint: "https://example.com",    mode: :strict }';
+  const article = ["```ruby", code, "```"].join("\n");
+  const [candidate] = collectCodeCandidates(article).fencedCode;
+  assert.equal(candidate.autoLanguage, undefined, "slashes in a URL do not identify a language");
+  const label = { id: candidate.id, action: "set-code-language", language: "javascript" };
+  assert.equal(applyFormattingEdits(article, [candidate], [label]).content, article);
+  assert.deepEqual(assessCodeRestore(candidate, { ...label, action: "reformat-code", content: code }), {
+    ok: true, body: code, language: "ruby"
+  });
+}
+
+{
+  const cases = [
+    { code: 'fn main() { println!("hello"); }', proposed: "rs", language: "rust" },
+    { code: "package main\nfunc main() {}", proposed: "go", language: "go" },
+    { code: "SELECT id FROM events;", proposed: "sql", language: "sql" }
+  ];
+  for (const { code, proposed, language } of cases) {
+    const original = ["```perl", code, "```"].join("\n");
+    const [candidate] = collectCodeCandidates(original).fencedCode;
+    assert.equal(candidate.autoLanguage, language);
+    assert.equal(candidate.needsReformat, undefined, "a recognized label error is enough to collect the fence");
+    const decision = { id: candidate.id, action: "set-code-language", language: proposed };
+    assert.equal(applyFormattingEdits(original, [candidate], [decision]).content, ["```" + proposed, code, "```"].join("\n"));
+    assert.deepEqual(assessCodeRestore(candidate, { ...decision, action: "reformat-code", content: code }), {
+      ok: true, body: code, language: proposed
+    });
+  }
+  assert.equal(collectCodeCandidates("```postgresql\nSELECT id FROM events;\n```").fencedCode.length, 0);
 }
 
 // Code a clipper flattened into one line (taken from a real clipping): newlines are gone, indentation is only a
@@ -462,6 +519,132 @@ assert.equal(
     ].join("\n")
   }]);
   assert.equal(changedLogic, article, "AI output that changes code content must be rejected");
+}
+
+// The same three fences from a real TypeScript clipping: layout comes back, a wrong perl label is corrected,
+// and a typo in the source stays. Both the clipping write and the chat preview use this result.
+{
+  const scripts = `"scripts": {    "lint": "eslint .",    "lint:jsdoc-typing": "tsc --noEmit --allowJs \`find ./ -name '*.js'\`"  },`;
+  const scriptsRestored = [
+    `"scripts": {`,
+    `  "lint": "eslint .",`,
+    `  "lint:jsdoc-typing": "tsc --noEmit --allowJs \`find ./ -name '*.js'\`"`,
+    `},`
+  ].join("\n");
+  const eslint = `"rules": {    "prettier/prettier": "error"  },  "overrides": [    {      // Tolerate warnings on legacy JavaScript files      "files": ["*.js"],      "rules": {        "prefer-const": "warn"      }    }  ]`;
+  const eslintRestored = [
+    `"rules": {`,
+    `  "prettier/prettier": "error"`,
+    `},`,
+    `"overrides": [`,
+    `  {`,
+    `    // Tolerate warnings on legacy JavaScript files`,
+    `    "files": ["*.js"],`,
+    `    "rules": {`,
+    `      "prefer-const": "warn"`,
+    `    }`,
+    `  }`,
+    `]`
+  ].join("\n");
+  const typed = "import { makeFeatures } = from './domain/features';import { userCollection } from './infrastructure/mongodb/UserCollection';import { ImageStorage } from './infrastructure/ImageStorage.js';";
+  const typedRestored = [
+    "import { makeFeatures } = from './domain/features';",
+    "import { userCollection } from './infrastructure/mongodb/UserCollection';",
+    "import { ImageStorage } from './infrastructure/ImageStorage.js';"
+  ].join("\n");
+  const ordinary = "const baseURL = \"https://example.com\";\nconst userID = 1;";
+  const article = [
+    "```javascript", scripts, "```",
+    "",
+    "```perl", eslint, "```",
+    "",
+    "```typescript", typed, "```",
+    "",
+    "```javascript", ordinary, "```"
+  ].join("\n");
+  assert.equal(needsCodeReformat(scripts), true);
+  assert.equal(needsCodeReformat(eslint), true);
+  assert.equal(needsCodeReformat(typed), true);
+  assert.equal(needsCodeReformat(ordinary), false, "an ordinary block is not sent for restoration");
+
+  const candidates = collectCodeCandidates(article).fencedCode;
+  assert.equal(candidates.length, 3, "the ordinary fence is left out of the model request");
+  const planned = planCodeFormatting(candidates);
+  assert.deepEqual(planned.local, [{ id: candidates[0].id, action: "reformat-code", language: "javascript", content: scriptsRestored }]);
+  assert.deepEqual(planned.model.map((candidate) => candidate.content), [eslint, typed]);
+  const restore = (body, formatted, language) => {
+    const candidate = candidates.find((item) => item.content === body);
+    assert.ok(candidate);
+    return assessCodeRestore(candidate, { id: candidate.id, action: "reformat-code", language, content: formatted });
+  };
+  const scriptsResult = restore(scripts, scriptsRestored, "javascript");
+  assert.equal(scriptsResult.ok, true);
+  assert.equal(scriptsResult.language, "javascript");
+  const eslintResult = restore(eslint, eslintRestored, "perl");
+  assert.equal(eslintResult.ok, true);
+  assert.equal(eslintResult.language, "javascript", "an object literal labeled perl is corrected from the body");
+  const shortGap = eslint.replace("      \"files\"", "  \"files\"");
+  for (const language of ["perl", "javascript"]) {
+    const snippet = ["```" + language, shortGap, "```"].join("\n");
+    const [candidate] = collectCodeCandidates(snippet).fencedCode;
+    const decision = { id: candidate.id, action: "reformat-code", language: "javascript", content: eslintRestored };
+    assert.deepEqual(applyFormattingEdits(snippet, [candidate], [decision]).reformats.get(candidate.id), {
+      language: "javascript",
+      body: eslintRestored
+    });
+  }
+  const commentedOut = '"rules": {\n  // Leave this disabled  "files": ["*.js"]\n}';
+  const [commentedCandidate] = collectFencedBlocks(["```javascript", commentedOut, "```"].join("\n"));
+  assert.deepEqual(assessCodeRestore(commentedCandidate, {
+    id: commentedCandidate.id, action: "reformat-code", language: "javascript",
+    content: commentedOut.replace('  "files"', '\n  "files"')
+  }), { ok: false, reason: "layout" }, "a quoted property inside a valid comment must stay commented out");
+  const typedResult = restore(typed, typedRestored, "typescript");
+  assert.equal(typedResult.ok, true);
+  assert.match(typedResult.body, /= from/, "the original typo stays in the restored block");
+  const fixedTypo = restore(typed, typedRestored.replace("= from", "from"), "typescript");
+  assert.equal(fixedTypo.ok, false);
+  assert.equal(fixedTypo.reason, "tokens");
+  const safeDecisions = candidates.map((candidate, index) => ({
+    id: candidate.id, action: "reformat-code", language: candidate.fenceLanguage,
+    content: [scriptsRestored, eslintRestored, typedRestored][index]
+  }));
+  const allRestored = applyFormattingEdits(article, candidates, safeDecisions);
+  assert.equal(allRestored.applied, 3);
+  assert.ok(allRestored.content.includes(typedRestored));
+
+  const written = applyFormattingEdits(article, candidates, candidates.map((candidate) => {
+    const formatted = candidate.content === scripts ? scriptsRestored
+      : candidate.content === eslint ? eslintRestored
+        : typedRestored.replace("= from", "from");
+    return { id: candidate.id, action: "reformat-code", language: candidate.fenceLanguage, content: formatted };
+  }));
+  assert.match(written.content, /```javascript\n"scripts": \{\n {2}"lint": "eslint \."/);
+  assert.match(written.content, /```javascript\n"rules": \{\n {2}"prettier\/prettier": "error"/);
+  assert.doesNotMatch(written.content, /```perl/);
+  assert.match(written.content, /= from '\.\/domain\/features'/, "a rewrite that fixes the typo keeps the original block");
+  assert.match(written.content, /const baseURL = "https:\/\/example.com";/);
+  assert.equal(written.rejectedReformats, 1);
+}
+
+{
+  const command = "\"tsc --allowJs \\`find ./ -name '*.js' -name '*.d.ts'\\`\"";
+  const flat = '"scripts": {    "lint": "eslint .",    "types": ' + command + ',    "checks": [true, -1.2E3, null, {}]  },';
+  const expected = [
+    '"scripts": {',
+    '  "lint": "eslint .",',
+    '  "types": ' + command + ',',
+    '  "checks": [', '    true,', '    -1.2E3,', '    null,', '    {}', '  ]',
+    '},'
+  ].join("\n");
+  const article = ["```javascript", flat, "```", "", "图注。"].join("\n");
+  const candidates = collectCodeCandidates(article).fencedCode;
+  const planned = planCodeFormatting(candidates);
+  assert.deepEqual(planned.model, []);
+  assert.equal(applyFormattingEdits(article, candidates, planned.local).content, article.replace(flat, () => expected));
+  assert.deepEqual(planCodeFormatting(collectCodeCandidates(article.replace(flat, () => expected)).fencedCode).local, []);
+  const dynamic = article.replace(command, "buildCommand()");
+  assert.equal(planCodeFormatting(collectCodeCandidates(dynamic).fencedCode).model.length, 1);
 }
 
 {
