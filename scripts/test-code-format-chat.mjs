@@ -89,6 +89,9 @@ const note = [
   const shell = locateCodeBlocks(note, { section: "构建资产和体系", index: 2 });
   assert.equal(shell.blocks[0].candidate.fenceLanguage, "shell");
   assert.equal(locateCodeBlocks(note, { section: "不存在的章节" }).error, "section");
+  const duplicate = `${note}\n## 6. exp\n\n\`\`\`python\nprint(2)\n\`\`\`\n`;
+  assert.equal(locateCodeBlocks(duplicate, { section: "exp" }).error, "ambiguous");
+  assert.equal(locateCodeBlocks(duplicate, { section: "6. exp" }).blocks.length, 1);
   assert.equal(locateCodeBlocks(note, { section: "exp", index: 3 }).error, "index");
   assert.equal(locateCodeBlocks(note, { index: 9 }).error, "index");
   assert.equal(locateCodeBlocks(note, parseCodeFormatRequest("格式化第 0 个代码块")).error, "index");

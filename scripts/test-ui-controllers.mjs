@@ -242,6 +242,7 @@ function chatElement(tag = "div", props = {}, elements = []) {
   const declined = await ask("不用");
   assert.match(declined.content, /原文保持不变/);
   assert.deepEqual(controller.replyChoices(controller.activeThread, declined), []);
+
   assert.deepEqual(writes, [[1], [0, 1]]);
   await ask("检查当前文章是否过时");
   const accepted = await ask("更新");
@@ -417,20 +418,19 @@ function chatElement(tag = "div", props = {}, elements = []) {
     return controller.activeThread.messages.at(-1);
   };
 
-  // One block: the comment request reaches the model, the preview offers 更新 / 不用, and 更新 writes only that block.
+  // An explicit format-and-comment request writes the targeted block immediately.
   const single = await ask("格式化下2.4. exp下面的代码块，增加一些注释");
   assert.deepEqual(calls.at(-1).ids, ["fence-1"]);
   assert.equal(calls.at(-1).scope, "code-chat-comments");
-  assert.match(single.content, /要写回这个代码块吗/);
-  assert.deepEqual(controller.replyChoices(controller.activeThread, single).map((choice) => choice.reply), ["更新", "不用"]);
-  await ask("更新");
+  assert.match(single.content, /已写入 1 个代码块/);
+  assert.deepEqual(controller.replyChoices(controller.activeThread, single), []);
   assert.match(body, /```python\n# 说明\nimport os\nprint\(1\)\n```/);
   assert.match(body, /```python\nkeep = 1\n```/, "blocks outside the named section are untouched");
 
   // Two blocks in one section: buttons stay 更新 / 不用, and typing "应用第 2 个" writes only the second one.
   body = fixture([["a = 1"], ["b = 2"]]);
   controller.activeThread = null;
-  const two = await ask("格式化 2.4. exp 章节的代码块");
+  const two = await ask("先预览，格式化 2.4. exp 章节的代码块");
   assert.deepEqual(
     controller.replyChoices(controller.activeThread, two).map((choice) => choice.reply),
     ["更新", "不用"]
@@ -442,7 +442,7 @@ function chatElement(tag = "div", props = {}, elements = []) {
   // "应用全部" must reach the code-format handler, not the freshness one that answers "没有可应用的审核".
   body = fixture([["c = 3"], ["d = 4"]]);
   controller.activeThread = null;
-  await ask("格式化 2.4. exp 章节的代码块");
+  await ask("格式化 2.4. exp 章节的代码块，先给我看看");
   const applied = await ask("应用全部");
   assert.doesNotMatch(applied.content, /没有可应用/);
   assert.match(body, /```python\nc = 3\n```/);
@@ -470,7 +470,6 @@ function chatElement(tag = "div", props = {}, elements = []) {
   controller.activeThread = null;
   plugin.ai.confirmFormatting = async (batch) => batch.map((candidate) => ({ id: candidate.id, action: "reformat-code", language: "text", content: candidate.content }));
   await ask("格式化 2.4. exp 章节的代码块");
-  await ask("应用全部");
   assert.match(body, /```python\ng = 7\n```/, "the fence language is kept by pure formatting");
 
   // A comment request may not change code either.
@@ -532,7 +531,7 @@ function chatElement(tag = "div", props = {}, elements = []) {
     });
     return controller.activeThread.messages.at(-1);
   };
-  const preview = await ask("格式化文章里的代码");
+  const preview = await ask("先预览，格式化文章里的代码");
   assert.match(preview.content, /```javascript\n"rules":/);
   assert.match(preview.content, /```typescript\nimport \{ makeFeatures \} = from/);
   assert.doesNotMatch(preview.content, /const ok = 1/, "an unchanged ordinary block is not offered");
@@ -547,10 +546,8 @@ function chatElement(tag = "div", props = {}, elements = []) {
   plugin.ai.confirmFormatting = async (batch) => batch.map((candidate) => ({
     id: candidate.id, action: "reformat-code", language: "sql", content: candidate.content
   }));
-  const labelPreview = await ask("格式化文章里的代码");
-  assert.match(labelPreview.content, /```sql\nSELECT id FROM events;/);
-  assert.match(body, /```perl\nSELECT id FROM events;/, "a label correction still waits for confirmation");
-  await ask("更新");
+  const labelWrite = await ask("格式化文章里的代码");
+  assert.match(labelWrite.content, /已写入 1 个代码块/);
   assert.match(body, /```sql\nSELECT id FROM events;/);
 
   const scriptLine = '"scripts": {    "lint": "eslint .",    "lint:types": "tsc --noEmit --skipLibCheck"  },';
@@ -558,10 +555,8 @@ function chatElement(tag = "div", props = {}, elements = []) {
   controller.activeThread = null;
   let modelCalls = 0;
   plugin.ai.confirmFormatting = async () => { modelCalls += 1; return []; };
-  const localPreview = await ask("格式化文章里的代码");
-  assert.match(localPreview.content, /"scripts": \{\n {2}"lint":/);
-  assert.match(body, /"scripts": \{ {4}"lint":/);
-  await ask("更新");
+  const localWrite = await ask("格式化文章里的代码");
+  assert.match(localWrite.content, /已写入 1 个代码块/);
   assert.equal(modelCalls, 0);
   assert.match(body, /"scripts": \{\n {2}"lint": "eslint \.",\n {2}"lint:types": "tsc --noEmit --skipLibCheck"\n\},\n```\n\n图注。/);
 
@@ -572,22 +567,19 @@ function chatElement(tag = "div", props = {}, elements = []) {
     return batch.map((candidate) => ({ id: candidate.id, action: "reformat-code", language: "javascript", content: pretty }));
   };
   const partial = await ask("格式化文章里的代码");
-  assert.match(partial.content, /ready: true/);
+  assert.match(partial.content, /已写入 1 个代码块/);
   assert.match(partial.content, /1 个代码块的检查没有完成/);
   assert.doesNotMatch(partial.content, /blob/);
-  const partialWrite = await ask("更新");
-  assert.match(partialWrite.content, /已写入 1 个代码块/);
-  assert.match(partialWrite.content, /1 个代码块的检查没有完成/);
   assert.match(body, /const blob = "/, "the failed batch keeps its original block");
   assert.match(body, /ready: true/);
 
   body = ["# 标题", "", "```javascript", flat, "```", ""].join("\n");
   controller.activeThread = null;
   plugin.ai.confirmFormatting = async (batch) => batch.map((candidate) => ({ id: candidate.id, action: "reformat-code", language: "javascript", content: pretty }));
-  await ask("格式化文章里的代码");
+  await ask("格式化文章里的代码，先给我看看");
   body = `${body}\n旁边写了一句。\n`;
   const stale = await ask("更新");
-  assert.match(stale.content, /确认前被修改/);
+  assert.match(stale.content, /写入前被修改/);
   assert.match(body, /旁边写了一句/);
   assert.match(body, /const value = \{ {4}ready: true/, "the old preview is not written over the edited note");
 
@@ -715,7 +707,7 @@ function chatElement(tag = "div", props = {}, elements = []) {
 }
 
 {
-  // Article edits are previewed, then written only after confirmation. Questions stay in chat.
+  // Explicit edits write immediately. Requested previews and suggestions require confirmation.
   const file = { path: "Articles/Edit.md", basename: "Edit", extension: "md" };
   let body = "开头保持不变。\n\n用队列连接生产者和消费者。\n\n结尾保持不变。\n";
   const app = {
@@ -749,7 +741,7 @@ function chatElement(tag = "div", props = {}, elements = []) {
     return controller.activeThread.messages.at(-1);
   };
 
-  const preview = await ask("把「用队列连接生产者和消费者。」改成更短的说法");
+  const preview = await ask("先预览，把「用队列连接生产者和消费者。」改成更短的说法");
   assert.equal(preview.kind, "article-edit");
   assert.match(preview.content, /用队列连接生产者和消费者/);
   assert.match(preview.content, /要把这次修改写回文章吗/);
@@ -769,45 +761,54 @@ function chatElement(tag = "div", props = {}, elements = []) {
   };
   const insertion = { op: "insert", anchor: "用队列解耦生产者和消费者。", at: "after", text: "在 AD 审计中的位置\n\n域控是 LDAP。" };
   plugin.ai.classifyArticleEdit = async (question) =>
-    ({ "补充到文章中啊": "edit", "当前文章的信息量太少了，需要补充": "edit", "第二节好像少了背景": "ask" })[question] ?? "none";
+    ({ "这篇内容有点少": "ask", "第二节好像少了背景": "ask" })[question] ?? "none";
 
   controller.activeThread = null;
-  answerWith("建议插在功能介绍之后。\n\n在 AD 审计中的位置\n\n域控是 LDAP。");
-  await ask("这段放哪");
+  const sampleCode = "```c\nstruct vb2_queue { int type; };\n```";
   plugin.ai.proposeArticleEdits = async (instruction, _article, _onReasoning, previousReply) => {
-    assert.equal(instruction, "补充到文章中啊");
-    assert.match(previousReply, /在 AD 审计中的位置/);
-    return { edits: [insertion], truncated: false };
-  };
-  const placed = await ask("补充到文章中啊");
-  assert.equal(placed.kind, "article-edit");
-  assert.match(placed.content, /在 AD 审计中的位置/);
-  assert.doesNotMatch(body, /在 AD 审计中的位置/, "an edit is only a preview until confirmed");
-
-  controller.activeThread = null;
-  plugin.ai.proposeArticleEdits = async (instruction, _article, _onReasoning, previousReply) => {
-    assert.equal(instruction, "当前文章的信息量太少了，需要补充");
+    assert.equal(instruction, "在文章中补充一些代码块示例");
     assert.equal(previousReply, "", "a fresh thread has no earlier answer to insert");
-    return { edits: [insertion], truncated: false };
+    return { edits: [{ ...insertion, text: sampleCode }], truncated: false };
   };
-  const thin = await ask("当前文章的信息量太少了，需要补充");
-  assert.equal(thin.kind, "article-edit");
-  assert.deepEqual(controller.replyChoices(controller.activeThread, thin).map((choice) => choice.reply), ["更新", "不用"]);
+  const inserted = await ask("在文章中补充一些代码块示例");
+  assert.match(inserted.content, /已写入 1 处修改/);
+  assert.ok(body.includes(sampleCode));
+  assert.deepEqual(controller.replyChoices(controller.activeThread, inserted), []);
+
+  const flat = "struct vb2_queue { int type; };";
+  body += `\n${flat}\n`;
+  controller.activeThread = null;
+  answerWith(sampleCode);
+  const explainedCode = await ask("这个应该是代码块吧？");
+  assert.deepEqual(controller.replyChoices(controller.activeThread, explainedCode), []);
+  assert.ok(body.endsWith(`\n${flat}\n`));
+  plugin.ai.proposeArticleEdits = async (instruction, _article, _onReasoning, previousReply) => {
+    assert.equal(instruction, "帮我更新代码块到文章中");
+    assert.equal(previousReply, sampleCode);
+    return { edits: [{ op: "replace", anchor: flat, text: sampleCode }], truncated: false };
+  };
+  body = body.replace(`${sampleCode}\n\n`, "");
+  const replaced = await ask("帮我更新代码块到文章中");
+  assert.match(replaced.content, /已写入 1 处修改/);
+  assert.ok(body.endsWith(`${sampleCode}\n`));
 
   controller.activeThread = null;
   answerWith("可以补一句为什么需要队列。");
-  const offer = await ask("第二节好像少了背景");
+  const offer = await ask("这篇内容有点少");
   assert.notEqual(offer.kind, "article-edit");
   assert.match(offer.content, /可以补一句为什么需要队列。\n\n要把这些内容写进文章吗？$/);
-  assert.deepEqual(controller.replyChoices(controller.activeThread, offer).map((choice) => choice.reply), ["写进文章", "不用"]);
+  assert.deepEqual(controller.replyChoices(controller.activeThread, offer), [{ label: "更新", reply: "更新" }, { label: "不用", reply: "不用" }]);
+  assert.doesNotMatch(body, /在 AD 审计中的位置/);
   plugin.ai.proposeArticleEdits = async (instruction, _article, _onReasoning, previousReply) => {
     assert.match(instruction, /上一轮回答/);
     assert.equal(previousReply, "可以补一句为什么需要队列。", "the offer question is not article text");
     return { edits: [insertion], truncated: false };
   };
-  const accepted = await ask("写进文章");
+  const accepted = await ask("更新");
   assert.equal(accepted.kind, "article-edit");
-  assert.deepEqual(controller.replyChoices(controller.activeThread, accepted).map((choice) => choice.reply), ["更新", "不用"]);
+  assert.match(accepted.content, /已写入 1 处修改/);
+  assert.match(body, /在 AD 审计中的位置/);
+  assert.deepEqual(controller.replyChoices(controller.activeThread, accepted), []);
 
   controller.activeThread = null;
   answerWith("可以补一句为什么需要队列。");
@@ -815,6 +816,14 @@ function chatElement(tag = "div", props = {}, elements = []) {
   const declined = await ask("不用");
   assert.match(declined.content, /原文保持不变/);
   assert.deepEqual(controller.replyChoices(controller.activeThread, declined), []);
+
+  controller.activeThread = null;
+  await ask("第二节好像少了背景");
+  const beforeAcknowledgment = body;
+  plugin.ai.classifyArticleEdit = async () => { throw new Error("isolated acknowledgments are read-only"); };
+  assert.equal((await ask("好")).status, "done");
+  assert.equal((await ask("更新")).status, "done", "a stale offer cannot be confirmed");
+  assert.equal(body, beforeAcknowledgment);
 
   plugin.ai.classifyArticleEdit = async () => "none";
   answerWith("这是解释");
@@ -842,7 +851,7 @@ function chatElement(tag = "div", props = {}, elements = []) {
     ],
     truncated: false
   });
-  const many = await ask("把甲句和乙句改短");
+  const many = await ask("把甲句和乙句改短，先给我看看");
   assert.deepEqual(
     controller.replyChoices(controller.activeThread, many).map((choice) => choice.reply),
     ["更新", "不用"]

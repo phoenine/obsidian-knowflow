@@ -245,11 +245,19 @@ function assertModelConfig(config: AiModelConfig): void {
 
 export function parseJsonResponse<T>(text: string): T {
   const trimmed = text.trim();
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
-  const raw = fenced?.[1] ?? trimmed;
   try {
-    return JSON.parse(raw) as T;
+    return JSON.parse(trimmed) as T;
   } catch {
+    // A Markdown fence can be part of a JSON string. Only unwrap an outer fence.
+    const fenced = /^(`{3,})(?:json)?\s*([\s\S]*?)\s*\1$/i.exec(trimmed);
+    const raw = fenced?.[2] ?? trimmed;
+    if (fenced) {
+      try {
+        return JSON.parse(raw) as T;
+      } catch {
+        // Some models add commentary around the object inside the fence.
+      }
+    }
     const start = raw.indexOf("{");
     const end = raw.lastIndexOf("}");
     if (start >= 0 && end > start) return JSON.parse(raw.slice(start, end + 1)) as T;

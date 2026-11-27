@@ -16,6 +16,7 @@ await esbuild.build({
 const {
   isEditOfferAccepted,
   isArticleEditRequest,
+  articleEditPreviewRequest,
   articleForEdit,
   readArticleEdits,
   chatEdits,
@@ -28,6 +29,11 @@ assert.equal(isArticleEditRequest("修改一下标题"), true);
 assert.equal(isArticleEditRequest("删掉最后一句"), true);
 assert.equal(isArticleEditRequest("帮我在第二节后面加上一段说明"), true);
 assert.equal(isArticleEditRequest("rewrite the opening"), true);
+assert.equal(isArticleEditRequest("能帮我把第二节改短吗？"), true);
+assert.equal(isArticleEditRequest("帮我更新代码块到文章中"), true);
+assert.equal(isArticleEditRequest("这篇内容有点少"), false);
+assert.equal(isArticleEditRequest("我建议把第二节改短"), false);
+assert.equal(isArticleEditRequest("可以把第二节改短。"), false);
 
 assert.equal(isArticleEditRequest("为什么要把开头改短？"), false);
 assert.equal(isArticleEditRequest("总结一下这篇文章"), false);
@@ -36,8 +42,11 @@ assert.equal(isArticleEditRequest("格式化文章中的代码块"), false);
 assert.equal(isArticleEditRequest("更新"), false);
 assert.equal(isArticleEditRequest("好"), false);
 assert.equal(isEditOfferAccepted("写进文章"), true);
-assert.equal(isEditOfferAccepted("好。"), true);
+assert.equal(isEditOfferAccepted("更新"), true);
+assert.equal(isEditOfferAccepted("好。"), false);
 assert.equal(isEditOfferAccepted("好，但先解释一下"), false);
+assert.equal(articleEditPreviewRequest("先别写入，把第二节改短"), "把第二节改短");
+assert.equal(articleEditPreviewRequest("把第二节改短，先给我看看"), "把第二节改短");
 
 {
   const article = `${"甲".repeat(20000)}\n目标句子在后面。\n${"乙".repeat(8000)}`;

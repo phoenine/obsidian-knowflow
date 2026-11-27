@@ -37,6 +37,7 @@ const EDGE_CONNECTORS = /^[\s，,、的里中把将在给]+|[\s，,、的里中�
  */
 export function parseCodeFormatRequest(question: string): CodeFormatScope | null {
   const text = question.trim().replace(/[。！!]+$/, "");
+  if (/^(?:我(?:觉得|认为|建议)|建议|如果|假如|假设|不要|先不要|别)/.test(text)) return null;
   if (/[？?]|为什么|怎么|如何|是否|是什么|原理|规则|区别|吗$/.test(text)) return null;
   const comments = COMMENT_REQUEST.test(text);
   if (!/代码/.test(text) || !(comments || /格式化|排版|修复|整理|重排|还原|补全/.test(text))) return null;
@@ -71,7 +72,7 @@ export function parseCodeFormatApply(question: string): number[] | "all" | null 
  * Pick the fenced blocks the user named. The section is matched against the
  * nearest heading above each block. `index` counts within the matched blocks.
  */
-export function locateCodeBlocks(content: string, scope: CodeFormatScope): { blocks: LocatedCodeBlock[]; error?: "section" | "index" } {
+export function locateCodeBlocks(content: string, scope: CodeFormatScope): { blocks: LocatedCodeBlock[]; error?: "section" | "ambiguous" | "index" } {
   const lines = content.split("\n");
   const protectedLines = protectedLineIndices(protectedRanges(lines));
   const headings: Array<{ line: number; title: string }> = [];
@@ -88,7 +89,11 @@ export function locateCodeBlocks(content: string, scope: CodeFormatScope): { blo
 
   if (scope.section) {
     const key = normalizeTitle(scope.section);
-    blocks = blocks.filter(({ section }) => titleMatches(normalizeTitle(section), key));
+    const exact = headings.filter(({ title }) => normalizeTitle(title) === key);
+    const matched = exact.length ? exact : headings.filter(({ title }) => titleMatches(normalizeTitle(title), key));
+    if (matched.length > 1) return { blocks: [], error: "ambiguous" };
+    if (!matched.length) return { blocks: [], error: "section" };
+    blocks = blocks.filter(({ section }) => section === matched[0].title);
     if (!blocks.length) return { blocks: [], error: "section" };
   }
   if (scope.index !== undefined) {

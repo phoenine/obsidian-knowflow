@@ -5,7 +5,7 @@ import type { ChatMessage, ChatThread, ChatUsage, ViewContext } from "../../type
 import { prepareArticleForAi } from "../../services/clipping/managed-content";
 import { freshnessSelectionMatches, parseArticleUpdateReply, parseFreshnessRequest, renderFreshnessApplied, renderFreshnessCommit, renderFreshnessReview } from "../../services/chat/freshness-chat";
 import { locateCodeBlocks, parseCodeFormatApply, parseCodeFormatRequest, renderCodeFormatReview } from "../../services/chat/code-format-chat";
-import { chatEdits, isArticleEditRequest, isEditOfferAccepted, renderArticleEditResult, renderArticleEditReview } from "../../services/chat/article-edit-chat";
+import { articleEditInstruction, articleEditPreviewRequest, chatEdits, isArticleEditQuestion, isArticleEditRequest, isEditOfferAccepted, renderArticleEditResult, renderArticleEditReview } from "../../services/chat/article-edit-chat";
 import { commitNoteEdits, type EditItem } from "../../services/core/note-edits";
 import type { FreshnessReview } from "../../services/learning/article-freshness";
 import { applyFormattingEdits, batchFormattingCandidates, planCodeFormatting, sameCodeIgnoringComments, type FormattingCandidate, type FormattingDecision } from "../../services/clipping/formatting-candidates";
@@ -106,7 +106,8 @@ export class ChatController {
       } else {
         requestUsage = await this.answerQuestion(question, file, thread, assistantMessage, handlers);
         if (this.pendingEditOffer.get(thread) === assistantMessage.id) {
-          assistantMessage.content = `${assistantMessage.content.trimEnd()}\n\n${t("articleEditOffer")}`;
+          if (assistantMessage.content.trim()) assistantMessage.content = `${assistantMessage.content.trimEnd()}\n\n${t("articleEditOffer")}`;
+          else this.pendingEditOffer.delete(thread);
         }
       }
       assistantMessage.status = "done";
@@ -179,7 +180,8 @@ export class ChatController {
         },
         onUsage: () => {},
         retrievedContext,
-        externalContext
+        externalContext,
+        suggestArticleEdit: this.pendingEditOffer.get(thread) === assistantMessage.id
       }
     );
   }
@@ -290,22 +292,12 @@ export class ChatController {
    * Only the last message can offer buttons; anything said after it closes them.
    */
   replyChoices(thread: ChatThread, message: ChatMessage): Array<{ label: string; reply: string }> {
-    if (thread.messages.at(-1) !== message) return [];
-    if (this.pendingEditOffer.get(thread) === message.id) {
-      return [
-        { label: t("articleEditOfferChoice"), reply: "写进文章" },
-        { label: t("freshnessKeepChoice"), reply: "不用" }
-      ];
-    }
+    if (thread.messages.at(-1) !== message || message.status !== "done") return [];
     const freshness = this.pendingFreshness.get(thread);
-    if (freshness?.messageId === message.id) {
-      return [
-        { label: t("freshnessUpdateChoice"), reply: "更新" },
-        { label: t("freshnessKeepChoice"), reply: "不用" }
-      ];
-    }
     const pending = this.pendingCodeFormat.get(thread);
-    if (pending?.messageId === message.id || this.pendingArticleEdit.get(thread)?.messageId === message.id) {
+    if (freshness?.messageId === message.id || pending?.messageId === message.id
+      || this.pendingArticleEdit.get(thread)?.messageId === message.id
+      || (this.pendingEditOffer.get(thread) === message.id && message.content.trim())) {
       return [
         { label: t("freshnessUpdateChoice"), reply: "更新" },
         { label: t("freshnessKeepChoice"), reply: "不用" }
@@ -346,8 +338,7 @@ export class ChatController {
   }
 
   /**
-   * "格式化第 2.4 节的代码块" / "格式化文章中的代码块": the model checks only the named
-   * blocks, and nothing is written until the user confirms in the same chat.
+   * Format only the named blocks. An explicit preview request waits for confirmation.
    */
   private async handleCodeFormat(
     question: string,
@@ -360,12 +351,14 @@ export class ChatController {
     const reviewIsCurrent = this.codeFormatReviewIsCurrent(thread, file);
     const reply = reviewIsCurrent ? parseArticleUpdateReply(question) : null;
     const chosen = reviewIsCurrent ? parseCodeFormatApply(question) : null;
-    const scope = parseCodeFormatRequest(question);
+    const previewRequest = articleEditPreviewRequest(question);
+    const scope = parseCodeFormatRequest(articleEditInstruction(previewRequest ?? question));
     if (!scope && !reply && !chosen) {
       if (pending) this.pendingCodeFormat.delete(thread);
       return null;
     }
 
+    message.kind = "article-edit";
     const progress = (stage: string) => {
       message.content = stage;
       refreshMessage();
@@ -394,6 +387,7 @@ export class ChatController {
     const content = await this.app.vault.read(file);
     const located = locateCodeBlocks(content, scope);
     if (located.error === "section") return t("codeFormatNoSection", { section: scope.section ?? "" });
+    if (located.error === "ambiguous") return t("codeFormatAmbiguousSection", { section: scope.section ?? "" });
     if (located.error === "index") return t("codeFormatNoIndex", { index: scope.index ?? 0 });
     if (!located.blocks.length) return t("codeFormatEmpty");
 
@@ -406,7 +400,7 @@ export class ChatController {
       try {
         decisions.push(...await this.plugin.ai.confirmFormatting(batch, "", comments ? "code-chat-comments" : "code-chat"));
       } catch {
-        // One failed batch leaves those blocks unchanged. Blocks from other batches can still be previewed.
+        // Other validated batches can still be written.
         failedBlocks += batch.length;
       }
     }
@@ -439,7 +433,11 @@ export class ChatController {
     ].filter(Boolean);
     if (!items.length) return warnings.join("\n\n") || t(comments ? "codeFormatNoComment" : "codeFormatNone");
 
-    this.pendingCodeFormat.set(thread, { file, snapshot: content, candidates, items, warnings, messageId: message.id });
+    const formatting = { file, snapshot: content, candidates, items, warnings, messageId: message.id };
+    if (!previewRequest) {
+      return this.applyCodeFormat(thread, formatting, new Set(items.map((_, index) => index)), progress);
+    }
+    this.pendingCodeFormat.set(thread, formatting);
     const preview = renderCodeFormatReview(items.map(({ section, language, content: body }) => ({ section, language, content: body })));
     return [...warnings, preview].join("\n\n");
   }
@@ -451,6 +449,7 @@ export class ChatController {
     progress: (stage: string) => void
   ): Promise<string> {
     this.pendingCodeFormat.delete(thread);
+    if (!this.canEdit(thread, pending.file)) return t("openArticleFirst");
     if (await this.app.vault.read(pending.file) !== pending.snapshot) return t("codeFormatChanged");
     const decisions = pending.items.filter((_, index) => selected.has(index)).map((item) => item.decision);
     const edited = applyFormattingEdits(pending.snapshot, pending.candidates, decisions, { trustReformat: true });
@@ -486,10 +485,7 @@ export class ChatController {
     return Boolean(pending && file && pending.file === file && thread.messages.at(-3)?.id === pending.messageId);
   }
 
-  /**
-   * "把开头那段改短" / "删掉最后一句": the model returns exact replacements,
-   * and nothing is written until the user confirms in the same chat.
-   */
+  /** Apply clear edit requests after validation, or stage an explicitly requested preview. */
   private async handleArticleEdit(
     question: string,
     thread: ChatThread,
@@ -503,22 +499,25 @@ export class ChatController {
     const reply = reviewIsCurrent ? parseArticleUpdateReply(question) : null;
     const chosen = reviewIsCurrent ? parseCodeFormatApply(question) : null;
     const offered = this.pendingEditOffer.get(thread);
-    const offerIsCurrent = Boolean(offered && thread.messages.at(-3)?.id === offered);
+    const offerIsCurrent = Boolean(offered && thread.messages.at(-3)?.id === offered && this.canEdit(thread, file));
     this.pendingEditOffer.delete(thread);
-    let instruction = question;
+    const previewRequest = articleEditPreviewRequest(question);
+    let instruction = previewRequest ?? question;
     if (offerIsCurrent && parseArticleUpdateReply(question) === "decline") {
       message.kind = "article-edit";
       return t("freshnessUnchanged");
     }
-    let request = isArticleEditRequest(question);
-    if (offerIsCurrent && (isEditOfferAccepted(question) || parseArticleUpdateReply(question) === "accept")) {
-      instruction = "把上一轮回答中的内容补充到文章里。";
+    let request = isArticleEditRequest(instruction);
+    if (offerIsCurrent && isEditOfferAccepted(question)) {
+      instruction = "按上一轮回答的具体建议补充文章。已有草稿就使用草稿。";
       request = true;
     }
     if (!request && !reply && !chosen) {
       if (pending) this.pendingArticleEdit.delete(thread);
+      if (isArticleEditQuestion(question) || parseArticleUpdateReply(question)
+        || /^(?:好|可以|行|嗯|ok|yes)[。！.!\s]*$/i.test(question.trim())) return null;
       const intent = this.canEdit(thread, file) && this.plugin.ai.classifyArticleEdit
-        ? await this.plugin.ai.classifyArticleEdit(question, this.previousAnswer(thread, message.id))
+        ? await this.plugin.ai.classifyArticleEdit(instruction, this.previousAnswer(thread, message.id))
         : "none";
       if (intent === "ask") this.pendingEditOffer.set(thread, message.id);
       if (intent !== "edit") return null;
@@ -570,6 +569,11 @@ export class ChatController {
       if (reason === "protected") return t("articleEditReasonProtected");
       return t("articleEditMissing");
     }
+    if (!previewRequest) {
+      const items = [...prepared.items];
+      for (const rejected of prepared.rejected) items.splice(rejected.index, 0, { edits: [], skip: rejected.reason });
+      return this.applyArticleEdit(thread, { file, items, messageId: message.id }, new Set(items.map((_, index) => index)), message, progress);
+    }
     this.pendingArticleEdit.set(thread, { file, items: prepared.items, messageId: message.id });
     return renderArticleEditReview(prepared.items);
   }
@@ -581,6 +585,7 @@ export class ChatController {
     message: ChatMessage,
     progress: (stage: string) => void
   ): Promise<string> {
+    if (!this.canEdit(thread, pending.file)) return t("editArticleFirst");
     progress(t("updatingArticle"));
     let commit = commitNoteEdits("", [], selected);
     await this.app.vault.process(pending.file, (latest) => {

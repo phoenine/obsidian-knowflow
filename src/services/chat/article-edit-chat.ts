@@ -6,13 +6,35 @@ export type { EditItem, NoteEdit };
 const ARTICLE_EDIT_CHARS = 24000;
 const QUESTION = /[？?]|为什么|怎么|如何|是否|是什么|吗$|对吗|好吗/;
 const LEAD = "^(?:请你?|麻烦你?)?\\s*(?:帮我)?\\s*";
+const POLITE_REQUEST = /^(?:(?:could|can) you\s+|(?:能不能|能否|能|可不可以|可以|方便|是否可以)\s*(?:(?:请你?|帮我)\s*|(?=.+[？?吗么]$)))/i;
+
+export function articleEditInstruction(question: string): string {
+  const text = question.trim();
+  if (!POLITE_REQUEST.test(text)) return text;
+  return text.replace(POLITE_REQUEST, "").replace(/(?:吗|么)?[？?]$|[吗么]$/, "").trim();
+}
+
+/** Return the edit instruction when the user explicitly asks to see it first. */
+export function articleEditPreviewRequest(question: string): string | null {
+  const text = question.trim().replace(/[。！!？?]+$/, "");
+  const prefix = /^(?:先预览(?:一下)?|先给我看看|先给我看|先别写(?:入)?|先不要写(?:入)?|别写入|不要写入)[，,:：\s]+/.exec(text);
+  if (prefix) return text.slice(prefix[0].length).trim() || null;
+  const suffix = /[，,；;\s]+(?:先预览(?:一下)?|先给我看看|先给我看|先别写(?:入)?|先不要写(?:入)?|不要写入|别写入|只(?:给我看|预览))(?:[，,；;\s]+(?:先别写(?:入)?|先不要写(?:入)?|不要写入|别写入))?$/.exec(text);
+  return suffix ? text.slice(0, suffix.index).trim() || null : null;
+}
+
+export function isArticleEditQuestion(question: string): boolean {
+  const text = question.trim();
+  return /^(?:为什么|什么是|请解释|解释一下|请问[，,\s]*(?:为什么|什么是))/.test(text)
+    || /(?:算是|应该是|是不是)(?:一个|个)?代码块(?:吧|吗)?[？?。]?\s*$/.test(text);
+}
 
 /**
  * A direct instruction to change the open article. Questions, freshness checks,
  * and code-format requests stay on their own paths.
  */
 export function isArticleEditRequest(question: string): boolean {
-  const text = question.trim().replace(/[。！!]+$/, "");
+  const text = articleEditInstruction(question).replace(/[。！!]+$/, "");
   if (!text || text.length > 800 || QUESTION.test(text)) return false;
   if (/代码/.test(text) && /格式化|排版|修复|整理|重排|还原|补全|注释/.test(text)) return false;
   if (/过时|时效|outdated/i.test(text) && /检查|check|review/i.test(text)) return false;
@@ -20,16 +42,16 @@ export function isArticleEditRequest(question: string): boolean {
   if (new RegExp(`${LEAD}(?:修改|改写|重写|替换|删掉|删除|去掉|润色|精简)(?:一下|下)?`).test(text)) return true;
   if (new RegExp(`${LEAD}改(?:一下|下)(?:这|本)?(?:篇文章|文章|这段|这一段|这段话|标题|开头|结尾|原文|句子|表述|说法)`).test(text)) return true;
   if (new RegExp(`${LEAD}(?:在|往|给).{0,80}(?:加上|添加|插入|补充)`).test(text)) return true;
+  if (new RegExp(`${LEAD}(?:更新.{1,150}(?:到|进)|(?:补充|添加|插入|写入|写进).{0,150})(?:文章|原文|笔记)`).test(text)) return true;
   if (new RegExp(`${LEAD}(?:优化|调整)(?:一下|下)?(?:这|本)?(?:篇文章|文章|这段|这一段|这段话|标题|开头|结尾|原文)`).test(text)) return true;
-  if (/(?:改成|换成|改为|改短|改写|重写|删掉|润色)/.test(text) && /文章|这段|段落|标题|开头|结尾|原文|笔记|句子/.test(text)) return true;
   if (/^(?:please\s+)?(?:change|replace|rewrite|delete|remove|shorten|edit)\b/i.test(text)) return true;
   return false;
 }
 
-/** A yes to "要把这些内容写进文章吗？". Anything longer goes through intent detection. */
+/** Explicit consent to apply the suggestion attached to the previous turn. */
 export function isEditOfferAccepted(reply: string): boolean {
   const text = reply.trim().replace(/[。！!.]+$/, "");
-  return /^(?:要|好|好的|可以|行|嗯|写|写吧|写进去|写进文章|加上|补充|ok|yes)$/i.test(text);
+  return /^(?:同意|更新(?:原文|文章)?|按建议更新|写(?:吧|进去|进文章)|update(?: the (?:article|note))?|apply(?: the)? suggestions?)$/i.test(text);
 }
 
 /** The model only sees this excerpt. `before` is still matched against the full note. */

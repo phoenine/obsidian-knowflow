@@ -878,6 +878,18 @@ assert.match(retiredText, /\*\*已删除\*\*/);
     assert.deepEqual(bodies[0].response_format, { type: "json_object" });
     assert.equal(bodies[0].stream, true);
     assert.deepEqual(valid.edits, [{ op: "replace", anchor: "旧句。", text: "新句。" }]);
+    const code = "```c\nstruct vb2_queue { int type; };\n```";
+    const codeEdits = [
+      { op: "replace", anchor: "结构体。", text: code },
+      { op: "insert", anchor: "示例。", at: "after", text: code }
+    ];
+    const codeJson = JSON.stringify({ edits: codeEdits });
+    const codeReplies = [codeJson, "```json\n" + codeJson + "\n```"];
+    for (const reply of codeReplies) {
+      answer = reply;
+      const proposal = await editing.proposeArticleEdits("更新代码块", "结构体。\n\n示例。", () => {});
+      assert.deepEqual(proposal.edits, codeEdits);
+    }
     answer = "{\"edits\":[{\"op\":\"insert\",\"text\":\"断开";
     const broken = await editing.proposeArticleEdits("补充", "旧句。", () => {});
     assert.equal(broken.edits, null, "a broken payload becomes no usable edit instead of a raw dump");
